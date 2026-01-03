@@ -7,6 +7,11 @@ import requests
 from flask import Flask, request, jsonify
 from pypdf import PdfReader
 
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -17,6 +22,16 @@ app = Flask(__name__)
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 DOC_EXTRACT_WEBHOOK_SECRET = os.environ.get('DOC_EXTRACT_WEBHOOK_SECRET')
+
+
+
+SMTP_HOST = os.environ["SMTP_HOST"]          # e.g. smtp.gmail.com / smtp.sendgrid.net
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ["SMTP_USER"]
+SMTP_PASS = os.environ["SMTP_PASS"]
+SMTP_FROM = os.environ.get("SMTP_FROM", "support@disputemyhoa.com")
+
+SMTP_SENDER_WEBHOOK_SECRET = os.environ["SMTP_SENDER_WEBHOOK_SECRET"]
 
 # Request timeouts
 TIMEOUT = (5, 60)  # (connect, read)
@@ -267,6 +282,57 @@ def doc_extract_webhook():
             }), 500
         else:
             return jsonify({'error': error_msg}), 500
+
+@app.route("/webhooks/send-receipt-email", methods=["POST"])
+def send_receipt_email():
+    secret = request.headers.get("X-Webhook-Secret")
+    if not secret or secret != SMTP_SENDER_WEBHOOK_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    token = data.get("token")
+    to_email = data.get("email")
+    case_url = data.get("case_url")
+    amount_total = data.get("amount_total")
+    currency = (data.get("currency") or "usd").upper()
+
+    if not token or not to_email or not case_url:
+        return jsonify({"error": "Missing token/email/case_url"}), 400
+
+    subject = "Your Dispute My HOA case is unlocked"
+    dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+
+    text = f"""Hi,
+
+Payment received {dollars} {currency}.
+Your case is unlocked and ready:
+
+{case_url}
+
+If you have questions, reply to this email.
+
+— Dispute My HOA
+"""
+
+    msg = MIMEMultipart()
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(text, "plain"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+
+        return jsonify({"ok": True}), 200
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 if __name__ == '__main__':
     # Validate required environment variables
