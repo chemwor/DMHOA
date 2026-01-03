@@ -147,6 +147,27 @@ def health_check():
     """Health check endpoint."""
     return jsonify({'status': 'healthy'}), 200
 
+
+@app.route('/debug/env', methods=['GET'])
+def debug_env():
+    """Return presence of critical env vars (gated by DOC_EXTRACT_WEBHOOK_SECRET).
+
+    This does NOT return any secret values, only boolean flags indicating whether each
+    required configuration item is set. Intended for quick diagnostics on deployed app.
+    """
+    secret = request.headers.get('X-Webhook-Secret')
+    if not secret or secret != DOC_EXTRACT_WEBHOOK_SECRET:
+        logger.warning("Unauthorized request to /debug/env")
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    keys = [
+        'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'DOC_EXTRACT_WEBHOOK_SECRET',
+        'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'SMTP_SENDER_WEBHOOK_SECRET'
+    ]
+    presence = {k: bool(os.environ.get(k)) for k in keys}
+    logger.info(f"/debug/env requested; presence: { {k: presence[k] for k in presence} }")
+    return jsonify({'env_presence': presence}), 200
+
 @app.route('/webhooks/doc-extract', methods=['POST'])
 def doc_extract_webhook():
     """Main webhook endpoint for document extraction."""
@@ -285,12 +306,25 @@ def doc_extract_webhook():
 @app.route("/webhooks/send-receipt-email", methods=["POST"])
 def send_receipt_email():
     secret = request.headers.get("X-Webhook-Secret")
+    logger.info("Received send-receipt-email webhook")
+
     if not secret or secret != SMTP_SENDER_WEBHOOK_SECRET:
+        logger.warning("Unauthorized send-receipt-email attempt: missing or invalid webhook secret")
         return jsonify({"error": "Unauthorized"}), 401
 
-    # Check if SMTP is configured
-    if not all([SMTP_HOST, SMTP_USER, SMTP_PASS, SMTP_SENDER_WEBHOOK_SECRET]):
-        return jsonify({"error": "SMTP not configured"}), 500
+    # Check which SMTP environment variables are missing so we can diagnose quickly
+    required = {
+        'SMTP_HOST': SMTP_HOST,
+        'SMTP_PORT': SMTP_PORT,
+        'SMTP_USER': SMTP_USER,
+        'SMTP_PASS': SMTP_PASS,
+        'SMTP_SENDER_WEBHOOK_SECRET': SMTP_SENDER_WEBHOOK_SECRET,
+    }
+    missing = [name for name, val in required.items() if not val]
+    if missing:
+        # Log the missing variable names (not their values) for diagnostics
+        logger.error(f"SMTP not configured - missing environment variables: {missing}")
+        return jsonify({"error": "SMTP not configured", "missing": missing}), 500
 
     data = request.get_json() or {}
     token = data.get("token")
@@ -299,23 +333,16 @@ def send_receipt_email():
     amount_total = data.get("amount_total")
     currency = (data.get("currency") or "usd").upper()
 
+    logger.info(f"send-receipt-email payload: token_present={bool(token)}, to_email={to_email}, case_url_present={bool(case_url)}")
+
     if not token or not to_email or not case_url:
+        logger.warning("send-receipt-email missing required fields")
         return jsonify({"error": "Missing token/email/case_url"}), 400
 
     subject = "Your Dispute My HOA case is unlocked"
     dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
 
-    text = f"""Hi,
-
-Payment received {dollars} {currency}.
-Your case is unlocked and ready:
-
-{case_url}
-
-If you have questions, reply to this email.
-
-— Dispute My HOA
-"""
+    text = f"""Hi,\n\nPayment received {dollars} {currency}.\nYour case is unlocked and ready:\n\n{case_url}\n\nIf you have questions, reply to this email.\n\n— Dispute My HOA\n"""
 
     msg = MIMEMultipart()
     msg["From"] = SMTP_FROM
@@ -324,6 +351,7 @@ If you have questions, reply to this email.
     msg.attach(MIMEText(text, "plain"))
 
     try:
+        logger.info(f"Connecting to SMTP {SMTP_HOST}:{SMTP_PORT} to send to {to_email}")
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.ehlo()
             server.starttls()
@@ -331,9 +359,12 @@ If you have questions, reply to this email.
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [to_email], msg.as_string())
 
+        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}...)" )
         return jsonify({"ok": True}), 200
 
     except Exception as e:
+        # Log full exception with traceback to help diagnose mail failures
+        logger.exception("Failed to send receipt email")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
