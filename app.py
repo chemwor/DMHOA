@@ -26,8 +26,9 @@ DOC_EXTRACT_WEBHOOK_SECRET = os.environ.get('DOC_EXTRACT_WEBHOOK_SECRET')
 # SMTP Configuration - Optional, only needed for email functionality
 SMTP_HOST = os.environ.get("SMTP_HOST")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")
-SMTP_PASS = os.environ.get("SMTP_PASS")
+# Clean SMTP credentials to handle non-ASCII characters like non-breaking spaces
+SMTP_USER = (os.environ.get("SMTP_USER") or "").strip().replace('\xa0', ' ')
+SMTP_PASS = (os.environ.get("SMTP_PASS") or "").strip().replace('\xa0', ' ')
 SMTP_FROM = os.environ.get("SMTP_FROM", "support@disputemyhoa.com")
 
 SMTP_SENDER_WEBHOOK_SECRET = os.environ.get("SMTP_SENDER_WEBHOOK_SECRET")
