@@ -23,15 +23,14 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 DOC_EXTRACT_WEBHOOK_SECRET = os.environ.get('DOC_EXTRACT_WEBHOOK_SECRET')
 
-
-
-SMTP_HOST = os.environ["SMTP_HOST"]          # e.g. smtp.gmail.com / smtp.sendgrid.net
+# SMTP Configuration - Optional, only needed for email functionality
+SMTP_HOST = os.environ.get("SMTP_HOST")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ["SMTP_USER"]
-SMTP_PASS = os.environ["SMTP_PASS"]
+SMTP_USER = os.environ.get("SMTP_USER")
+SMTP_PASS = os.environ.get("SMTP_PASS")
 SMTP_FROM = os.environ.get("SMTP_FROM", "support@disputemyhoa.com")
 
-SMTP_SENDER_WEBHOOK_SECRET = os.environ["SMTP_SENDER_WEBHOOK_SECRET"]
+SMTP_SENDER_WEBHOOK_SECRET = os.environ.get("SMTP_SENDER_WEBHOOK_SECRET")
 
 # Request timeouts
 TIMEOUT = (5, 60)  # (connect, read)
@@ -288,6 +287,10 @@ def send_receipt_email():
     secret = request.headers.get("X-Webhook-Secret")
     if not secret or secret != SMTP_SENDER_WEBHOOK_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
+
+    # Check if SMTP is configured
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASS, SMTP_SENDER_WEBHOOK_SECRET]):
+        return jsonify({"error": "SMTP not configured"}), 500
 
     data = request.get_json() or {}
     token = data.get("token")
