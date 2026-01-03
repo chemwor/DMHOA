@@ -333,17 +333,52 @@ def send_receipt_email():
     case_url = data.get("case_url")
     amount_total = data.get("amount_total")
     currency = (data.get("currency") or "usd").upper()
+    customer_name = data.get("customer_name")
+    stripe_session_id = data.get("stripe_session_id")
 
-    logger.info(f"send-receipt-email payload: token_present={bool(token)}, to_email={to_email}, case_url_present={bool(case_url)}")
+    logger.info(f"send-receipt-email payload: token_present={bool(token)}, to_email={to_email}, case_url_present={bool(case_url)}, customer_name={customer_name}")
 
     if not token or not to_email or not case_url:
         logger.warning("send-receipt-email missing required fields")
         return jsonify({"error": "Missing token/email/case_url"}), 400
 
-    subject = "Your Dispute My HOA case is unlocked"
-    dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+    # Personalized greeting
+    greeting = f"Hi {customer_name}," if customer_name else "Hi,"
 
-    text = f"""Hi,\n\nPayment received {dollars} {currency}.\nYour case is unlocked and ready:\n\n{case_url}\n\nIf you have questions, reply to this email.\n\n— Dispute My HOA\n"""
+    # Format payment amount
+    dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+    payment_info = f" for {dollars} {currency}" if dollars else ""
+
+    # Enhanced email content
+    subject = "Payment Confirmed - Your Dispute My HOA Case is Ready"
+
+    text = f"""{greeting}
+
+Thank you for your payment{payment_info}! Your payment has been successfully processed and your Dispute My HOA case is now unlocked and ready for access.
+
+🔓 ACCESS YOUR CASE:
+{case_url}
+
+📧 IMPORTANT: Please save this email for your records. You can use the link above to access your case anytime in the future.
+
+💡 WHAT'S NEXT:
+• Review your case documents and analysis
+• Use the AI-powered insights to understand your dispute
+• Access legal templates and guidance specific to your situation
+• Get step-by-step instructions for resolving your HOA dispute
+
+📞 NEED HELP?
+If you have any questions or need assistance accessing your case, simply reply to this email and we'll get back to you promptly.
+
+Your case token for reference: {token[:8]}...
+{f'Transaction ID: {stripe_session_id}' if stripe_session_id else ''}
+
+Best regards,
+The Dispute My HOA Team
+https://disputemyhoa.com
+
+---
+This email confirms your payment and provides access to your case. Keep this email safe for future reference."""
 
     msg = MIMEMultipart()
     msg["From"] = SMTP_FROM
@@ -353,6 +388,9 @@ def send_receipt_email():
 
     try:
         logger.info(f"Connecting to SMTP {SMTP_HOST}:{SMTP_PORT} to send to {to_email}")
+        logger.info(f"SMTP_USER after cleaning: '{SMTP_USER}' (length: {len(SMTP_USER)})")
+        logger.info(f"SMTP_PASS after cleaning: length={len(SMTP_PASS)}, starts_with='{SMTP_PASS[:4]}...'")
+
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.ehlo()
             server.starttls()
@@ -363,6 +401,10 @@ def send_receipt_email():
         logger.info(f"Receipt email sent to {to_email} (token={token[:8]}...)" )
         return jsonify({"ok": True}), 200
 
+    except smtplib.SMTPAuthenticationError as e:
+        error_msg = f"Gmail authentication failed. For Gmail, you need: 1) Enable 2-Step Verification, 2) Create App Password. Error: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({"ok": False, "error": error_msg}), 500
     except Exception as e:
         # Log full exception with traceback to help diagnose mail failures
         logger.exception("Failed to send receipt email")
