@@ -163,17 +163,52 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
 
         logger.info(f"Processing image: {image.size[0]}x{image.size[1]} pixels, mode: {image.mode}")
 
-        # Use Tesseract OCR to extract text
-        # Using config options for better accuracy
-        custom_config = r'--oem 3 --psm 6 -l eng'
-        extracted_text = pytesseract.image_to_string(image, config=custom_config)
+        # Set TESSDATA_PREFIX if not already set (for Heroku compatibility)
+        if 'TESSDATA_PREFIX' not in os.environ:
+            possible_paths = [
+                '/usr/share/tesseract-ocr/5/tessdata',
+                '/usr/share/tesseract-ocr/tessdata',
+                '/usr/share/tessdata',
+                '/app/.apt/usr/share/tesseract-ocr/5/tessdata',
+                '/app/.apt/usr/share/tesseract-ocr/tessdata'
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    os.environ['TESSDATA_PREFIX'] = path
+                    logger.info(f"Set TESSDATA_PREFIX to: {path}")
+                    break
+            else:
+                logger.warning("Could not find tessdata directory in any expected location")
+
+        # Try multiple OCR configurations for better compatibility
+        configs_to_try = [
+            r'--oem 3 --psm 6 -l eng',  # Standard config
+            r'--oem 1 --psm 6 -l eng',  # Legacy engine
+            r'--oem 2 --psm 6 -l eng',  # Cube engine
+            r'--psm 6',                 # No language specified
+        ]
+
+        extracted_text = ""
+        last_error = None
+
+        for config in configs_to_try:
+            try:
+                logger.info(f"Trying OCR with config: {config}")
+                extracted_text = pytesseract.image_to_string(image, config=config)
+                if extracted_text.strip():  # If we got some text, use it
+                    break
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"OCR config failed: {config}, error: {str(e)}")
+                continue
 
         # Clean up the extracted text
         extracted_text = extracted_text.strip()
         char_count = len(extracted_text)
 
         if char_count == 0:
-            return "", 1, 0, "No text found in image - image may be blank or contain no readable text"
+            error_msg = f"No text found in image - image may be blank or contain no readable text. Last OCR error: {last_error}"
+            return "", 1, 0, error_msg
 
         logger.info(f"OCR extracted {char_count} characters from image {filename}")
         return extracted_text, 1, char_count, None
