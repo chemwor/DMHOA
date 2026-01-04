@@ -270,10 +270,11 @@ def doc_extract_webhook():
         document_id = data['document_id']
         bucket = data['bucket']
         path = data['path']
-        filename = data.get('filename', '')
-        mime_type = data.get('mime_type', '')
+        filename = data.get('filename', '') or ''  # Handle null values
+        mime_type = data.get('mime_type', '') or ''  # Handle null values
 
         logger.info(f"Processing document extraction - ID: {document_id}, Token: {token[:8]}...")
+        logger.info(f"Raw payload data - filename: {repr(filename)}, mime_type: {repr(mime_type)}, path: {path}")
 
         # Check if document is already processed
         current_doc = fetch_document_status(document_id)
@@ -305,17 +306,67 @@ def doc_extract_webhook():
                 'document_id': document_id
             }), 500
 
-        # Determine file type and extract text accordingly
-        logger.info(f"Processing file: {filename}, MIME type: {mime_type}")
+        # Determine file type with multiple fallback strategies
+        logger.info(f"Initial file detection - filename: '{filename}', mime_type: '{mime_type}'")
 
-        if is_pdf_file(filename, mime_type):
+        # Strategy 1: If filename is empty/null, extract from path
+        if not filename or filename.lower() == 'null':
+            filename = os.path.basename(path)
+            logger.info(f"Extracted filename from path: '{filename}'")
+
+        # Strategy 2: If mime_type is empty/null, guess from filename
+        if not mime_type or mime_type.lower() == 'null':
+            if filename:
+                ext = os.path.splitext(filename.lower())[1]
+                mime_type_map = {
+                    '.pdf': 'application/pdf',
+                    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                    '.png': 'image/png', '.gif': 'image/gif',
+                    '.bmp': 'image/bmp', '.tiff': 'image/tiff', '.tif': 'image/tiff',
+                    '.webp': 'image/webp'
+                }
+                mime_type = mime_type_map.get(ext, '')
+                logger.info(f"Guessed MIME type from extension '{ext}': '{mime_type}'")
+
+        # Strategy 3: If still no filename, try extracting just the filename from the full path
+        if not filename:
+            # Handle paths like "dmhoa-docs/case_xxx/original/image.jpg"
+            path_parts = path.split('/')
+            if path_parts:
+                filename = path_parts[-1]  # Get the last part
+                logger.info(f"Extracted filename from path parts: '{filename}'")
+
+        # Strategy 4: If we still have no clear type, try to detect from file content
+        detected_type = None
+        if not (is_pdf_file(filename, mime_type) or is_image_file(filename, mime_type)):
+            # Check file magic bytes as last resort
+            if file_bytes and len(file_bytes) >= 4:
+                # PDF magic bytes
+                if file_bytes.startswith(b'%PDF'):
+                    detected_type = 'pdf'
+                    logger.info("Detected PDF from file magic bytes")
+                # JPEG magic bytes
+                elif file_bytes.startswith(b'\xff\xd8\xff'):
+                    detected_type = 'image'
+                    mime_type = 'image/jpeg'
+                    logger.info("Detected JPEG from file magic bytes")
+                # PNG magic bytes
+                elif file_bytes.startswith(b'\x89PNG'):
+                    detected_type = 'image'
+                    mime_type = 'image/png'
+                    logger.info("Detected PNG from file magic bytes")
+
+        logger.info(f"Final file detection - filename: '{filename}', mime_type: '{mime_type}', detected_type: {detected_type}")
+
+        # Process based on detected file type
+        if is_pdf_file(filename, mime_type) or detected_type == 'pdf':
             logger.info(f"Processing as PDF: {filename}")
             extracted_text, page_count, char_count, extraction_error = extract_pdf_text(file_bytes)
-        elif is_image_file(filename, mime_type):
+        elif is_image_file(filename, mime_type) or detected_type == 'image':
             logger.info(f"Processing as image using OCR: {filename}")
             extracted_text, page_count, char_count, extraction_error = extract_image_text(file_bytes, filename)
         else:
-            error_msg = f"Unsupported file type: {filename} (MIME: {mime_type}). Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
+            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path}'. Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
             logger.warning(error_msg)
             update_document(document_id, token, {
                 'status': 'failed',
