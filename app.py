@@ -11,6 +11,10 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+# Image processing and OCR imports
+from PIL import Image
+import pytesseract
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -143,6 +147,73 @@ def extract_pdf_text(pdf_bytes: bytes) -> Tuple[str, int, int, Optional[str]]:
         logger.error(error_msg)
         return "", 0, 0, error_msg
 
+
+def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int, int, Optional[str]]:
+    """
+    Extract text from image bytes using OCR.
+    Returns: (extracted_text, page_count=1, char_count, error_message)
+    """
+    try:
+        # Open image from bytes
+        image = Image.open(io.BytesIO(image_bytes))
+
+        # Convert to RGB if necessary (some formats like RGBA or P need conversion)
+        if image.mode not in ('RGB', 'L'):
+            image = image.convert('RGB')
+
+        logger.info(f"Processing image: {image.size[0]}x{image.size[1]} pixels, mode: {image.mode}")
+
+        # Use Tesseract OCR to extract text
+        # Using config options for better accuracy
+        custom_config = r'--oem 3 --psm 6 -l eng'
+        extracted_text = pytesseract.image_to_string(image, config=custom_config)
+
+        # Clean up the extracted text
+        extracted_text = extracted_text.strip()
+        char_count = len(extracted_text)
+
+        if char_count == 0:
+            return "", 1, 0, "No text found in image - image may be blank or contain no readable text"
+
+        logger.info(f"OCR extracted {char_count} characters from image {filename}")
+        return extracted_text, 1, char_count, None
+
+    except Exception as e:
+        error_msg = f"Failed to extract text from image: {str(e)}"
+        logger.error(error_msg)
+        return "", 0, 0, error_msg
+
+
+def is_image_file(filename: str, mime_type: str = "") -> bool:
+    """Check if file is a supported image format."""
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp'}
+    image_mime_types = {
+        'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
+        'image/bmp', 'image/tiff', 'image/webp'
+    }
+
+    # Check by file extension
+    if filename:
+        ext = os.path.splitext(filename.lower())[1]
+        if ext in image_extensions:
+            return True
+
+    # Check by MIME type
+    if mime_type and mime_type.lower() in image_mime_types:
+        return True
+
+    return False
+
+
+def is_pdf_file(filename: str, mime_type: str = "") -> bool:
+    """Check if file is a PDF."""
+    if filename and filename.lower().endswith('.pdf'):
+        return True
+    if mime_type and mime_type.lower() == 'application/pdf':
+        return True
+    return False
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
@@ -222,8 +293,8 @@ def doc_extract_webhook():
             }), 500
 
         # Download file from Supabase Storage
-        pdf_bytes = download_storage_object(bucket, path)
-        if pdf_bytes is None:
+        file_bytes = download_storage_object(bucket, path)
+        if file_bytes is None:
             error_msg = f"Failed to download file from {bucket}/{path}"
             update_document(document_id, token, {
                 'status': 'failed',
@@ -234,8 +305,26 @@ def doc_extract_webhook():
                 'document_id': document_id
             }), 500
 
-        # Extract text from PDF
-        extracted_text, page_count, char_count, extraction_error = extract_pdf_text(pdf_bytes)
+        # Determine file type and extract text accordingly
+        logger.info(f"Processing file: {filename}, MIME type: {mime_type}")
+
+        if is_pdf_file(filename, mime_type):
+            logger.info(f"Processing as PDF: {filename}")
+            extracted_text, page_count, char_count, extraction_error = extract_pdf_text(file_bytes)
+        elif is_image_file(filename, mime_type):
+            logger.info(f"Processing as image using OCR: {filename}")
+            extracted_text, page_count, char_count, extraction_error = extract_image_text(file_bytes, filename)
+        else:
+            error_msg = f"Unsupported file type: {filename} (MIME: {mime_type}). Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
+            logger.warning(error_msg)
+            update_document(document_id, token, {
+                'status': 'failed',
+                'error': error_msg[:2000]
+            })
+            return jsonify({
+                'error': error_msg,
+                'document_id': document_id
+            }), 400
 
         if extraction_error:
             # Handle extraction failure
@@ -250,15 +339,16 @@ def doc_extract_webhook():
             }), 500
 
         if char_count == 0:
-            # Handle no text layer case
+            # Handle no text found case
+            error_msg = "No text found in document - document may be blank or contain no readable text"
             update_document(document_id, token, {
                 'status': 'failed',
-                'error': "No text layer found - document may be scanned and require OCR",
+                'error': error_msg,
                 'page_count': page_count,
                 'char_count': 0
             })
             return jsonify({
-                'error': 'No text layer found - document may be scanned and require OCR',
+                'error': error_msg,
                 'document_id': document_id
             }), 500
 
@@ -277,14 +367,16 @@ def doc_extract_webhook():
                 'document_id': document_id
             }), 500
 
-        logger.info(f"Successfully processed document {document_id} - {page_count} pages, {char_count} characters")
+        file_type = "PDF" if is_pdf_file(filename, mime_type) else "image"
+        logger.info(f"Successfully processed {file_type} document {document_id} - {page_count} pages, {char_count} characters")
 
         return jsonify({
-            'message': 'Document processed successfully',
+            'message': f'{file_type} document processed successfully',
             'document_id': document_id,
             'status': 'ready',
             'page_count': page_count,
-            'char_count': char_count
+            'char_count': char_count,
+            'file_type': file_type.lower()
         }), 200
 
     except Exception as e:
@@ -398,7 +490,7 @@ This email confirms your payment and provides access to your case. Keep this ema
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [to_email], msg.as_string())
 
-        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}...)" )
+        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}..." )
         return jsonify({"ok": True}), 200
 
     except smtplib.SMTPAuthenticationError as e:
