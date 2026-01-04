@@ -2,10 +2,13 @@ import os
 import io
 import logging
 from typing import Dict, Any, Optional, Tuple
+import re
+from datetime import datetime
 
 import requests
 from flask import Flask, request, jsonify
 from pypdf import PdfReader
+import stripe
 
 import smtplib
 from email.mime.text import MIMEText
@@ -26,6 +29,15 @@ app = Flask(__name__)
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 DOC_EXTRACT_WEBHOOK_SECRET = os.environ.get('DOC_EXTRACT_WEBHOOK_SECRET')
+
+# Stripe Configuration
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY')
+STRIPE_PRICE_ID = os.environ.get('STRIPE_PRICE_ID')
+SITE_URL = os.environ.get('SITE_URL', 'https://disputemyhoa.com')
+
+# Configure Stripe
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
 # SMTP Configuration - Optional, only needed for email functionality
 SMTP_HOST = os.environ.get("SMTP_HOST")
@@ -615,6 +627,258 @@ This email confirms your payment and provides access to your case. Keep this ema
         logger.exception("Failed to send receipt email")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+def preview_env(name: str, value: str) -> Dict[str, Any]:
+    """Helper: safely preview env values without leaking secrets"""
+    if not value:
+        return {'name': name, 'present': False, 'preview': None, 'length': 0}
+
+    lower = name.lower()
+    is_secret = (
+        'secret' in lower or
+        'service_role' in lower or
+        'key' in lower
+    )
+
+    preview = f"{value[:6]}…({len(value)})" if is_secret else f"{value[:24]}{'…' if len(value) > 24 else ''}"
+
+    return {'name': name, 'present': True, 'preview': preview, 'length': len(value)}
+
+@app.route('/api/create-checkout-session', methods=['POST', 'OPTIONS'])
+def create_checkout_session():
+    """Create Stripe checkout session endpoint (converted from Supabase edge function)"""
+
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'ok': True})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
+    # Add CORS headers to actual response
+    def add_cors_headers(response):
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
+    logger.info('[create-checkout-session] request', extra={
+        'method': request.method,
+        'url': request.url,
+        'has_auth_header': bool(request.headers.get('authorization')),
+        'has_apikey_header': bool(request.headers.get('apikey')),
+        'origin': request.headers.get('origin')
+    })
+
+    try:
+        # Environment variables validation
+        env_report = [
+            preview_env('STRIPE_SECRET_KEY', STRIPE_SECRET_KEY or ''),
+            preview_env('STRIPE_PRICE_ID', STRIPE_PRICE_ID or ''),
+            preview_env('SITE_URL', SITE_URL),
+            preview_env('SUPABASE_URL', SUPABASE_URL or ''),
+            preview_env('SUPABASE_SERVICE_ROLE_KEY', SUPABASE_SERVICE_ROLE_KEY or ''),
+        ]
+        logger.info('[create-checkout-session] env report', extra={'env_report': env_report})
+
+        missing = [v['name'] for v in env_report if not v['present']]
+        if missing:
+            logger.error('[create-checkout-session] missing env vars', extra={'missing': missing})
+            response = jsonify({'error': 'Missing required environment variables', 'missing': missing})
+            return add_cors_headers(response), 500
+
+        logger.info('[create-checkout-session] initializing clients')
+
+        # Parse request body
+        try:
+            body = request.get_json() or {}
+        except Exception:
+            body = {}
+
+        token = body.get('token')
+        email = body.get('email')
+        payload = body.get('payload')
+
+        logger.info('[create-checkout-session] parsed body', extra={
+            'has_token': bool(token),
+            'token_preview': f"{token[:12]}…" if isinstance(token, str) else None,
+            'has_email': bool(email),
+            'email_domain': email.split('@')[1] if isinstance(email, str) and '@' in email else None,
+            'has_payload': bool(payload)
+        })
+
+        if not token or not email:
+            response = jsonify({'error': 'Token and email are required'})
+            return add_cors_headers(response), 400
+
+        # Validate email format
+        email_regex = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+        if not email_regex.match(email):
+            response = jsonify({'error': 'Invalid email format'})
+            return add_cors_headers(response), 400
+
+        # 1) Fetch case (it may not exist yet — that's OK)
+        logger.info('[create-checkout-session] fetching case', extra={'token_preview': f"{token[:12]}…"})
+
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        params = {
+            'token': f'eq.{token}',
+            'select': 'id,token,status,stripe_checkout_session_id'
+        }
+        headers = supabase_headers()
+
+        try:
+            response_data = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+            response_data.raise_for_status()
+            cases = response_data.json()
+            existing_case = cases[0] if cases else None
+        except Exception as e:
+            logger.error('[create-checkout-session] database fetch error', extra={
+                'message': str(e)
+            })
+            response = jsonify({'error': 'Database error'})
+            return add_cors_headers(response), 500
+
+        # 2) Create case if missing
+        if not existing_case:
+            logger.warning('[create-checkout-session] case not found, creating new case',
+                         extra={'token_preview': f"{token[:12]}…"})
+
+            insert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            insert_data = {
+                'token': token,
+                'email': email,
+                'status': 'pending_payment',
+                'unlocked': False,
+                'payload': payload,
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            insert_headers = supabase_headers()
+            insert_headers['Prefer'] = 'return=representation'
+
+            try:
+                insert_response = requests.post(insert_url, headers=insert_headers,
+                                              json=insert_data, timeout=TIMEOUT)
+                insert_response.raise_for_status()
+            except Exception as e:
+                logger.error('[create-checkout-session] failed to create case', extra={
+                    'message': str(e)
+                })
+                response = jsonify({'error': 'Failed to create case'})
+                return add_cors_headers(response), 500
+        else:
+            logger.info('[create-checkout-session] case found', extra={
+                'status': existing_case.get('status'),
+                'has_existing_session': bool(existing_case.get('stripe_checkout_session_id'))
+            })
+
+            # Update existing case
+            logger.info('[create-checkout-session] updating case status -> pending_payment')
+            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            update_params = {'token': f'eq.{token}'}
+            update_data = {
+                'email': email,
+                'payload': payload,
+                'status': 'pending_payment',
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            update_headers = supabase_headers()
+
+            try:
+                update_response = requests.patch(update_url, params=update_params,
+                                               headers=update_headers, json=update_data, timeout=TIMEOUT)
+                update_response.raise_for_status()
+            except Exception as e:
+                logger.error('[create-checkout-session] database update error', extra={
+                    'message': str(e)
+                })
+                response = jsonify({'error': 'Failed to update case'})
+                return add_cors_headers(response), 500
+
+        # 3) Create Stripe Checkout Session
+        logger.info('[create-checkout-session] creating stripe checkout session', extra={
+            'price_id': STRIPE_PRICE_ID,
+            'site_url': SITE_URL,
+            'expires_in_minutes': 30
+        })
+
+        try:
+            session = stripe.checkout.Session.create(
+                mode='payment',
+                line_items=[{'price': STRIPE_PRICE_ID, 'quantity': 1}],
+                success_url=f"{SITE_URL}/case.html?case={token}&session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{SITE_URL}/case-preview.html?case={token}",
+                client_reference_id=token,
+                customer_email=email,
+                metadata={'token': token, 'source': 'dispute-my-hoa'},
+                expires_at=int(datetime.utcnow().timestamp()) + (30 * 60)  # 30 minutes
+            )
+        except Exception as e:
+            logger.error('[create-checkout-session] stripe session creation failed', extra={
+                'message': str(e)
+            })
+            response = jsonify({'error': f'Stripe error: {str(e)}'})
+            return add_cors_headers(response), 500
+
+        logger.info('[create-checkout-session] stripe session created', extra={
+            'session_id': session.id,
+            'has_url': bool(session.url),
+            'amount_total': session.amount_total,
+            'currency': session.currency
+        })
+
+        # 4) Save session id on the case
+        save_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        save_params = {'token': f'eq.{token}'}
+        save_data = {
+            'stripe_checkout_session_id': session.id,
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        save_headers = supabase_headers()
+
+        try:
+            save_response = requests.patch(save_url, params=save_params,
+                                         headers=save_headers, json=save_data, timeout=TIMEOUT)
+            save_response.raise_for_status()
+        except Exception as e:
+            logger.warning('[create-checkout-session] failed saving stripe session id (non-fatal)', extra={
+                'message': str(e)
+            })
+
+        # 5) Log event (non-fatal)
+        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+        event_data = {
+            'token': token,
+            'type': 'checkout_session_created',
+            'data': {
+                'session_id': session.id,
+                'email_domain': email.split('@')[1] if '@' in email else None,
+                'amount': session.amount_total,
+                'currency': session.currency
+            }
+        }
+        event_headers = supabase_headers()
+
+        try:
+            event_response = requests.post(event_url, headers=event_headers,
+                                         json=event_data, timeout=TIMEOUT)
+            event_response.raise_for_status()
+        except Exception as e:
+            logger.warning('[create-checkout-session] failed to insert dmhoa_events (non-fatal)', extra={
+                'message': str(e)
+            })
+
+        response = jsonify({'url': session.url})
+        return add_cors_headers(response), 200
+
+    except Exception as e:
+        logger.error('[create-checkout-session] error', extra={
+            'message': str(e),
+            'name': type(e).__name__
+        })
+        response = jsonify({'error': str(e) or 'Internal server error'})
+        return add_cors_headers(response), 500
 
 if __name__ == '__main__':
     # Validate required environment variables
