@@ -182,25 +182,52 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
 
         # Try multiple OCR configurations for better compatibility
         configs_to_try = [
-            r'--oem 3 --psm 6 -l eng',  # Standard config
-            r'--oem 1 --psm 6 -l eng',  # Legacy engine
-            r'--oem 2 --psm 6 -l eng',  # Cube engine
-            r'--psm 6',                 # No language specified
+            r'--oem 1 --psm 1 -l eng',   # Automatic page segmentation with OSD
+            r'--oem 1 --psm 3 -l eng',   # Fully automatic page segmentation, but no OSD
+            r'--oem 1 --psm 4 -l eng',   # Assume a single column of text of variable sizes
+            r'--oem 1 --psm 6 -l eng',   # Assume a single uniform block of text
+            r'--oem 3 --psm 1 -l eng',   # LSTM with automatic page segmentation
+            r'--oem 3 --psm 3 -l eng',   # LSTM with fully automatic page segmentation
+            r'--oem 3 --psm 6 -l eng',   # LSTM standard config
+            r'--oem 3 --psm 11 -l eng',  # Sparse text - find as much text as possible
+            r'--oem 3 --psm 12 -l eng',  # Sparse text with OSD
+            r'--psm 6',                  # No language specified fallback
         ]
 
         extracted_text = ""
+        best_text = ""
+        best_char_count = 0
         last_error = None
 
         for config in configs_to_try:
             try:
                 logger.info(f"Trying OCR with config: {config}")
-                extracted_text = pytesseract.image_to_string(image, config=config)
-                if extracted_text.strip():  # If we got some text, use it
+                current_text = pytesseract.image_to_string(image, config=config)
+                current_text = current_text.strip()
+                char_count = len(current_text)
+
+                # Keep track of the best result (most text that looks reasonable)
+                if char_count > best_char_count:
+                    # Basic heuristic: prefer results with more alphanumeric content
+                    alphanumeric_ratio = sum(c.isalnum() or c.isspace() for c in current_text) / max(len(current_text), 1)
+                    if alphanumeric_ratio > 0.3:  # At least 30% should be readable characters
+                        best_text = current_text
+                        best_char_count = char_count
+                        logger.info(f"New best result: {char_count} chars, {alphanumeric_ratio:.2f} alphanumeric ratio")
+
+                # If we got a decent amount of readable text, we can stop
+                if char_count > 50 and best_text:
+                    extracted_text = best_text
                     break
+
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"OCR config failed: {config}, error: {str(e)}")
                 continue
+
+        # Use the best result we found
+        if not extracted_text and best_text:
+            extracted_text = best_text
 
         # Clean up the extracted text
         extracted_text = extracted_text.strip()
