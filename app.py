@@ -1015,14 +1015,36 @@ def store_message():
     # Handle CORS preflight
     if request.method == 'OPTIONS':
         response = jsonify({'ok': True})
-        response.headers.add('Access-Control-Allow-Origin', '*')
+        origin = request.headers.get('Origin')
+        allowed_origins = [
+            'https://disputemyhoa.com',
+            'https://dmhoadev.netlify.app',
+            'http://localhost:5173',
+            'http://localhost:3000',
+            'http://127.0.0.1:5173'
+        ]
+        if origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        else:
+            response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
         response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
         return response
 
     # Add CORS headers to actual response
     def add_cors_headers(response):
-        response.headers.add('Access-Control-Allow-Origin', '*')
+        origin = request.headers.get('Origin')
+        allowed_origins = [
+            'https://disputemyhoa.com',
+            'https://dmhoadev.netlify.app',
+            'http://localhost:5173',
+            'http://localhost:3000',
+            'http://127.0.0.1:5173'
+        ]
+        if origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        else:
+            response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
         response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
         return response
@@ -3140,4 +3162,3 @@ def stripe_webhook():
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
         return jsonify({'error': 'Webhook error'}), 500
-
