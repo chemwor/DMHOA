@@ -1835,42 +1835,66 @@ def save_case():
 
         # Now generate the preview automatically
         preview_generated = False
+        preview_error = None
+
         if case_id:
-            logger.info(f'[save-case] Generating preview for case {case_id}')
+            logger.info(f'[save-case] Starting preview generation for case {case_id}')
 
             # Fetch the full case data with payload
             case_data = read_case_by_token(token)
+            logger.info(f'[save-case] Fetched case data: {bool(case_data)}')
 
             if case_data:
                 # Check if preview already exists
                 existing_preview = read_active_preview(case_id)
+                logger.info(f'[save-case] Existing preview check: {bool(existing_preview)}')
 
                 if not existing_preview:
+                    logger.info(f'[save-case] No existing preview, calling generate_preview_with_gpt...')
+
                     # Generate new preview
                     preview_content = generate_preview_with_gpt(case_data)
+                    logger.info(f'[save-case] GPT generation result: {bool(preview_content)}')
 
                     if preview_content:
+                        logger.info(f'[save-case] Preview content generated, calling insert_preview...')
+
                         # Insert preview
                         new_preview = insert_preview(case_id, preview_content)
+                        logger.info(f'[save-case] Insert preview result: {bool(new_preview)}')
+
                         if new_preview:
                             preview_generated = True
-                            logger.info(f'[save-case] Successfully generated preview {new_preview.get("id")} for case {case_id}')
+                            logger.info(f'[save-case] ✅ Successfully generated preview {new_preview.get("id")} for case {case_id}')
                         else:
-                            logger.warning(f'[save-case] Failed to insert preview for case {case_id}')
+                            preview_error = 'Failed to insert preview into database'
+                            logger.error(f'[save-case] ❌ Failed to insert preview for case {case_id}')
                     else:
-                        logger.warning(f'[save-case] Failed to generate preview content for case {case_id}')
+                        preview_error = 'OpenAI API failed to generate preview content'
+                        logger.error(f'[save-case] ❌ Failed to generate preview content for case {case_id}')
                 else:
                     logger.info(f'[save-case] Preview already exists for case {case_id}, skipping generation')
                     preview_generated = True
             else:
-                logger.warning(f'[save-case] Could not fetch case data for preview generation')
+                preview_error = 'Could not fetch case data from database'
+                logger.error(f'[save-case] ❌ Could not fetch case data for preview generation')
+        else:
+            preview_error = 'No case_id available'
+            logger.error(f'[save-case] ❌ No case_id for preview generation')
 
-        response = jsonify({
+        response_data = {
             'ok': True,
             'token': token,
             'case_id': case_id,
             'preview_generated': preview_generated
-        })
+        }
+
+        if preview_error:
+            response_data['preview_error'] = preview_error
+
+        logger.info(f'[save-case] Final response: {response_data}')
+
+        response = jsonify(response_data)
         return add_cors_headers(response), 200
 
     except Exception as e:
