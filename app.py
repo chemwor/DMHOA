@@ -188,6 +188,9 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
             possible_paths = [
                 '/usr/share/tesseract-ocr/5/tessdata',
                 '/usr/share/tesseract-ocr/tessdata',
+                '/usr/share/tesseract-ocr/4.00/tessdata',
+                '/usr/share/tesseract-ocr/4/tessdata',
+                '/usr/share/tesseract-ocr/tessdata',
                 '/usr/share/tessdata',
                 '/app/.apt/usr/share/tesseract-ocr/5/tessdata',
                 '/app/.apt/usr/share/tesseract-ocr/tessdata'
@@ -1494,8 +1497,7 @@ def deactivate_previews(case_id: str) -> bool:
             'case_id': f'eq.{case_id}'
         }
         data = {
-            'is_active': False,
-            'updated_at': datetime.utcnow().isoformat()
+            'is_active': False
         }
         headers = supabase_headers()
         response = requests.patch(url, params=params, headers=headers, json=data, timeout=TIMEOUT)
@@ -1851,24 +1853,25 @@ def save_case():
                 return add_cors_headers(response), 500
 
         # 3) Generate preview HTML (if not already done)
-        logger.info(f'[save-case] Checking for existing preview for case {case_data.get("id")}')
-        active_preview = read_active_preview(token)
+        case_id = case_data.get("id")
+        logger.info(f'[save-case] Checking for existing preview for case {case_id}')
+        active_preview = read_active_preview(case_id)
 
         if not active_preview:
             logger.info(f'[save-case] No active preview found, generating new preview')
             preview_html = generate_preview_html(case_data)
 
             # Deactivate any existing previews
-            deactivate_previews(token)
+            deactivate_previews(case_id)
 
             # Insert new preview
-            new_preview = insert_preview(token, preview_html)
+            new_preview = insert_preview(case_id, preview_html)
 
             if not new_preview:
                 response = jsonify({'error': 'Failed to save preview'})
                 return add_cors_headers(response), 500
 
-            logger.info(f'[save-case] Successfully saved preview {new_preview.get("id")} for case {case_data.get("id")}')
+            logger.info(f'[save-case] Successfully saved preview {new_preview.get("id")} for case {case_id}')
 
         # Return the case data (with token and status)
         response = jsonify({
