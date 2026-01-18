@@ -1693,203 +1693,135 @@ def case_preview():
         return add_cors_headers(response), 500
 
 
-@app.route('/webhooks/stripe', methods=['POST'])
-def stripe_webhook():
-    """Stripe webhook handler for processing payment events (converted from Deno/TypeScript)"""
+@app.route('/api/save-case', methods=['POST', 'OPTIONS'])
+def save_case():
+    """
+    Save case to database and generate preview.
+    This endpoint is called by the frontend to save a new case and generate its preview.
+    """
+
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'ok': True})
+        origin = request.headers.get('Origin')
+        allowed_origins = [
+            'https://disputemyhoa.com',
+            'https://dmhoadev.netlify.app',
+            'http://localhost:5173',
+            'http://localhost:3000',
+            'http://127.0.0.1:5173'
+        ]
+        if origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        else:
+            response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
+    # Add CORS headers to actual response
+    def add_cors_headers(response):
+        origin = request.headers.get('Origin')
+        allowed_origins = [
+            'https://disputemyhoa.com',
+            'https://dmhoadev.netlify.app',
+            'http://localhost:5173',
+            'http://localhost:3000',
+            'http://127.0.0.1:5173'
+        ]
+        if origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        else:
+            response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
     try:
-        # Environment variables validation
-        if not STRIPE_SECRET_KEY or not STRIPE_WEBHOOK_SECRET or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-            logger.error("Missing required environment variables", extra={
-                'hasStripeKey': bool(STRIPE_SECRET_KEY),
-                'hasWebhookSecret': bool(STRIPE_WEBHOOK_SECRET),
-                'hasSupabaseUrl': bool(SUPABASE_URL),
-                'hasServiceRole': bool(SUPABASE_SERVICE_ROLE_KEY),
-            })
-            return jsonify({'error': 'Missing environment variables'}), 500
+        # Validate environment variables
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            response = jsonify({'error': 'Missing env vars'})
+            return add_cors_headers(response), 500
 
-        # Get raw body and signature
-        payload = request.get_data()
-        sig_header = request.headers.get('stripe-signature')
-
-        if not sig_header:
-            return jsonify({'error': 'No signature'}), 400
-
-        # Verify webhook signature
+        # Parse request body
         try:
-            event = stripe.Webhook.construct_event(
-                payload, sig_header, STRIPE_WEBHOOK_SECRET
-            )
-        except ValueError:
-            logger.error("Invalid payload")
-            return jsonify({'error': 'Invalid payload'}), 400
-        except stripe.error.SignatureVerificationError:
-            logger.error("Invalid signature")
-            return jsonify({'error': 'Invalid signature'}), 400
+            body = request.get_json() or {}
+        except Exception:
+            body = {}
 
-        logger.info(f"Webhook event type: {event['type']}")
+        token = (body.get('token') or '').strip()
+        email = (body.get('email') or '').strip()
+        payload = body.get('payload', {})
 
-        if event['type'] == 'checkout.session.completed':
-            session = event['data']['object']
+        if not token:
+            response = jsonify({'error': 'token is required'})
+            return add_cors_headers(response), 400
 
-            # Get token from client_reference_id or metadata
-            token = session.get('client_reference_id') or session.get('metadata', {}).get('token')
-            if not token:
-                return jsonify({'error': 'No token in session'}), 400
+        logger.info(f'[save-case] Request to save case for token: {token[:12]}...')
 
-            # Get email (prefer customer_details.email)
-            email = (
-                session.get('customer_details', {}).get('email') or
-                session.get('customer_email') or
-                None
-            )
+        # Check if case already exists
+        case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        case_params = {
+            'token': f'eq.{token}',
+            'select': 'id,token,status'
+        }
+        case_headers = supabase_headers()
 
-            logger.info(f"Processing payment completion for token: {token}")
+        try:
+            case_response = requests.get(case_url, params=case_params, headers=case_headers, timeout=TIMEOUT)
+            case_response.raise_for_status()
+            cases = case_response.json()
+            existing_case = cases[0] if cases else None
+        except Exception as e:
+            logger.error(f'[save-case] Failed to check existing case: {str(e)}')
+            response = jsonify({'error': 'Database error', 'details': str(e)})
+            return add_cors_headers(response), 500
 
-            # Update case to unlocked
-            case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            case_params = {'token': f'eq.{token}'}
-            case_data = {
-                'unlocked': True,
-                'status': 'paid',
-                'stripe_checkout_session_id': session['id'],
-                'stripe_payment_intent_id': session.get('payment_intent'),
-                'amount_total': session.get('amount_total'),
-                'currency': session.get('currency'),
+        if existing_case:
+            # Update existing case
+            logger.info(f'[save-case] Updating existing case {existing_case.get("id")}')
+            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            update_params = {'token': f'eq.{token}'}
+            update_data = {
+                'email': email,
+                'payload': payload,
                 'updated_at': datetime.utcnow().isoformat()
             }
-            case_headers = supabase_headers()
-            case_headers['Prefer'] = 'return=representation'
+            if email:
+                update_data['email'] = email
+
+            update_headers = supabase_headers()
+            update_headers['Prefer'] = 'return=representation'
 
             try:
-                case_response = requests.patch(case_url, params=case_params, headers=case_headers,
-                                             json=case_data, timeout=TIMEOUT)
-                case_response.raise_for_status()
-                updated_cases = case_response.json()
-
-                if not updated_cases:
-                    logger.error(f"Case not found for token: {token}")
-                    return jsonify({'error': 'Case not found'}), 404
-
-                updated_case = updated_cases[0]
-                logger.info(f"Successfully updated case: {updated_case.get('id')}")
-
-                # Fallback email from DB if Stripe didn't provide it
-                if not email:
-                    email = updated_case.get('email')
-
+                update_response = requests.patch(update_url, params=update_params,
+                                               headers=update_headers, json=update_data, timeout=TIMEOUT)
+                update_response.raise_for_status()
+                updated_cases = update_response.json()
+                case_data = updated_cases[0] if updated_cases else existing_case
             except Exception as e:
-                logger.error(f"Failed to update case: {str(e)}")
-                return jsonify({'error': 'Database update failed'}), 500
+                logger.error(f'[save-case] Failed to update case: {str(e)}')
+                response = jsonify({'error': 'Failed to update case', 'details': str(e)})
+                return add_cors_headers(response), 500
+        else:
+            # Create new case
+            logger.info(f'[save-case] Creating new case for token: {token[:12]}...')
+            insert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            insert_data = {
+                'token': token,
+                'email': email,
+                'status': 'draft',
+                'unlocked': False,
+                'payload': payload,
+                'created_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            insert_headers = supabase_headers()
+            insert_headers['Prefer'] = 'return=representation'
 
-            # --- Send receipt email (non-fatal) ---
-            if not email:
-                logger.warning("No email available (Stripe + DB). Skipping receipt email send.")
-            elif not SMTP_SENDER_WEBHOOK_URL or not SMTP_SENDER_WEBHOOK_SECRET:
-                logger.warning("SMTP sender webhook env vars missing; skipping email send")
-            else:
-                case_url_link = f"{SITE_URL}/case.html?case={token}"
-                email_payload = {
-                    'token': token,
-                    'email': email,
-                    'case_url': case_url_link,
-                    'amount_total': session.get('amount_total'),
-                    'currency': session.get('currency'),
-                    'customer_name': session.get('customer_details', {}).get('name'),
-                    'stripe_session_id': session['id']
-                }
-
-                try:
-                    email_response = requests.post(
-                        SMTP_SENDER_WEBHOOK_URL,
-                        headers={
-                            'Content-Type': 'application/json',
-                            'X-Webhook-Secret': SMTP_SENDER_WEBHOOK_SECRET
-                        },
-                        json=email_payload,
-                        timeout=TIMEOUT
-                    )
-
-                    if not email_response.ok:
-                        error_text = email_response.text
-                        logger.warning(f"Receipt email send failed (non-fatal): {email_response.status_code}, {error_text}")
-
-                        # Log failed email event
-                        try:
-                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                            event_data = {
-                                'token': token,
-                                'type': 'receipt_email_failed',
-                                'data': {
-                                    'status': email_response.status_code,
-                                    'body': error_text[:1000]
-                                }
-                            }
-                            event_headers = supabase_headers()
-                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                        except Exception:
-                            pass  # Best effort
-                    else:
-                        # Log successful email event
-                        try:
-                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                            event_data = {
-                                'token': token,
-                                'type': 'receipt_email_sent',
-                                'data': {
-                                    'to': email,
-                                    'case_url': case_url_link
-                                }
-                            }
-                            event_headers = supabase_headers()
-                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                        except Exception:
-                            pass  # Best effort
-
-                except Exception as e:
-                    logger.warning(f"Receipt email send threw (non-fatal): {str(e)}")
-                    # Log error event
-                    try:
-                        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                        event_data = {
-                            'token': token,
-                            'type': 'receipt_email_failed',
-                            'data': {
-                                'error': str(e)[:1000]
-                            }
-                        }
-                        event_headers = supabase_headers()
-                        requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                    except Exception:
-                        pass  # Best effort
-
-            # Log payment completion event (also non-fatal)
             try:
-                event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                event_data = {
-                    'token': token,
-                    'type': 'payment_completed',
-                    'data': {
-                        'session_id': session['id'],
-                        'payment_intent': session.get('payment_intent'),
-                        'amount_total': session.get('amount_total'),
-                        'currency': session.get('currency'),
-                        'customer_email': session.get('customer_email'),
-                        'payment_status': session.get('payment_status')
-                    }
-                }
-                event_headers = supabase_headers()
-                requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-            except Exception as e:
-                logger.warning(f"Failed to log payment_completed event (non-fatal): {str(e)}")
-
-            logger.info(f"Payment completion processed successfully for token: {token}")
-
-        return jsonify({'received': True}), 200
-
-    except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        return jsonify({'error': 'Webhook error'}), 500
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+                insert_response = requests.post(insert_url, headers=insert_headers,
+                                              json=insert_data, timeout=TIMEOUT)
+                insert_response.raise_for_status()
+                inserted_cases = insert_response.json()
+                case_data = inserted_cases[0] if inserted_cases
