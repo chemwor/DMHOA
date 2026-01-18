@@ -639,6 +639,204 @@ This email confirms your payment and provides access to your case. Keep this ema
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route('/webhooks/stripe', methods=['POST'])
+def stripe_webhook():
+    """Stripe webhook handler for processing payment events (converted from Deno/TypeScript)"""
+    try:
+        # Environment variables validation
+        if not STRIPE_SECRET_KEY or not STRIPE_WEBHOOK_SECRET or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            logger.error("Missing required environment variables", extra={
+                'hasStripeKey': bool(STRIPE_SECRET_KEY),
+                'hasWebhookSecret': bool(STRIPE_WEBHOOK_SECRET),
+                'hasSupabaseUrl': bool(SUPABASE_URL),
+                'hasServiceRole': bool(SUPABASE_SERVICE_ROLE_KEY),
+            })
+            return jsonify({'error': 'Missing environment variables'}), 500
+
+        # Get raw body and signature
+        payload = request.get_data()
+        sig_header = request.headers.get('stripe-signature')
+
+        if not sig_header:
+            return jsonify({'error': 'No signature'}), 400
+
+        # Verify webhook signature
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, STRIPE_WEBHOOK_SECRET
+            )
+        except ValueError:
+            logger.error("Invalid payload")
+            return jsonify({'error': 'Invalid payload'}), 400
+        except stripe.error.SignatureVerificationError:
+            logger.error("Invalid signature")
+            return jsonify({'error': 'Invalid signature'}), 400
+
+        logger.info(f"Webhook event type: {event['type']}")
+
+        if event['type'] == 'checkout.session.completed':
+            session = event['data']['object']
+
+            # Get token from client_reference_id or metadata
+            token = session.get('client_reference_id') or session.get('metadata', {}).get('token')
+            if not token:
+                return jsonify({'error': 'No token in session'}), 400
+
+            # Get email (prefer customer_details.email)
+            email = (
+                session.get('customer_details', {}).get('email') or
+                session.get('customer_email') or
+                None
+            )
+
+            logger.info(f"Processing payment completion for token: {token}")
+
+            # Update case to unlocked
+            case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            case_params = {'token': f'eq.{token}'}
+            case_data = {
+                'unlocked': True,
+                'status': 'paid',
+                'stripe_checkout_session_id': session['id'],
+                'stripe_payment_intent_id': session.get('payment_intent'),
+                'amount_total': session.get('amount_total'),
+                'currency': session.get('currency'),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            case_headers = supabase_headers()
+            case_headers['Prefer'] = 'return=representation'
+
+            try:
+                case_response = requests.patch(case_url, params=case_params, headers=case_headers,
+                                             json=case_data, timeout=TIMEOUT)
+                case_response.raise_for_status()
+                updated_cases = case_response.json()
+
+                if not updated_cases:
+                    logger.error(f"Case not found for token: {token}")
+                    return jsonify({'error': 'Case not found'}), 404
+
+                updated_case = updated_cases[0]
+                logger.info(f"Successfully updated case: {updated_case.get('id')}")
+
+                # Fallback email from DB if Stripe didn't provide it
+                if not email:
+                    email = updated_case.get('email')
+
+            except Exception as e:
+                logger.error(f"Failed to update case: {str(e)}")
+                return jsonify({'error': 'Database update failed'}), 500
+
+            # --- Send receipt email (non-fatal) ---
+            if not email:
+                logger.warning("No email available (Stripe + DB). Skipping receipt email send.")
+            elif not SMTP_SENDER_WEBHOOK_URL or not SMTP_SENDER_WEBHOOK_SECRET:
+                logger.warning("SMTP sender webhook env vars missing; skipping email send")
+            else:
+                case_url_link = f"{SITE_URL}/case.html?case={token}"
+                email_payload = {
+                    'token': token,
+                    'email': email,
+                    'case_url': case_url_link,
+                    'amount_total': session.get('amount_total'),
+                    'currency': session.get('currency'),
+                    'customer_name': session.get('customer_details', {}).get('name'),
+                    'stripe_session_id': session['id']
+                }
+
+                try:
+                    email_response = requests.post(
+                        SMTP_SENDER_WEBHOOK_URL,
+                        headers={
+                            'Content-Type': 'application/json',
+                            'X-Webhook-Secret': SMTP_SENDER_WEBHOOK_SECRET
+                        },
+                        json=email_payload,
+                        timeout=TIMEOUT
+                    )
+
+                    if not email_response.ok:
+                        error_text = email_response.text
+                        logger.warning(f"Receipt email send failed (non-fatal): {email_response.status_code}, {error_text}")
+
+                        # Log failed email event
+                        try:
+                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                            event_data = {
+                                'token': token,
+                                'type': 'receipt_email_failed',
+                                'data': {
+                                    'status': email_response.status_code,
+                                    'body': error_text[:1000]
+                                }
+                            }
+                            event_headers = supabase_headers()
+                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                        except Exception:
+                            pass  # Best effort
+                    else:
+                        # Log successful email event
+                        try:
+                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                            event_data = {
+                                'token': token,
+                                'type': 'receipt_email_sent',
+                                'data': {
+                                    'to': email,
+                                    'case_url': case_url_link
+                                }
+                            }
+                            event_headers = supabase_headers()
+                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                        except Exception:
+                            pass  # Best effort
+
+                except Exception as e:
+                    logger.warning(f"Receipt email send threw (non-fatal): {str(e)}")
+                    # Log error event
+                    try:
+                        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                        event_data = {
+                            'token': token,
+                            'type': 'receipt_email_failed',
+                            'data': {
+                                'error': str(e)[:1000]
+                            }
+                        }
+                        event_headers = supabase_headers()
+                        requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                    except Exception:
+                        pass  # Best effort
+
+            # Log payment completion event (also non-fatal)
+            try:
+                event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                event_data = {
+                    'token': token,
+                    'type': 'payment_completed',
+                    'data': {
+                        'session_id': session['id'],
+                        'payment_intent': session.get('payment_intent'),
+                        'amount_total': session.get('amount_total'),
+                        'currency': session.get('currency'),
+                        'customer_email': session.get('customer_email'),
+                        'payment_status': session.get('payment_status')
+                    }
+                }
+                event_headers = supabase_headers()
+                requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+            except Exception as e:
+                logger.warning(f"Failed to log payment_completed event (non-fatal): {str(e)}")
+
+            logger.info(f"Payment completion processed successfully for token: {token}")
+
+        return jsonify({'received': True}), 200
+
+    except Exception as e:
+        logger.error(f"Stripe webhook error: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 def preview_env(name: str, value: str) -> Dict[str, Any]:
     """Helper: safely preview env values without leaking secrets"""
     if not value:
@@ -1513,78 +1711,162 @@ def deactivate_previews(case_id: str) -> bool:
 
 def generate_preview_with_gpt(case_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Generate structured preview using OpenAI GPT-4 with personalized content"""
-    payload = case_data.get('payload', {})
+    payload = case_data.get('payload', {}) or {}
+    token = case_data.get('token', 'unknown')
+
+    def get_nested_value(obj: Any, path: str) -> Any:
+        """Get a value from a nested dict using dotted path notation"""
+        if not obj or not isinstance(obj, dict):
+            return None
+        parts = path.split('.')
+        current = obj
+        for part in parts:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+            if current is None:
+                return None
+        return current
+
+    def get_first_string(payload: Dict[str, Any], paths: List[str]) -> str:
+        """Try multiple dotted paths and return the first non-empty string"""
+        for path in paths:
+            value = get_nested_value(payload, path)
+            if value and isinstance(value, str) and value.strip():
+                return value.strip()
+        return ''
+
+    def scan_for_text(payload: Dict[str, Any], array_keys: List[str]) -> str:
+        """Scan arrays like 'messages' or 'steps' for any dict containing 'text' or 'value'"""
+        for key in array_keys:
+            arr = payload.get(key)
+            if isinstance(arr, list):
+                for item in arr:
+                    if isinstance(item, dict):
+                        for text_key in ['text', 'value', 'content', 'message', 'description']:
+                            val = item.get(text_key)
+                            if val and isinstance(val, str) and val.strip():
+                                return val.strip()
+        return ''
+
+    # Paths to try for issue_text extraction (in priority order)
+    issue_paths = [
+        "issue_summary",
+        "issue",
+        "description",
+        "notice_text",
+        "hoa_notice_text",
+        "letter_text",
+        "user_input",
+        "summary",
+        "payload.issue_summary",
+        "form.issue_summary",
+        "form.description",
+        "form.notice_text",
+        "answers.issue_summary",
+        "answers.description",
+        "intake.issue_summary",
+        "intake.description",
+        "intake.notice_text",
+        "notice_summary",
+        "violationDetails",
+        "violation_details",
+    ]
+
+    # Try structured paths first
+    issue_text = get_first_string(payload, issue_paths)
+
+    # If still empty, try scanning arrays
+    if not issue_text:
+        issue_text = scan_for_text(payload, ['messages', 'steps', 'inputs', 'responses', 'history'])
 
     # Build normalized case_brief with fallback keys
-    state = payload.get('state') or payload.get('property_state') or 'Not provided'
-    property_type = payload.get('property_type') or payload.get('propertyType') or payload.get('property') or 'property'
-    user_role = payload.get('user_role') or payload.get('userRole') or payload.get('role') or 'homeowner'
+    state_paths = ["state", "property_state", "location.state", "form.state", "answers.state"]
+    state = get_first_string(payload, state_paths) or 'Not provided'
 
-    # Flexible extraction for issue details
-    issue_summary = (
-        payload.get('issue_summary') or
-        payload.get('notice_summary') or
-        payload.get('description') or
-        payload.get('notice_text') or
-        payload.get('violationDetails') or
-        payload.get('violation_details') or
-        ''
-    )
+    property_type_paths = ["property_type", "propertyType", "property", "form.property_type", "answers.property_type"]
+    property_type = get_first_string(payload, property_type_paths) or 'property'
+
+    user_role_paths = ["user_role", "userRole", "role", "form.user_role", "answers.user_role"]
+    user_role = get_first_string(payload, user_role_paths) or 'homeowner'
 
     # Flexible extraction for desired outcome
-    desired_outcome = (
-        payload.get('desired_outcome') or
-        payload.get('desiredOutcome') or
-        payload.get('goal') or
-        payload.get('you_want_to') or
-        ''
-    )
+    desired_outcome_paths = ["desired_outcome", "desiredOutcome", "goal", "you_want_to", "form.desired_outcome", "answers.desired_outcome"]
+    desired_outcome = get_first_string(payload, desired_outcome_paths) or ''
 
     # Additional context fields
-    what_hoa_requested = (
-        payload.get('what_hoa_requested') or
-        payload.get('hoaActions') or
-        payload.get('hoa_actions') or
-        ''
-    )
+    what_hoa_requested_paths = ["what_hoa_requested", "hoaActions", "hoa_actions", "form.what_hoa_requested"]
+    what_hoa_requested = get_first_string(payload, what_hoa_requested_paths) or ''
 
-    deadline = payload.get('deadline') or 'Not provided'
+    deadline_paths = ["deadline", "due_date", "form.deadline", "answers.deadline"]
+    deadline = get_first_string(payload, deadline_paths) or 'Not provided'
 
     # Additional fields for context
-    violation_type = payload.get('violationType') or payload.get('violation_type') or ''
-    your_response = payload.get('yourResponse') or payload.get('your_response') or ''
+    violation_type_paths = ["violationType", "violation_type", "form.violation_type"]
+    violation_type = get_first_string(payload, violation_type_paths) or ''
 
-    # Build the personalized prompt
+    your_response_paths = ["yourResponse", "your_response", "form.your_response"]
+    your_response = get_first_string(payload, your_response_paths) or ''
+
+    # Log what we extracted BEFORE calling OpenAI
+    logger.info("PREVIEW INPUT DEBUG", extra={
+        "token": token,
+        "issue_text_len": len(issue_text or ""),
+        "issue_text_sample": (issue_text or "")[:250],
+        "state": state,
+        "property_type": property_type,
+        "desired_outcome": desired_outcome,
+        "payload_keys": list(payload.keys()) if payload else []
+    })
+
+    # Build the personalized prompt with conditional rules based on issue_text_len
+    issue_text_len = len(issue_text or "")
+
+    if issue_text_len > 0:
+        issue_instructions = f"""CRITICAL - You have actual issue details. You MUST:
+- Reference the specific issue: "{issue_text[:500]}"
+- DO NOT say "details not provided" or "information not available"
+- DO NOT use placeholders like "[specific issue]" or "[your situation]"
+- The what_this_means and response_opening_preview MUST directly reference the user's actual issue
+- Be specific: if they mention "dryer vent", say "dryer vent". If they mention "parking", say "parking"."""
+    else:
+        issue_instructions = """NOTE: No specific issue details were provided. You should:
+- Ask ONE clarifying question to understand their situation better
+- Still provide best-effort general steps for HOA disputes
+- Be honest that more details would help personalize the response"""
+
     prompt = f"""You are an educational HOA dispute assistant (not a lawyer). Generate a conversion-grade preview based on the ACTUAL user inputs below.
 
-CRITICAL INSTRUCTIONS:
-- Use the specific details from issue_summary/notice_text in your response. Do NOT speak generically.
-- NO placeholders like "[specific issue]" or "[your situation]". If a detail is missing, explicitly state what information is needed.
-- Provide concrete recommended steps tied to what the HOA actually requested.
-- The subject line and opening paragraph MUST reference the specific issue described below.
+{issue_instructions}
+
+FORMATTING RULES:
 - Tone: Calm, neutral, professional. Educational + drafting assistance only, NOT legal advice.
 - NO em dashes (—). Use regular dashes or restructure sentences.
+- Be concise but specific to their situation.
 
 USER'S ACTUAL SITUATION:
 - State: {state}
 - Property Type: {property_type}
 - User Role: {user_role}
-- Issue Summary: {issue_summary}
-- What HOA Requested: {what_hoa_requested}
-- Violation Type: {violation_type}
-- User's Response So Far: {your_response}
-- Desired Outcome: {desired_outcome}
+- Issue Summary: {issue_text if issue_text else '(not provided)'}
+- What HOA Requested: {what_hoa_requested if what_hoa_requested else '(not provided)'}
+- Violation Type: {violation_type if violation_type else '(not provided)'}
+- User's Response So Far: {your_response if your_response else '(not provided)'}
+- Desired Outcome: {desired_outcome if desired_outcome else '(not provided)'}
 - Deadline: {deadline}
 
 DELIVERABLES:
-1. Preview Title: Brief, specific to their issue
-2. What This Means: Explain their situation in plain language using THEIR details
+1. Preview Title: Brief, specific to their issue (e.g., "Responding to Dryer Vent Repair Request" not "HOA Dispute")
+2. What This Means: Explain their situation in plain language using THEIR specific details. If they said "dryer vent", mention "dryer vent". Reference the actual issue.
 3. Risk & Timeline: Assess deadline, risk level (Low/Medium/High), explain why based on THEIR situation
 4. Recommended Next Step: ONE clear action with 2-3 specific, actionable bullets (max 3)
-5. Response Opening Preview: Subject line + opening paragraph that references the SPECIFIC issue (e.g., "dryer vent proof", "parking violation", etc.)
+5. Response Opening Preview: Subject line + opening paragraph that references the SPECIFIC issue (e.g., "Re: Dryer Vent Compliance - Proof of Repair Attached")
 6. Unlock Teaser: What they get when they unlock - must be tangible (Full draft email, Certified mail version, Response checklist, Next-step options, Tone guidance)
 
-The preview must read like: "Based on what you shared, your HOA is requesting proof that the dryer vent issue has been resolved..." NOT "Based on your situation, the HOA wants you to address the violation..."
+EXAMPLE of good personalization (if issue is about dryer vent proof):
+- Preview Title: "Responding to HOA Request for Dryer Vent Repair Proof"
+- What This Means: "Your HOA has requested proof that your dryer vent issue has been resolved. This is a compliance verification request..."
+- Subject: "Re: Dryer Vent Repair - Compliance Documentation Attached"
 """
 
     # Define the JSON schema with improved unlock_teaser
@@ -1698,21 +1980,30 @@ def insert_preview(case_id: str, preview_content: Dict[str, Any]) -> Optional[Di
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
 
-        # Verify preview_content is a dict before inserting
-        logger.info("PREVIEW TYPE", extra={"type": str(type(preview_content))})
+        # Verify preview_content is a dict before inserting (not a JSON string)
+        if isinstance(preview_content, str):
+            logger.warning("preview_content was a string, parsing as JSON")
+            preview_content = json.loads(preview_content)
+        
+        logger.info("INSERT PREVIEW DEBUG", extra={
+            "type": str(type(preview_content)),
+            "is_dict": isinstance(preview_content, dict)
+        })
 
         # Generate snippet from structured content
         risk_level = preview_content.get('risk_and_timeline', {}).get('risk_level', 'Unknown')
         next_step = preview_content.get('recommended_next_step', {}).get('headline', 'Review situation')
         preview_snippet = f"{risk_level}: {next_step}"
 
+        # Data dict - preview_content is a Python dict, NOT json.dumps()
+        # requests.post(..., json=data) will serialize the entire payload correctly
         data = {
             'case_id': case_id,
-            'preview_content': preview_content,  # Store as JSONB object (dict)
+            'preview_content': preview_content,  # Python dict -> stored as JSONB
             'preview_snippet': preview_snippet,
             'is_active': True,
             'model': 'gpt-4o-mini',
-            'prompt_version': 'preview_v2_personalized',
+            'prompt_version': 'preview_v3_payload_fix',
             'created_at': datetime.utcnow().isoformat()
         }
 
@@ -1720,6 +2011,7 @@ def insert_preview(case_id: str, preview_content: Dict[str, Any]) -> Optional[Di
         headers['Prefer'] = 'return=representation'
 
         logger.info(f"Inserting preview for case {case_id}: {preview_snippet}")
+        # Using json=data ensures proper serialization for JSONB column
         response = requests.post(url, headers=headers, json=data, timeout=TIMEOUT)
         response.raise_for_status()
 
