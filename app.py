@@ -1512,44 +1512,82 @@ def deactivate_previews(case_id: str) -> bool:
 
 
 def generate_preview_with_gpt(case_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Generate structured preview using OpenAI GPT-4"""
+    """Generate structured preview using OpenAI GPT-4 with personalized content"""
     payload = case_data.get('payload', {})
 
-    # Extract data from payload
-    state = payload.get('state', '')
-    property_type = payload.get('propertyType', 'property')
-    violation_type = payload.get('violationType', '')
-    violation_details = payload.get('violationDetails', '')
-    hoa_actions = payload.get('hoaActions', '')
-    your_response = payload.get('yourResponse', '')
-    desired_outcome = payload.get('desiredOutcome', '')
-    deadline = payload.get('deadline', '')
+    # Build normalized case_brief with fallback keys
+    state = payload.get('state') or payload.get('property_state') or 'Not provided'
+    property_type = payload.get('property_type') or payload.get('propertyType') or payload.get('property') or 'property'
+    user_role = payload.get('user_role') or payload.get('userRole') or payload.get('role') or 'homeowner'
 
-    # Build the prompt
-    prompt = f"""You are an educational HOA dispute assistant (not a lawyer). Generate a preview for this homeowner's situation.
+    # Flexible extraction for issue details
+    issue_summary = (
+        payload.get('issue_summary') or
+        payload.get('notice_summary') or
+        payload.get('description') or
+        payload.get('notice_text') or
+        payload.get('violationDetails') or
+        payload.get('violation_details') or
+        ''
+    )
 
-SITUATION:
+    # Flexible extraction for desired outcome
+    desired_outcome = (
+        payload.get('desired_outcome') or
+        payload.get('desiredOutcome') or
+        payload.get('goal') or
+        payload.get('you_want_to') or
+        ''
+    )
+
+    # Additional context fields
+    what_hoa_requested = (
+        payload.get('what_hoa_requested') or
+        payload.get('hoaActions') or
+        payload.get('hoa_actions') or
+        ''
+    )
+
+    deadline = payload.get('deadline') or 'Not provided'
+
+    # Additional fields for context
+    violation_type = payload.get('violationType') or payload.get('violation_type') or ''
+    your_response = payload.get('yourResponse') or payload.get('your_response') or ''
+
+    # Build the personalized prompt
+    prompt = f"""You are an educational HOA dispute assistant (not a lawyer). Generate a conversion-grade preview based on the ACTUAL user inputs below.
+
+CRITICAL INSTRUCTIONS:
+- Use the specific details from issue_summary/notice_text in your response. Do NOT speak generically.
+- NO placeholders like "[specific issue]" or "[your situation]". If a detail is missing, explicitly state what information is needed.
+- Provide concrete recommended steps tied to what the HOA actually requested.
+- The subject line and opening paragraph MUST reference the specific issue described below.
+- Tone: Calm, neutral, professional. Educational + drafting assistance only, NOT legal advice.
+- NO em dashes (—). Use regular dashes or restructure sentences.
+
+USER'S ACTUAL SITUATION:
 - State: {state}
-- Property: {property_type}
-- Issue: {violation_type}
-- Details: {violation_details}
-- HOA Actions: {hoa_actions}
-- Homeowner Response: {your_response}
+- Property Type: {property_type}
+- User Role: {user_role}
+- Issue Summary: {issue_summary}
+- What HOA Requested: {what_hoa_requested}
+- Violation Type: {violation_type}
+- User's Response So Far: {your_response}
 - Desired Outcome: {desired_outcome}
-- Deadline: {deadline if deadline else 'Not specified'}
+- Deadline: {deadline}
 
-Generate a structured preview that:
-1. Explains what this situation means in plain language
-2. Assesses risk level (Low/Medium/High) and timeline
-3. Recommends one clear next step
-4. Previews how a response might open (subject + 1 paragraph)
-5. Teases what they'll get when unlocked
+DELIVERABLES:
+1. Preview Title: Brief, specific to their issue
+2. What This Means: Explain their situation in plain language using THEIR details
+3. Risk & Timeline: Assess deadline, risk level (Low/Medium/High), explain why based on THEIR situation
+4. Recommended Next Step: ONE clear action with 2-3 specific, actionable bullets (max 3)
+5. Response Opening Preview: Subject line + opening paragraph that references the SPECIFIC issue (e.g., "dryer vent proof", "parking violation", etc.)
+6. Unlock Teaser: What they get when they unlock - must be tangible (Full draft email, Certified mail version, Response checklist, Next-step options, Tone guidance)
 
-Tone: Calm, neutral, professional, educational (not legal advice).
-Style: No em dashes. Direct and concise. Personalized to their specific situation.
+The preview must read like: "Based on what you shared, your HOA is requesting proof that the dryer vent issue has been resolved..." NOT "Based on your situation, the HOA wants you to address the violation..."
 """
 
-    # Define the JSON schema
+    # Define the JSON schema with improved unlock_teaser
     schema = {
         "type": "object",
         "additionalProperties": False,
@@ -1589,7 +1627,7 @@ Style: No em dashes. Direct and concise. Personalized to their specific situatio
                 "additionalProperties": False,
                 "properties": {
                     "headline": {"type": "string"},
-                    "includes": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 5}
+                    "includes": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 5}
                 },
                 "required": ["headline", "includes"]
             }
@@ -1609,7 +1647,7 @@ Style: No em dashes. Direct and concise. Personalized to their specific situatio
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an educational HOA dispute assistant. Provide clear, calm guidance without giving legal advice."
+                    "content": "You are an educational HOA dispute assistant. Provide clear, calm, personalized guidance without giving legal advice. Always use specific details from the user's situation."
                 },
                 {
                     "role": "user",
@@ -1628,7 +1666,7 @@ Style: No em dashes. Direct and concise. Personalized to their specific situatio
             "max_tokens": 1500
         }
 
-        logger.info("Calling OpenAI API to generate preview...")
+        logger.info("Calling OpenAI API to generate personalized preview...")
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers=headers,
@@ -1639,10 +1677,14 @@ Style: No em dashes. Direct and concise. Personalized to their specific situatio
 
         result = response.json()
         content = result['choices'][0]['message']['content']
-        preview_data = json.loads(content)
+        preview_dict = json.loads(content)
 
-        logger.info(f"Successfully generated preview with GPT-4: {preview_data.get('preview_title', 'N/A')}")
-        return preview_data
+        logger.info(f"Successfully generated preview with GPT-4: {preview_dict.get('preview_title', 'N/A')}")
+
+        # Verify it's a dict before returning
+        logger.info("PREVIEW TYPE", extra={"type": str(type(preview_dict))})
+
+        return preview_dict
 
     except Exception as e:
         logger.error(f"Failed to generate preview with GPT-4: {str(e)}")
@@ -1656,6 +1698,9 @@ def insert_preview(case_id: str, preview_content: Dict[str, Any]) -> Optional[Di
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
 
+        # Verify preview_content is a dict before inserting
+        logger.info("PREVIEW TYPE", extra={"type": str(type(preview_content))})
+
         # Generate snippet from structured content
         risk_level = preview_content.get('risk_and_timeline', {}).get('risk_level', 'Unknown')
         next_step = preview_content.get('recommended_next_step', {}).get('headline', 'Review situation')
@@ -1667,7 +1712,7 @@ def insert_preview(case_id: str, preview_content: Dict[str, Any]) -> Optional[Di
             'preview_snippet': preview_snippet,
             'is_active': True,
             'model': 'gpt-4o-mini',
-            'prompt_version': 'preview_v1',
+            'prompt_version': 'preview_v2_personalized',
             'created_at': datetime.utcnow().isoformat()
         }
 
