@@ -1462,12 +1462,12 @@ def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def read_active_preview(case_id: int) -> Optional[Dict[str, Any]]:
+def read_active_preview(token: str) -> Optional[Dict[str, Any]]:
     """Fetch active preview for a case from dmhoa_case_previews"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
         params = {
-            'case_id': f'eq.{case_id}',
+            'token': f'eq.{token}',
             'active': 'eq.true',
             'select': '*',
             'order': 'created_at.desc',
@@ -1480,15 +1480,18 @@ def read_active_preview(case_id: int) -> Optional[Dict[str, Any]]:
         return previews[0] if previews else None
     except Exception as e:
         logger.error(f"Failed to fetch active preview: {str(e)}")
+        # Log response body for debugging
+        if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            logger.error(f"Response body: {e.response.text}")
         return None
 
 
-def deactivate_previews(case_id: int) -> bool:
+def deactivate_previews(token: str) -> bool:
     """Deactivate all existing previews for a case"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
         params = {
-            'case_id': f'eq.{case_id}'
+            'token': f'eq.{token}'
         }
         data = {
             'active': False,
@@ -1500,15 +1503,18 @@ def deactivate_previews(case_id: int) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to deactivate previews: {str(e)}")
+        # Log response body for debugging
+        if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            logger.error(f"Response body: {e.response.text}")
         return False
 
 
-def insert_preview(case_id: int, preview_html: str) -> Optional[Dict[str, Any]]:
+def insert_preview(token: str, preview_html: str) -> Optional[Dict[str, Any]]:
     """Insert new preview into dmhoa_case_previews"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
         data = {
-            'case_id': case_id,
+            'token': token,
             'preview_html': preview_html,
             'active': True,
             'created_at': datetime.utcnow().isoformat(),
@@ -1522,6 +1528,9 @@ def insert_preview(case_id: int, preview_html: str) -> Optional[Dict[str, Any]]:
         return previews[0] if previews else None
     except Exception as e:
         logger.error(f"Failed to insert preview: {str(e)}")
+        # Log response body for debugging
+        if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            logger.error(f"Response body: {e.response.text}")
         return None
 
 
@@ -1649,7 +1658,7 @@ def case_preview():
         case_id = case_data.get('id')
 
         # Check for existing active preview
-        existing_preview = read_active_preview(case_id)
+        existing_preview = read_active_preview(token)
 
         if existing_preview and not force:
             # Return cached preview
@@ -1668,10 +1677,10 @@ def case_preview():
 
         # Deactivate old previews if force=true or creating first preview
         if force or existing_preview:
-            deactivate_previews(case_id)
+            deactivate_previews(token)
 
         # Insert new preview
-        new_preview = insert_preview(case_id, preview_html)
+        new_preview = insert_preview(token, preview_html)
 
         if not new_preview:
             response = jsonify({'error': 'Failed to save preview'})
@@ -1832,17 +1841,17 @@ def save_case():
 
         # 3) Generate preview HTML (if not already done)
         logger.info(f'[save-case] Checking for existing preview for case {case_data.get("id")}')
-        active_preview = read_active_preview(case_data.get('id'))
+        active_preview = read_active_preview(token)
 
         if not active_preview:
             logger.info(f'[save-case] No active preview found, generating new preview')
             preview_html = generate_preview_html(case_data)
 
             # Deactivate any existing previews
-            deactivate_previews(case_data.get('id'))
+            deactivate_previews(token)
 
             # Insert new preview
-            new_preview = insert_preview(case_data.get('id'), preview_html)
+            new_preview = insert_preview(token, preview_html)
 
             if not new_preview:
                 response = jsonify({'error': 'Failed to save preview'})
