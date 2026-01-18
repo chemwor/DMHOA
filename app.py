@@ -1824,4 +1824,44 @@ def save_case():
                                               json=insert_data, timeout=TIMEOUT)
                 insert_response.raise_for_status()
                 inserted_cases = insert_response.json()
-                case_data = inserted_cases[0] if inserted_cases
+                case_data = inserted_cases[0] if inserted_cases else None
+            except Exception as e:
+                logger.error(f'[save-case] Failed to create case: {str(e)}')
+                response = jsonify({'error': 'Failed to create case', 'details': str(e)})
+                return add_cors_headers(response), 500
+
+        # 3) Generate preview HTML (if not already done)
+        logger.info(f'[save-case] Checking for existing preview for case {case_data.get("id")}')
+        active_preview = read_active_preview(case_data.get('id'))
+
+        if not active_preview:
+            logger.info(f'[save-case] No active preview found, generating new preview')
+            preview_html = generate_preview_html(case_data)
+
+            # Deactivate any existing previews
+            deactivate_previews(case_data.get('id'))
+
+            # Insert new preview
+            new_preview = insert_preview(case_data.get('id'), preview_html)
+
+            if not new_preview:
+                response = jsonify({'error': 'Failed to save preview'})
+                return add_cors_headers(response), 500
+
+            logger.info(f'[save-case] Successfully saved preview {new_preview.get("id")} for case {case_data.get("id")}')
+
+        # Return the case data (with token and status)
+        response = jsonify({
+            'ok': True,
+            'case': {
+                'token': case_data.get('token'),
+                'status': case_data.get('status'),
+                'id': case_data.get('id')
+            }
+        })
+        return add_cors_headers(response), 200
+
+    except Exception as e:
+        logger.error(f'[save-case] error: {str(e)}')
+        response = jsonify({'error': str(e) or 'server error'})
+        return add_cors_headers(response), 500
