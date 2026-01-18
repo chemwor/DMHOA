@@ -1689,6 +1689,159 @@ def insert_preview(case_id: str, preview_content: Dict[str, Any]) -> Optional[Di
         return None
 
 
+@app.route('/api/save-case', methods=['POST', 'OPTIONS'])
+def save_case():
+    """
+    Save or update a case in dmhoa_cases table.
+    Called by the frontend when the user completes the case form.
+
+    Request body:
+    {
+        "token": "unique-case-token",
+        "email": "user@example.com",
+        "payload": {...}  // case data
+    }
+
+    Response:
+    {
+        "ok": true,
+        "token": "...",
+        "case_id": "..."
+    }
+    """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response, 200
+
+    # Add CORS headers to actual response
+    def add_cors_headers(response):
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
+    try:
+        # Validate environment variables
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            response = jsonify({'error': 'Missing required environment variables'})
+            return add_cors_headers(response), 500
+
+        # Parse request body
+        try:
+            body = request.get_json() or {}
+        except Exception:
+            body = {}
+
+        token = (body.get('token') or '').strip()
+        email = (body.get('email') or '').strip()
+        payload = body.get('payload')
+
+        if not token:
+            response = jsonify({'error': 'token is required'})
+            return add_cors_headers(response), 400
+
+        logger.info(f'[save-case] Request for token: {token[:12]}..., has_email: {bool(email)}, has_payload: {bool(payload)}')
+
+        # Check if case already exists
+        case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        case_params = {
+            'token': f'eq.{token}',
+            'select': 'id,token,status'
+        }
+        case_headers = supabase_headers()
+
+        try:
+            case_response = requests.get(case_url, params=case_params, headers=case_headers, timeout=TIMEOUT)
+            case_response.raise_for_status()
+            cases = case_response.json()
+            existing_case = cases[0] if cases else None
+        except Exception as e:
+            logger.error(f'[save-case] Failed to check existing case: {str(e)}')
+            response = jsonify({'error': 'Database error', 'details': str(e)})
+            return add_cors_headers(response), 500
+
+        if existing_case:
+            # Update existing case
+            logger.info(f'[save-case] Updating existing case {existing_case.get("id")}')
+
+            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            update_params = {'token': f'eq.{token}'}
+            update_data = {
+                'payload': payload,
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            # Only update email if provided
+            if email:
+                update_data['email'] = email
+
+            update_headers = supabase_headers()
+            update_headers['Prefer'] = 'return=representation'
+
+            try:
+                update_response = requests.patch(update_url, params=update_params,
+                                                headers=update_headers, json=update_data, timeout=TIMEOUT)
+                update_response.raise_for_status()
+                updated_cases = update_response.json()
+                updated_case = updated_cases[0] if updated_cases else None
+
+                response = jsonify({
+                    'ok': True,
+                    'token': token,
+                    'case_id': updated_case.get('id') if updated_case else existing_case.get('id')
+                })
+                return add_cors_headers(response), 200
+
+            except Exception as e:
+                logger.error(f'[save-case] Failed to update case: {str(e)}')
+                response = jsonify({'error': 'Failed to update case', 'details': str(e)})
+                return add_cors_headers(response), 500
+        else:
+            # Insert new case
+            logger.info(f'[save-case] Creating new case with token {token[:12]}...')
+
+            insert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            insert_data = {
+                'token': token,
+                'email': email or None,
+                'payload': payload,
+                'status': 'draft',
+                'unlocked': False,
+                'created_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            insert_headers = supabase_headers()
+            insert_headers['Prefer'] = 'return=representation'
+
+            try:
+                insert_response = requests.post(insert_url, headers=insert_headers,
+                                               json=insert_data, timeout=TIMEOUT)
+                insert_response.raise_for_status()
+                inserted_cases = insert_response.json()
+                inserted_case = inserted_cases[0] if inserted_cases else None
+
+                response = jsonify({
+                    'ok': True,
+                    'token': token,
+                    'case_id': inserted_case.get('id') if inserted_case else None
+                })
+                return add_cors_headers(response), 200
+
+            except Exception as e:
+                logger.error(f'[save-case] Failed to insert case: {str(e)}')
+                response = jsonify({'error': 'Failed to create case', 'details': str(e)})
+                return add_cors_headers(response), 500
+
+    except Exception as e:
+        logger.error(f'[save-case] Unexpected error: {str(e)}')
+        response = jsonify({'error': 'Internal server error', 'details': str(e)})
+        return add_cors_headers(response), 500
+
+
 @app.route('/api/case-preview', methods=['POST', 'OPTIONS'])
 def case_preview():
     """
