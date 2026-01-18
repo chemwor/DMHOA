@@ -1879,4 +1879,17 @@ def stripe_webhook():
                 }
                 event_headers = supabase_headers()
                 requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-            def
+            except Exception as e:
+                logger.warning(f"Failed to log payment_completed event (non-fatal): {str(e)}")
+
+            logger.info(f"Payment completion processed successfully for token: {token}")
+
+        return jsonify({'received': True}), 200
+
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        return jsonify({'error': 'Webhook error'}), 500
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
