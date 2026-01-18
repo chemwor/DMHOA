@@ -1462,13 +1462,13 @@ def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def read_active_preview(token: str) -> Optional[Dict[str, Any]]:
+def read_active_preview(case_id: str) -> Optional[Dict[str, Any]]:
     """Fetch active preview for a case from dmhoa_case_previews"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
         params = {
-            'token': f'eq.{token}',
-            'active': 'eq.true',
+            'case_id': f'eq.{case_id}',
+            'is_active': 'eq.true',
             'select': '*',
             'order': 'created_at.desc',
             'limit': '1'
@@ -1486,15 +1486,15 @@ def read_active_preview(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def deactivate_previews(token: str) -> bool:
+def deactivate_previews(case_id: str) -> bool:
     """Deactivate all existing previews for a case"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
         params = {
-            'token': f'eq.{token}'
+            'case_id': f'eq.{case_id}'
         }
         data = {
-            'active': False,
+            'is_active': False,
             'updated_at': datetime.utcnow().isoformat()
         }
         headers = supabase_headers()
@@ -1509,16 +1509,27 @@ def deactivate_previews(token: str) -> bool:
         return False
 
 
-def insert_preview(token: str, preview_html: str) -> Optional[Dict[str, Any]]:
+def insert_preview(case_id: str, preview_html: str) -> Optional[Dict[str, Any]]:
     """Insert new preview into dmhoa_case_previews"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+
+        # Convert HTML preview to JSONB format expected by the database
+        preview_content = {
+            'html': preview_html,
+            'generated_at': datetime.utcnow().isoformat()
+        }
+
+        # Extract snippet (first 500 characters of text, stripped of HTML)
+        import re
+        preview_snippet = re.sub(r'<[^>]+>', '', preview_html)[:500]
+
         data = {
-            'token': token,
-            'preview_html': preview_html,
-            'active': True,
-            'created_at': datetime.utcnow().isoformat(),
-            'updated_at': datetime.utcnow().isoformat()
+            'case_id': case_id,
+            'preview_content': preview_content,
+            'preview_snippet': preview_snippet,
+            'is_active': True,
+            'created_at': datetime.utcnow().isoformat()
         }
         headers = supabase_headers()
         headers['Prefer'] = 'return=representation'
