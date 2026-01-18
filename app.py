@@ -1443,6 +1443,319 @@ def doc_extract_start():
         return add_cors_headers(response), 500
 
 
+# Helpers for case preview feature
+def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
+    """Read case row by token (select id, token, unlocked, payload, updated_at)"""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        params = {
+            'token': f'eq.{token}',
+            'select': 'id,token,unlocked,payload,updated_at'
+        }
+        headers = supabase_headers()
+        resp = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.error('read_case_by_token error', extra={'error': str(e)})
+        return None
+
+
+def read_active_preview(case_id: str) -> Optional[Dict[str, Any]]:
+    """Return the most recent active preview for a case_id if any"""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        params = {
+            'case_id': f'eq.{case_id}',
+            'is_active': 'eq.true',
+            'select': 'id,case_id,preview_content,preview_snippet,model,prompt_version,token_input,token_output,cost_usd,latency_ms,created_at',
+            'order': 'created_at.desc',
+            'limit': '1'
+        }
+        headers = supabase_headers()
+        resp = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.error('read_active_preview error', extra={'error': str(e)})
+        return None
+
+
+def deactivate_previews(case_id: str) -> bool:
+    """Mark existing active previews for a case_id as inactive"""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        params = {'case_id': f'eq.{case_id}', 'is_active': 'eq.true'}
+        headers = supabase_headers()
+        update_data = {'is_active': False}
+        resp = requests.patch(url, params=params, headers=headers, json=update_data, timeout=TIMEOUT)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error('deactivate_previews error', extra={'error': str(e)})
+        return False
+
+
+def insert_preview(case_id: str, preview_content: Dict[str, Any], preview_snippet: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Insert a new preview row into dmhoa_case_previews and return the inserted row (representation)
+
+    meta keys: model, prompt_version, token_input, token_output, cost_usd, latency_ms
+    """
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        insert_data = {
+            'case_id': case_id,
+            'preview_content': preview_content,
+            'preview_snippet': preview_snippet,
+            'model': meta.get('model'),
+            'prompt_version': meta.get('prompt_version'),
+            'token_input': meta.get('token_input'),
+            'token_output': meta.get('token_output'),
+            'cost_usd': meta.get('cost_usd'),
+            'latency_ms': meta.get('latency_ms'),
+            'is_active': True,
+            'created_at': datetime.utcnow().isoformat()
+        }
+
+        resp = requests.post(url, headers=headers, json=insert_data, timeout=TIMEOUT)
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.error('insert_preview error', extra={'error': str(e)})
+        return None
+
+
+@app.route('/api/case-preview', methods=['POST', 'OPTIONS'])
+def case_preview():
+    """Generate or return a cached personalized preview for a case token
+
+    Frontend flow (intended):
+    1) Frontend calls /api/save-case to create/update the case and receive the token
+    2) Frontend calls /api/case-preview with {token, force:false} to generate and store a preview before payment
+    3) Preview page fetches from /api/case-preview (cached) to render the preview using the stored record
+    """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'ok': True})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
+    def add_cors_headers(response):
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+        return response
+
+    try:
+        # Validate env
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not OPENAI_API_KEY:
+            response = jsonify({'error': 'Missing env vars'})
+            return add_cors_headers(response), 500
+
+        try:
+            body = request.get_json() or {}
+        except Exception:
+            body = {}
+
+        token = (body.get('token') or '').strip()
+        force = bool(body.get('force'))
+
+        if not token:
+            response = jsonify({'error': 'token is required'})
+            return add_cors_headers(response), 400
+
+        if not str(token).startswith('case_'):
+            response = jsonify({'error': 'Invalid token format'})
+            return add_cors_headers(response), 400
+
+        # 1) Fetch case
+        case_row = read_case_by_token(token)
+        if not case_row:
+            response = jsonify({'error': 'Case not found'})
+            return add_cors_headers(response), 404
+
+        case_id = case_row.get('id')
+
+        # 2) Check for existing active preview
+        existing = read_active_preview(case_id)
+        if existing and not force:
+            logger.info('Returning cached preview', extra={'case_id': case_id, 'preview_id': existing.get('id')})
+            resp = jsonify({'ok': True, 'cached': True, 'preview': existing.get('preview_content')})
+            return add_cors_headers(resp), 200
+
+        # If forcing, deactivate old previews
+        if force and existing:
+            deactivate_previews(case_id)
+
+        # 3) Build prompt + schema
+        payload = case_row.get('payload') or {}
+
+        system_prompt = (
+            "You generate a short, personalized preview for a homeowner's HOA notice."
+            " This is educational drafting assistance only, not legal advice. Be calm, neutral, and professional."
+            " Do NOT say 'I am an AI' or provide legal conclusions. Avoid em-dashes. Keep concise (total ~250-400 words)."
+        )
+
+        user_content = (
+            f"Case payload JSON:\n{json.dumps(payload)}\n\n"
+            "Produce a STRICT JSON object matching the provided JSON Schema. Be concise and personalize using fields from the payload."
+            " Emphasize educational tone and avoid legal advice language."
+        )
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "preview_title": {"type": "string"},
+                "what_this_means": {"type": "string"},
+                "risk_and_timeline": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "deadline": {"type": "string"},
+                        "risk_level": {"type": "string", "enum": ["Low", "Low-Medium", "Medium", "Medium-High", "High"]},
+                        "why": {"type": "string"}
+                    },
+                    "required": ["deadline", "risk_level", "why"]
+                },
+                "recommended_next_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "headline": {"type": "string"},
+                        "bullets": {"type": "array", "items": {"type": "string"}, "maxItems": 3}
+                    },
+                    "required": ["headline", "bullets"]
+                },
+                "response_opening_preview": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "opening_paragraph": {"type": "string"}
+                    },
+                    "required": ["subject", "opening_paragraph"]
+                },
+                "unlock_teaser": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "headline": {"type": "string"},
+                        "includes": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+                    },
+                    "required": ["headline", "includes"]
+                }
+            },
+            "required": ["preview_title", "what_this_means", "risk_and_timeline", "recommended_next_step", "response_opening_preview", "unlock_teaser"]
+        }
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        openai_payload = {
+            "model": "gpt-4o-mini",
+            "input": messages,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "dmhoa_case_preview",
+                    "strict": True,
+                    "schema": schema
+                }
+            }
+        }
+
+        # 4) Call OpenAI and measure latency
+        start_t = time.time()
+        try:
+            openai_resp = requests.post(
+                'https://api.openai.com/v1/responses',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json=openai_payload,
+                timeout=(10, 120)
+            )
+            latency_ms = int((time.time() - start_t) * 1000)
+
+            if not openai_resp.ok:
+                error_text = openai_resp.text
+                logger.error('OpenAI preview call failed', extra={'status': openai_resp.status_code, 'error': error_text})
+                response = jsonify({'error': 'OpenAI call failed', 'details': error_text})
+                return add_cors_headers(response), 500
+
+            openai_json = openai_resp.json()
+            structured = extract_structured_result(openai_json)
+
+            if not structured:
+                logger.error('OpenAI preview did not return structured JSON', extra={'openai': openai_json})
+                response = jsonify({'error': 'OpenAI returned unexpected format'})
+                return add_cors_headers(response), 500
+
+            # Build preview_snippet
+            try:
+                rl = structured.get('risk_and_timeline', {}).get('risk_level', 'Unknown')
+            except Exception:
+                rl = 'Unknown'
+            try:
+                headline = structured.get('recommended_next_step', {}).get('headline', '')
+            except Exception:
+                headline = ''
+            preview_snippet = f"{rl}: {headline}".strip()
+
+            # Extract token usage if present
+            usage = openai_json.get('usage') or {}
+            token_input = usage.get('input_tokens') if isinstance(usage.get('input_tokens'), int) else usage.get('prompt_tokens') if isinstance(usage.get('prompt_tokens'), int) else None
+            token_output = usage.get('output_tokens') if isinstance(usage.get('output_tokens'), int) else usage.get('completion_tokens') if isinstance(usage.get('completion_tokens'), int) else None
+
+            meta = {
+                'model': 'gpt-4o-mini',
+                'prompt_version': 'v1_preview_basic',
+                'token_input': token_input,
+                'token_output': token_output,
+                'cost_usd': None,
+                'latency_ms': latency_ms
+            }
+
+            # 5) Persist preview (deactivate old then insert)
+            try:
+                deactivate_previews(case_id)
+            except Exception:
+                logger.warning('Failed to deactivate old previews (non-fatal)')
+
+            inserted = insert_preview(case_id, structured, preview_snippet, meta)
+            if not inserted:
+                logger.error('Failed to persist preview')
+                response = jsonify({'error': 'Failed to save preview'})
+                return add_cors_headers(response), 500
+
+            logger.info('Preview generated and saved', extra={'case_id': case_id, 'preview_id': inserted.get('id')})
+
+            resp = jsonify({'ok': True, 'cached': False, 'preview': structured})
+            return add_cors_headers(resp), 200
+
+        except Exception as e:
+            logger.error('OpenAI preview error', extra={'error': str(e)})
+            response = jsonify({'error': 'OpenAI API error', 'details': str(e)})
+            return add_cors_headers(response), 500
+
+    except Exception as e:
+        logger.exception('case-preview error')
+        response = jsonify({'error': str(e) or 'server error'})
+        return add_cors_headers(response), 500
+
+
 @app.route('/api/case-analysis', methods=['POST', 'OPTIONS'])
 def case_analysis():
     """Generate HOA case analysis using OpenAI (converted from Deno/TypeScript code)"""
@@ -2088,174 +2401,6 @@ def read_outputs():
         return add_cors_headers(response), 500
 
 
-def trigger_document_extraction_async(token: str, payload: dict):
-    """
-    Async function to trigger document extraction without blocking the save operation
-    """
-    try:
-        logger.info(f"Checking if document extraction is needed for token: {token}")
-
-        # Check if there are uploaded documents that need processing
-        needs_extraction = (
-            (payload.get('pastedText') or (payload.get('additional_docs') and len(payload.get('additional_docs', [])) > 0)) and
-            payload.get('extract_status') == 'pending'
-        )
-
-        if not needs_extraction:
-            logger.info("No document extraction needed")
-            return
-
-        logger.info("Document extraction needed, preparing to trigger...")
-
-        # Get environment variables for doc-extract-start
-        if not DOC_EXTRACT_WEBHOOK_SECRET:
-            logger.warning("DOC_EXTRACT_WEBHOOK_SECRET not configured, skipping document extraction")
-
-            # Update case with error status
-            try:
-                url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-                params = {'token': f'eq.{token}'}
-                headers = supabase_headers()
-
-                updated_payload = {
-                    **payload,
-                    'extract_status': 'not_configured',
-                    'extract_error': 'DOC_EXTRACT_WEBHOOK_SECRET environment variable not set'
-                }
-
-                requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
-            except Exception as e:
-                logger.error(f"Failed to update case with config error: {str(e)}")
-            return
-
-        # Determine what to extract
-        storage_path = None
-        filename = None
-        mime_type = None
-
-        if payload.get('pastedText'):
-            storage_path = f"virtual/{token}/pasted_text.txt"
-            filename = "pasted_text.txt"
-            mime_type = "text/plain"
-            logger.info("Processing pasted text as virtual document")
-        elif payload.get('additional_docs') and len(payload.get('additional_docs', [])) > 0:
-            first_doc = payload['additional_docs'][0]
-            storage_path = first_doc.get('storage_path') or first_doc.get('path')
-            filename = first_doc.get('filename') or first_doc.get('name')
-            mime_type = first_doc.get('mime_type') or first_doc.get('type')
-            logger.info(f"Processing uploaded document: {filename}")
-
-        if not storage_path:
-            logger.warning("No storage path found for document extraction")
-            return
-
-        # Call doc-extract-start function
-        logger.info("Calling doc-extract-start function...")
-        doc_extract_url = f"{request.url_root.rstrip('/')}/api/doc-extract-start"
-
-        extract_response = requests.post(
-            doc_extract_url,
-            headers={
-                'Content-Type': 'application/json',
-                'x-doc-secret': DOC_EXTRACT_WEBHOOK_SECRET,
-                'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}'
-            },
-            json={
-                'token': token,
-                'storage_path': storage_path,
-                'filename': filename,
-                'mime_type': mime_type
-            },
-            timeout=TIMEOUT
-        )
-
-        logger.info(f"Extract response status: {extract_response.status_code}")
-
-        if extract_response.ok:
-            logger.info("Document extraction triggered successfully")
-
-            try:
-                url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-                params = {'token': f'eq.{token}'}
-                headers = supabase_headers()
-
-                updated_payload = {
-                    **payload,
-                    'extract_status': 'triggered',
-                    'extract_triggered_at': datetime.utcnow().isoformat()
-                }
-
-                requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
-            except Exception as e:
-                logger.error(f"Failed to update case status after triggering: {str(e)}")
-            return
-
-        if extract_response.status_code == 404:
-            logger.warning("doc-extract-start function not deployed yet, skipping")
-            try:
-                url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-                params = {'token': f'eq.{token}'}
-                headers = supabase_headers()
-
-                updated_payload = {
-                    **payload,
-                    'extract_status': 'not_deployed',
-                    'extract_error': 'Document extraction function not yet deployed'
-                }
-
-                requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
-            except Exception as e:
-                logger.error(f"Failed to update case with not deployed error: {str(e)}")
-            return
-
-        if extract_response.status_code == 401:
-            logger.error("Unauthorized - check DOC_EXTRACT_WEBHOOK_SECRET")
-            error_text = extract_response.text if hasattr(extract_response, 'text') else ""
-            try:
-                url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-                params = {'token': f'eq.{token}'}
-                headers = supabase_headers()
-
-                updated_payload = {
-                    **payload,
-                    'extract_status': 'auth_failed',
-                    'extract_error': 'Authentication failed - check webhook secret configuration',
-                    'extract_error_detail': error_text[:500] if error_text else ""
-                }
-
-                requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
-            except Exception as e:
-                logger.error(f"Failed to update case with auth error: {str(e)}")
-            return
-
-        # Other failure
-        error_text = extract_response.text if hasattr(extract_response, 'text') else ""
-        logger.error(f"Failed to trigger document extraction: {extract_response.status_code}, {error_text}")
-
-        try:
-            url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            params = {'token': f'eq.{token}'}
-            headers = supabase_headers()
-
-            updated_payload = {
-                **payload,
-                'extract_status': 'failed',
-                'extract_error': f"HTTP {extract_response.status_code}: {error_text}"[:500]
-            }
-
-            requests.patch(url, params=params, headers=headers,
-                         json={'payload': updated_payload}, timeout=TIMEOUT)
-        except Exception as e:
-            logger.error(f"Failed to update case with failure: {str(e)}")
-
-    except Exception as error:
-        logger.error(f"Error in trigger_document_extraction_async: {str(error)}")
-
-
 @app.route('/api/save-case', methods=['POST', 'OPTIONS'])
 def save_case():
     """Save case endpoint (converted from Deno/TypeScript save-case function)"""
@@ -2409,14 +2554,6 @@ def save_case():
         logger.error(f"Save case error: {str(e)}")
         response = jsonify({'error': str(e) or 'Internal server error'})
         return add_cors_headers(response), 500
-
-
-def clamp_text(s: str, max_length: int = 1200) -> str:
-    """Clamp text to maximum length"""
-    text = str(s or "").strip()
-    if not text:
-        return ""
-    return text[:max_length] if len(text) > max_length else text
 
 
 @app.route('/api/send-message', methods=['POST', 'OPTIONS'])
