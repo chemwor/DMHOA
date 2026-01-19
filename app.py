@@ -841,33 +841,94 @@ def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple
             logger.warning("OpenAI API key not configured")
             return "Preview generation unavailable - OpenAI not configured", {}, 0
 
-        # Extract case information
-        hoa_name = case_data.get('hoa_name', 'Unknown HOA')
-        violation_type = case_data.get('violation_type', 'Unknown violation')
-        case_description = case_data.get('case_description', 'No description provided')
+        # Extract case information from payload first, then fallback to top level
+        payload = case_data.get('payload', {})
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except:
+                payload = {}
+
+        # Try payload first, then case_data directly
+        hoa_name = (payload.get('hoaName') or
+                   payload.get('hoa_name') or
+                   case_data.get('hoa_name') or
+                   case_data.get('hoaName') or
+                   'Unknown HOA')
+
+        violation_type = (payload.get('violationType') or
+                         payload.get('violation_type') or
+                         payload.get('noticeType') or
+                         case_data.get('violation_type') or
+                         case_data.get('violationType') or
+                         'Unknown violation')
+
+        case_description = (payload.get('caseDescription') or
+                           payload.get('case_description') or
+                           payload.get('description') or
+                           case_data.get('case_description') or
+                           case_data.get('caseDescription') or
+                           'No description provided')
+
+        property_address = (payload.get('propertyAddress') or
+                           payload.get('property_address') or
+                           case_data.get('property_address') or
+                           case_data.get('propertyAddress') or
+                           '')
+
+        owner_name = (payload.get('ownerName') or
+                     payload.get('owner_name') or
+                     case_data.get('owner_name') or
+                     case_data.get('ownerName') or
+                     '')
 
         # Get document brief
         doc_text = doc_brief.get('brief_text', '')
         doc_count = doc_brief.get('doc_count', 0)
+        doc_status = doc_brief.get('doc_status', 'none')
 
-        # Prepare the prompt
-        prompt = f"""Generate a professional case preview for this HOA dispute:
+        # Prepare the prompt based on document availability
+        if doc_count > 0 and doc_text:
+            prompt = f"""Generate a comprehensive case preview for this HOA dispute:
 
-HOA: {hoa_name}
-Violation Type: {violation_type}
-Case Description: {case_description}
-Documents Analyzed: {doc_count}
+Case Details:
+- HOA: {hoa_name}
+- Violation Type: {violation_type}
+- Property Address: {property_address}
+- Owner: {owner_name}
+- Case Description: {case_description}
 
-Document Summary:
-{doc_text[:2000] if doc_text else 'No documents available'}
+Documents Analyzed ({doc_count} documents):
+{doc_text[:3000] if doc_text else 'No document content available'}
 
-Create a concise case preview that includes:
-1. Brief case summary
-2. Key issues identified
-3. Potential legal considerations
-4. Recommended next steps
+Based on the case details and document analysis, create a detailed case preview that includes:
+1. Case summary with key facts
+2. Alleged violations and HOA demands
+3. Document analysis findings
+4. Legal considerations and potential defenses
+5. Recommended next steps and strategy
+6. Timeline and deadlines (if any mentioned in documents)
 
-Keep it professional, factual, and under 800 words."""
+Keep it professional, factual, and comprehensive but under 1000 words."""
+        else:
+            prompt = f"""Generate a preliminary case preview for this HOA dispute (document analysis pending):
+
+Case Details:
+- HOA: {hoa_name}
+- Violation Type: {violation_type}
+- Property Address: {property_address}
+- Owner: {owner_name}
+- Case Description: {case_description}
+- Document Status: {doc_status}
+
+Create a preliminary case preview that includes:
+1. Case overview based on provided information
+2. General guidance for this type of HOA violation
+3. Common legal considerations for similar cases
+4. Recommended immediate actions
+5. What to expect during document review process
+
+Keep it professional, factual, and under 700 words. Note that this is a preliminary analysis pending document review."""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -879,7 +940,7 @@ Keep it professional, factual, and under 800 words."""
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a legal case analyst specializing in HOA disputes. Provide professional, factual analysis."
+                    "content": "You are a legal case analyst specializing in HOA disputes. Provide professional, factual analysis based on available information."
                 },
                 {
                     "role": "user",
@@ -887,7 +948,7 @@ Keep it professional, factual, and under 800 words."""
                 }
             ],
             "temperature": 0.3,
-            "max_tokens": 1200
+            "max_tokens": 1400
         }
 
         response = requests.post(
@@ -1030,16 +1091,10 @@ Keep it professional, factual, and under 600 words. Mention that this is a preli
         return f"Error generating preliminary preview: {str(e)}", {}, latency_ms
 
 
-def auto_generate_case_preview(token: str, case_id: str) -> bool:
+def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
     """Automatically generate case preview - immediate or deferred based on document status."""
     try:
-        # Check if preview already exists
-        existing_preview = read_active_preview(case_id)
-        if existing_preview:
-            logger.info(f"Preview already exists for case {token[:12]}... - skipping generation")
-            return True
-
-        # Fetch case data
+        # Fetch case data first
         case = read_case_by_token(token)
         if not case:
             logger.error(f"Case not found for token {token[:12]}...")
@@ -1051,21 +1106,46 @@ def auto_generate_case_preview(token: str, case_id: str) -> bool:
 
         has_processing_documents = any(doc.get('status') in ['pending', 'processing'] for doc in all_documents)
 
+        # Check existing preview
+        existing_preview = read_active_preview(case_id)
+
+        # Determine if we need to generate/upgrade preview
+        should_generate = False
+        preview_type = "preliminary"
+
+        if not existing_preview:
+            # No preview exists - always generate
+            should_generate = True
+            logger.info(f"No preview exists for case {token[:12]}... - generating new preview")
+        elif force_regenerate:
+            # Forced regeneration
+            should_generate = True
+            logger.info(f"Force regenerating preview for case {token[:12]}...")
+        else:
+            # Check if we can upgrade from preliminary to full
+            existing_content = existing_preview.get('preview_content', {})
+            existing_doc_summary = existing_content.get('doc_summary', {})
+            existing_doc_status = existing_doc_summary.get('doc_status', 'none')
+
+            if documents and existing_doc_status in ['none', 'processing']:
+                # We have ready documents but existing preview doesn't - upgrade to full
+                should_generate = True
+                preview_type = "upgrade"
+                logger.info(f"Upgrading preview from {existing_doc_status} to full for case {token[:12]}...")
+            else:
+                logger.info(f"Preview already exists and up-to-date for case {token[:12]}... - skipping generation")
+                return True
+
+        if not should_generate:
+            return True
+
+        # Generate preview based on available data
         if documents:
             # Documents are ready - generate full preview with document analysis
             logger.info(f"Generating full preview with {len(documents)} ready documents for case {token[:12]}...")
             doc_brief = build_doc_brief(documents)
             preview_text, token_usage, latency_ms = generate_case_preview_with_openai(case, doc_brief)
-
-            # Save to new table
-            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
-
-            if success:
-                logger.info(f"Successfully generated full preview for case {token[:12]}...")
-            else:
-                logger.error(f"Failed to save full preview for case {token[:12]}...")
-
-            return success
+            preview_type = "full"
 
         elif has_processing_documents:
             # Documents are still processing - generate preliminary preview
@@ -1076,18 +1156,8 @@ def auto_generate_case_preview(token: str, case_id: str) -> bool:
                 "sources": [],
                 "brief_text": "Documents are currently being processed and analyzed."
             }
-
             preview_text, token_usage, latency_ms = generate_preview_without_documents(case)
-
-            # Save preliminary preview (will be updated when documents are ready)
-            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
-
-            if success:
-                logger.info(f"Successfully generated preliminary preview for case {token[:12]}...")
-            else:
-                logger.error(f"Failed to save preliminary preview for case {token[:12]}...")
-
-            return success
+            preview_type = "preliminary"
 
         else:
             # No documents at all - generate basic preview
@@ -1098,18 +1168,18 @@ def auto_generate_case_preview(token: str, case_id: str) -> bool:
                 "sources": [],
                 "brief_text": "No documents have been uploaded for analysis."
             }
-
             preview_text, token_usage, latency_ms = generate_preview_without_documents(case)
+            preview_type = "basic"
 
-            # Save basic preview
-            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
+        # Save preview (this will deactivate existing ones automatically)
+        success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
 
-            if success:
-                logger.info(f"Successfully generated basic preview for case {token[:12]}...")
-            else:
-                logger.error(f"Failed to save basic preview for case {token[:12]}...")
+        if success:
+            logger.info(f"Successfully generated {preview_type} preview for case {token[:12]}...")
+        else:
+            logger.error(f"Failed to save {preview_type} preview for case {token[:12]}...")
 
-            return success
+        return success
 
     except Exception as e:
         logger.error(f"Error auto-generating preview for case {token[:12]}...: {str(e)}")
@@ -1136,27 +1206,11 @@ def trigger_preview_update_after_document_processing(token: str) -> bool:
             logger.info(f"No ready documents yet for case {token[:12]}... - keeping existing preview")
             return True
 
-        # Check if we already have a full preview (not preliminary)
-        existing_preview = read_active_preview(case_id)
-        if existing_preview:
-            preview_content = existing_preview.get('preview_content', {})
-            doc_summary = preview_content.get('doc_summary', {})
-            if doc_summary.get('doc_status') == 'ready' and doc_summary.get('doc_count', 0) > 0:
-                logger.info(f"Full preview already exists for case {token[:12]}... - skipping update")
-                return True
+        # Force regenerate preview with newly ready documents
+        # This will automatically upgrade from preliminary to full
+        logger.info(f"Triggering preview upgrade with newly ready documents for case {token[:12]}...")
 
-        # Generate updated preview with documents
-        logger.info(f"Updating preview with newly ready documents for case {token[:12]}...")
-
-        # Deactivate existing preliminary preview
-        deactivate_previews(case_id)
-
-        # Generate new full preview
-        doc_brief = build_doc_brief(documents)
-        preview_text, token_usage, latency_ms = generate_case_preview_with_openai(case, doc_brief)
-
-        # Save updated preview
-        success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
+        success = auto_generate_case_preview(token, case_id, force_regenerate=True)
 
         if success:
             logger.info(f"Successfully updated preview with documents for case {token[:12]}...")
