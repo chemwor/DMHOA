@@ -1030,43 +1030,58 @@ def save_case_endpoint():
             return jsonify({'error': 'Missing required field: token'}), 400
 
         logger.info(f"Processing save case request for token: {token[:12]}...")
-        logger.info(f"Request data: {data}")
+        logger.info(f"Request data keys: {list(data.keys())}")
 
-        # Extract case fields from request
-        case_fields = [
-            'hoa_name', 'violation_type', 'case_description', 'token'
-        ]
-        case_data = {field: data.get(field) for field in case_fields if data.get(field) is not None}
+        # Extract and clean case fields from request
+        case_data = {}
 
-        # Add created_at timestamp for new cases
-        case_data['created_at'] = datetime.utcnow().isoformat()
+        # Required fields
+        case_data['token'] = token
 
-        logger.info(f"Prepared case data: {case_data}")
+        # Optional fields - only add if they exist and are not empty
+        if data.get('hoa_name') and str(data.get('hoa_name')).strip():
+            case_data['hoa_name'] = str(data.get('hoa_name')).strip()
+
+        if data.get('violation_type') and str(data.get('violation_type')).strip():
+            case_data['violation_type'] = str(data.get('violation_type')).strip()
+
+        if data.get('case_description') and str(data.get('case_description')).strip():
+            case_data['case_description'] = str(data.get('case_description')).strip()
+
+        logger.info(f"Cleaned case data: {case_data}")
 
         # Check if case exists
         existing_case = read_case_by_token(token)
         if existing_case:
-            # Update existing case - remove created_at since it shouldn't be updated
-            update_data = {k: v for k, v in case_data.items() if k != 'created_at'}
-            logger.info(f"Updating existing case for token {token[:12]}... with data: {update_data}")
+            # Update existing case
+            logger.info(f"Updating existing case ID {existing_case.get('id')} for token {token[:12]}...")
 
             url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            params = {'token': f'eq.{token}'}
+            params = {'id': f"eq.{existing_case.get('id')}"}
             headers = supabase_headers()
             headers['Prefer'] = 'return=representation'
 
             response = requests.patch(url, params=params, headers=headers,
-                                    json=update_data, timeout=TIMEOUT)
+                                    json=case_data, timeout=TIMEOUT)
 
             logger.info(f"Update response status: {response.status_code}")
             if response.status_code >= 400:
-                logger.error(f"Update response text: {response.text}")
+                logger.error(f"Update failed - Response: {response.text}")
+                return jsonify({
+                    'error': f'Failed to update case: {response.text}',
+                    'status_code': response.status_code
+                }), 500
 
             response.raise_for_status()
-            return jsonify({'message': 'Case updated successfully'}), 200
+            updated_case = response.json()
+            return jsonify({'message': 'Case updated successfully', 'case': updated_case}), 200
         else:
-            # Create new case
-            logger.info(f"Creating new case for token {token[:12]}... with data: {case_data}")
+            # Create new case - add timestamp for creation
+            case_data['created_at'] = datetime.utcnow().isoformat() + 'Z'  # Add Z for UTC timezone
+
+            logger.info(f"Creating new case for token {token[:12]}...")
+            logger.info(f"Final case data for creation: {case_data}")
+
             url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             headers = supabase_headers()
             headers['Prefer'] = 'return=representation'
@@ -1074,23 +1089,60 @@ def save_case_endpoint():
             response = requests.post(url, headers=headers, json=case_data, timeout=TIMEOUT)
 
             logger.info(f"Create response status: {response.status_code}")
+            logger.info(f"Create response headers: {dict(response.headers)}")
+
             if response.status_code >= 400:
-                logger.error(f"Create response text: {response.text}")
-                logger.error(f"Create response headers: {response.headers}")
+                logger.error(f"Create failed - Response: {response.text}")
+                logger.error(f"Request URL: {url}")
+                logger.error(f"Request headers: {headers}")
+                logger.error(f"Request data: {case_data}")
+
+                # Try to parse the error response
+                try:
+                    error_details = response.json()
+                    logger.error(f"Parsed error details: {error_details}")
+                    return jsonify({
+                        'error': 'Failed to create case in database',
+                        'supabase_error': error_details,
+                        'status_code': response.status_code
+                    }), 500
+                except:
+                    return jsonify({
+                        'error': 'Failed to create case in database',
+                        'supabase_error': response.text,
+                        'status_code': response.status_code
+                    }), 500
 
             response.raise_for_status()
-
             new_case = response.json()
-            logger.info(f"New case created with ID: {new_case[0].get('id') if isinstance(new_case, list) else new_case.get('id')}")
-            return jsonify({'message': 'Case saved successfully', 'case': new_case}), 201
+
+            # Handle both single object and array responses from Supabase
+            case_id = None
+            if isinstance(new_case, list) and len(new_case) > 0:
+                case_id = new_case[0].get('id')
+            elif isinstance(new_case, dict):
+                case_id = new_case.get('id')
+
+            logger.info(f"New case created successfully with ID: {case_id}")
+            return jsonify({
+                'message': 'Case saved successfully',
+                'case': new_case,
+                'case_id': case_id
+            }), 201
 
     except requests.exceptions.HTTPError as e:
         logger.error(f"HTTP error in save case endpoint: {str(e)}")
-        logger.error(f"Response content: {e.response.text if e.response else 'No response'}")
-        return jsonify({'error': f'Database error: {str(e)}', 'details': e.response.text if e.response else 'No details'}), 500
+        error_response = e.response.text if e.response else 'No response details'
+        logger.error(f"Error response: {error_response}")
+        return jsonify({
+            'error': f'Database request failed: {str(e)}',
+            'details': error_response
+        }), 500
     except Exception as e:
-        logger.error(f"Error in save case endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Unexpected error in save case endpoint: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
