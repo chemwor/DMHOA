@@ -11,6 +11,7 @@ import time
 
 import requests
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pypdf import PdfReader
 import stripe
 
@@ -28,6 +29,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Enable CORS for all routes
+CORS(app, origins=['http://localhost:5173', 'https://disputemyhoa.com'],
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'X-Webhook-Secret'])
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -611,7 +617,7 @@ def doc_extract_webhook():
             return jsonify({
                 'error': error_msg,
                 'document_id': document_id
-            }), 400
+            }, 400)
 
         # Update document with extraction results
         update_data = {
@@ -1007,6 +1013,53 @@ def send_email(to_email: str, subject: str, body: str, html_body: str = None) ->
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {str(e)}")
         return False
+
+
+@app.route('/api/save-case', methods=['POST'])
+def save_case_endpoint():
+    """Save or update case details."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON body'}), 400
+
+        token = data.get('token')
+        if not token:
+            return jsonify({'error': 'Missing required field: token'}), 400
+
+        logger.info(f"Processing save case request for token: {token[:12]}...")
+
+        # Extract case fields from request
+        case_fields = [
+            'hoa_name', 'violation_type', 'case_description', 'token'
+        ]
+        case_data = {field: data.get(field) for field in case_fields}
+
+        # Check if case exists
+        existing_case = read_case_by_token(token)
+        if existing_case:
+            # Update existing case
+            logger.info(f"Updating existing case for token {token[:12]}...")
+            if not update_document(existing_case['id'], token, case_data):
+                return jsonify({'error': 'Failed to update case'}), 500
+            return jsonify({'message': 'Case updated successfully'}), 200
+        else:
+            # Create new case
+            logger.info(f"Creating new case for token {token[:12]}...")
+            url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            headers = supabase_headers()
+            headers['Prefer'] = 'return=representation'
+
+            response = requests.post(url, headers=headers, json=case_data, timeout=TIMEOUT)
+            response.raise_for_status()
+
+            new_case = response.json()
+            logger.info(f"New case created with ID {new_case.get('id')}")
+            return jsonify({'message': 'Case saved successfully', 'case_id': new_case.get('id')}), 201
+
+    except Exception as e:
+        logger.error(f"Error in save case endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
