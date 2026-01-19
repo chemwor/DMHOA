@@ -1055,6 +1055,34 @@ def case_status(token: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
+def get_case_data():
+    """Get case data by token."""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        return jsonify({'ok': True}), 200
+
+    try:
+        token = request.args.get('token')
+        if not token:
+            return jsonify({'error': 'Token parameter is required'}), 400
+
+        # Fetch case details
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Return the case data
+        return jsonify({
+            'case': case,
+            'success': True
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Get case data error: {str(e)}")
+        return jsonify({'error': str(e) or 'Internal server error'}), 500
+
+
 # Stripe webhook endpoints
 @app.route('/webhooks/stripe', methods=['POST'])
 def stripe_webhook():
