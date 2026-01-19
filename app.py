@@ -1297,6 +1297,142 @@ def case_created_webhook():
         return jsonify({'error': error_msg}), 500
 
 
+def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Create a new case in Supabase database."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        # Prepare case data
+        case_payload = {
+            'token': case_data.get('token'),
+            'hoa_name': case_data.get('hoaName', ''),
+            'violation_type': case_data.get('violationType', ''),
+            'case_description': case_data.get('caseDescription', ''),
+            'owner_name': case_data.get('ownerName', ''),
+            'owner_email': case_data.get('ownerEmail', ''),
+            'property_address': case_data.get('propertyAddress', ''),
+            'payload': json.dumps(case_data),  # Store full payload as JSON
+            'status': 'active'
+        }
+
+        # Remove None/empty values
+        case_payload = {k: v for k, v in case_payload.items() if v}
+
+        response = requests.post(url, headers=headers, json=case_payload, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        result = response.json()
+        if result and len(result) > 0:
+            case_id = result[0].get('id')
+            token = result[0].get('token')
+            logger.info(f"Created case successfully - ID: {case_id}, Token: {token[:8]}...")
+            return True, case_id, token
+        else:
+            logger.error("No case data returned from Supabase")
+            return False, None, None
+
+    except Exception as e:
+        logger.error(f"Failed to create case in Supabase: {str(e)}")
+        return False, None, None
+
+
+@app.route('/api/save-case', methods=['POST', 'OPTIONS'])
+def save_case():
+    """Save a new case and trigger preview generation."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
+
+    try:
+        # Parse JSON body
+        case_data = request.get_json()
+        if not case_data:
+            return jsonify({'error': 'Invalid JSON body'}), 400
+
+        # Validate required fields
+        required_fields = ['token', 'hoaName', 'violationType']
+        missing_fields = [field for field in required_fields if not case_data.get(field)]
+        if missing_fields:
+            return jsonify({
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+
+        token = case_data['token']
+        logger.info(f"Saving new case - Token: {token[:8]}...")
+
+        # Create case in database
+        success, case_id, returned_token = create_case_in_supabase(case_data)
+
+        if not success:
+            return jsonify({
+                'error': 'Failed to create case in database'
+            }), 500
+
+        # Trigger case creation webhook to start preview generation
+        try:
+            if case_id:
+                # Call our own case-created webhook to trigger preview generation
+                webhook_data = {
+                    'token': token,
+                    'case_id': case_id
+                }
+
+                # Make internal webhook call
+                webhook_headers = {
+                    'X-Webhook-Secret': DOC_EXTRACT_WEBHOOK_SECRET,
+                    'Content-Type': 'application/json'
+                }
+
+                # Use localhost for internal calls
+                webhook_url = f"http://localhost:{os.environ.get('PORT', 5000)}/webhooks/case-created"
+
+                webhook_response = requests.post(
+                    webhook_url,
+                    headers=webhook_headers,
+                    json=webhook_data,
+                    timeout=5
+                )
+
+                if webhook_response.status_code == 200:
+                    logger.info(f"Successfully triggered preview generation for case {token[:8]}...")
+                else:
+                    logger.warning(f"Failed to trigger preview generation: {webhook_response.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to trigger preview generation webhook: {str(e)}")
+            # Don't fail the main request if preview generation fails
+
+        response_data = {
+            'success': True,
+            'message': 'Case saved successfully',
+            'token': token,
+            'case_id': case_id
+        }
+
+        response = jsonify(response_data)
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+
+        return response, 200
+
+    except Exception as e:
+        error_msg = f"Unexpected error saving case: {str(e)}"
+        logger.error(error_msg)
+
+        response = jsonify({'error': error_msg})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+
+        return response, 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
