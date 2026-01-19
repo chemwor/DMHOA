@@ -911,24 +911,60 @@ Based on the case details and document analysis, create a detailed case preview 
 
 Keep it professional, factual, and comprehensive but under 1000 words."""
         else:
-            prompt = f"""Generate a preliminary case preview for this HOA dispute (document analysis pending):
+            # Extract additional context for personalized preliminary preview
+            property_type = (payload.get('propertyType') or
+                           payload.get('property_type') or
+                           case_data.get('property_type') or
+                           'property')
 
-Case Details:
-- HOA: {hoa_name}
-- Violation Type: {violation_type}
-- Property Address: {property_address}
-- Owner: {owner_name}
-- Case Description: {case_description}
-- Document Status: {doc_status}
+            state = (payload.get('state') or
+                    payload.get('propertyState') or
+                    case_data.get('state') or
+                    case_data.get('propertyState') or
+                    '')
 
-Create a preliminary case preview that includes:
-1. Case overview based on provided information
-2. General guidance for this type of HOA violation
-3. Common legal considerations for similar cases
-4. Recommended immediate actions
-5. What to expect during document review process
+            desired_outcome = (payload.get('desiredOutcome') or
+                             payload.get('desired_outcome') or
+                             case_data.get('desired_outcome') or
+                             '')
 
-Keep it professional, factual, and under 700 words. Note that this is a preliminary analysis pending document review."""
+            # Build context-aware details
+            property_context = f"{property_type} in {state}" if property_type and state else f"property in {state}" if state else property_type if property_type else "property"
+            address_context = f" at {property_address}" if property_address else ""
+            outcome_context = f" Your goal: {desired_outcome}." if desired_outcome else ""
+
+            prompt = f"""Generate a personalized case analysis for this HOA dispute. This should feel like an expert already understands their specific situation and can immediately help.
+
+CASE SPECIFICS:
+- HOA: {hoa_name if hoa_name != 'Unknown HOA' else 'your HOA'}
+- Violation: {violation_type if violation_type != 'Unknown violation' else 'the violation'}
+- Property: {property_context}{address_context}
+- Owner: {owner_name if owner_name else 'you'}
+- Situation: {case_description}{outcome_context}
+
+Create a preview with exactly these sections:
+
+**IMMEDIATE INSIGHT**
+Start with: "Based on what you submitted about {violation_type if violation_type != 'Unknown violation' else 'this violation'} at your {property_context}, here's what stands out..."
+Then provide one specific insight about their situation that shows you understand the details they provided.
+
+**WHY THIS MATTERS**
+Explain what typically goes wrong for homeowners in this exact type of situation. Be specific to their violation type and property context.
+
+**EARLY LEVERAGE POINTS**
+List 2-3 bullet points about procedural issues, timeline risks, or enforcement concerns that commonly apply to this situation:
+• [Point about HOA procedural requirements]
+• [Point about documentation or notice timing]  
+• [Point about enforcement consistency or escalation risks]
+
+**WHAT HAPPENS WHEN YOU UNLOCK**
+Clear bullets showing concrete outcomes:
+• Extract exact deadlines and response requirements from your documents
+• Validate whether the HOA's demands comply with {state if state else 'your state'}'s laws
+• Generate a ready-to-send response that protects your rights
+• Map out risk escalation paths and prevention strategies
+
+Tone: Calm, confident, immediately helpful. Show you already understand their specific situation. Avoid generic language, placeholders, or "awaiting documents" messaging. Maximum 700 words."""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1006,31 +1042,53 @@ def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int]
             except:
                 payload = {}
 
-        hoa_name = payload.get('hoaName', payload.get('hoa_name', 'Unknown HOA'))
-        violation_type = payload.get('violationType', payload.get('noticeType', 'Unknown violation'))
-        case_description = payload.get('caseDescription', payload.get('case_description', 'No description provided'))
+        hoa_name = payload.get('hoaName', payload.get('hoa_name', 'your HOA'))
+        violation_type = payload.get('violationType', payload.get('noticeType', 'the violation'))
+        case_description = payload.get('caseDescription', payload.get('case_description', 'the situation you described'))
         property_address = payload.get('propertyAddress', payload.get('property_address', ''))
         owner_name = payload.get('ownerName', payload.get('owner_name', ''))
+        property_type = payload.get('propertyType', payload.get('property_type', 'property'))
+        state = payload.get('state', payload.get('propertyState', ''))
+        desired_outcome = payload.get('desiredOutcome', payload.get('desired_outcome', ''))
 
-        # Create a basic prompt without documents
-        prompt = f"""Generate a preliminary case preview for this HOA dispute case (documents still being processed):
+        # Build context-aware details
+        property_context = f"{property_type} in {state}" if property_type and state else f"property in {state}" if state else property_type if property_type else "property"
+        owner_context = f" for {owner_name}" if owner_name else ""
+        address_context = f" at {property_address}" if property_address else ""
+        outcome_context = f" Your goal: {desired_outcome}." if desired_outcome else ""
 
-Case Details:
+        # Create a personalized, actionable prompt
+        prompt = f"""Generate a personalized case analysis for this HOA dispute. This should feel like an expert already understands their specific situation and can immediately help.
+
+CASE SPECIFICS:
 - HOA: {hoa_name}
-- Violation Type: {violation_type}
-- Property Address: {property_address}
-- Owner: {owner_name}
-- Case Description: {case_description}
-- Document Status: Documents are still being processed and analyzed
+- Violation: {violation_type}
+- Property: {property_context}{address_context}{owner_context}  
+- Situation: {case_description}{outcome_context}
 
-Create a preliminary case preview that includes:
-1. Case overview based on provided information
-2. General guidance for this type of HOA violation
-3. Common legal considerations for similar cases
-4. Recommended next steps
-5. Note that detailed analysis will be available once documents are processed
+Create a preview with exactly these sections:
 
-Keep it professional, factual, and under 600 words. Mention that this is a preliminary preview pending document analysis."""
+**IMMEDIATE INSIGHT**
+Start with: "Based on what you submitted about {violation_type} at your {property_context}, here's what stands out..."
+Then provide one specific insight about their situation that shows you understand the details they provided.
+
+**WHY THIS MATTERS**
+Explain what typically goes wrong for homeowners in this exact type of situation. Be specific to their violation type and property context.
+
+**EARLY LEVERAGE POINTS**
+List 2-3 bullet points about procedural issues, timeline risks, or enforcement concerns that commonly apply to this situation:
+• [Point about HOA procedural requirements]
+• [Point about documentation or notice timing]  
+• [Point about enforcement consistency or escalation risks]
+
+**WHAT HAPPENS WHEN YOU UNLOCK**
+Clear bullets showing concrete outcomes:
+• Extract exact deadlines and response requirements
+• Validate whether the HOA's demands comply with your state's laws
+• Generate a ready-to-send response that protects your rights
+• Map out risk escalation paths and prevention strategies
+
+Tone: Calm, confident, immediately helpful. Show you already understand their specific situation. Avoid generic language, placeholders, or "awaiting documents" messaging. Maximum 650 words."""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1042,7 +1100,7 @@ Keep it professional, factual, and under 600 words. Mention that this is a preli
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a legal case analyst specializing in HOA disputes. Provide professional, factual analysis even with limited information."
+                    "content": "You are an expert HOA dispute analyst. Create personalized, actionable previews that immediately demonstrate understanding of the user's specific situation. Never use generic placeholder language."
                 },
                 {
                     "role": "user",
@@ -1050,7 +1108,7 @@ Keep it professional, factual, and under 600 words. Mention that this is a preli
                 }
             ],
             "temperature": 0.3,
-            "max_tokens": 1000
+            "max_tokens": 1100
         }
 
         response = requests.post(
