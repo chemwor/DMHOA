@@ -1174,6 +1174,10 @@ def send_email(to_email: str, subject: str, body: str, html_body: str = None) ->
 @app.route('/api/save-case', methods=['POST', 'OPTIONS'])
 def save_case():
     """Save case endpoint for frontend case creation."""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        return jsonify({'ok': True}), 200
+
     try:
         # Parse request body
         data = request.get_json()
