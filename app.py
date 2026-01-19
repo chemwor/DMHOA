@@ -911,60 +911,24 @@ Based on the case details and document analysis, create a detailed case preview 
 
 Keep it professional, factual, and comprehensive but under 1000 words."""
         else:
-            # Extract additional context for personalized preliminary preview
-            property_type = (payload.get('propertyType') or
-                           payload.get('property_type') or
-                           case_data.get('property_type') or
-                           'property')
+            prompt = f"""Generate a preliminary case preview for this HOA dispute (document analysis pending):
 
-            state = (payload.get('state') or
-                    payload.get('propertyState') or
-                    case_data.get('state') or
-                    case_data.get('propertyState') or
-                    '')
+Case Details:
+- HOA: {hoa_name}
+- Violation Type: {violation_type}
+- Property Address: {property_address}
+- Owner: {owner_name}
+- Case Description: {case_description}
+- Document Status: {doc_status}
 
-            desired_outcome = (payload.get('desiredOutcome') or
-                             payload.get('desired_outcome') or
-                             case_data.get('desired_outcome') or
-                             '')
+Create a preliminary case preview that includes:
+1. Case overview based on provided information
+2. General guidance for this type of HOA violation
+3. Common legal considerations for similar cases
+4. Recommended immediate actions
+5. What to expect during document review process
 
-            # Build context-aware details
-            property_context = f"{property_type} in {state}" if property_type and state else f"property in {state}" if state else property_type if property_type else "property"
-            address_context = f" at {property_address}" if property_address else ""
-            outcome_context = f" Your goal: {desired_outcome}." if desired_outcome else ""
-
-            prompt = f"""Generate a personalized case analysis for this HOA dispute. This should feel like an expert already understands their specific situation and can immediately help.
-
-CASE SPECIFICS:
-- HOA: {hoa_name if hoa_name != 'Unknown HOA' else 'your HOA'}
-- Violation: {violation_type if violation_type != 'Unknown violation' else 'the violation'}
-- Property: {property_context}{address_context}
-- Owner: {owner_name if owner_name else 'you'}
-- Situation: {case_description}{outcome_context}
-
-Create a preview with exactly these sections:
-
-**IMMEDIATE INSIGHT**
-Start with: "Based on what you submitted about {violation_type if violation_type != 'Unknown violation' else 'this violation'} at your {property_context}, here's what stands out..."
-Then provide one specific insight about their situation that shows you understand the details they provided.
-
-**WHY THIS MATTERS**
-Explain what typically goes wrong for homeowners in this exact type of situation. Be specific to their violation type and property context.
-
-**EARLY LEVERAGE POINTS**
-List 2-3 bullet points about procedural issues, timeline risks, or enforcement concerns that commonly apply to this situation:
-• [Point about HOA procedural requirements]
-• [Point about documentation or notice timing]  
-• [Point about enforcement consistency or escalation risks]
-
-**WHAT HAPPENS WHEN YOU UNLOCK**
-Clear bullets showing concrete outcomes:
-• Extract exact deadlines and response requirements from your documents
-• Validate whether the HOA's demands comply with {state if state else 'your state'}'s laws
-• Generate a ready-to-send response that protects your rights
-• Map out risk escalation paths and prevention strategies
-
-Tone: Calm, confident, immediately helpful. Show you already understand their specific situation. Avoid generic language, placeholders, or "awaiting documents" messaging. Maximum 700 words."""
+Keep it professional, factual, and under 700 words. Note that this is a preliminary analysis pending document review."""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1042,53 +1006,31 @@ def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int]
             except:
                 payload = {}
 
-        hoa_name = payload.get('hoaName', payload.get('hoa_name', 'your HOA'))
-        violation_type = payload.get('violationType', payload.get('noticeType', 'the violation'))
-        case_description = payload.get('caseDescription', payload.get('case_description', 'the situation you described'))
+        hoa_name = payload.get('hoaName', payload.get('hoa_name', 'Unknown HOA'))
+        violation_type = payload.get('violationType', payload.get('noticeType', 'Unknown violation'))
+        case_description = payload.get('caseDescription', payload.get('case_description', 'No description provided'))
         property_address = payload.get('propertyAddress', payload.get('property_address', ''))
         owner_name = payload.get('ownerName', payload.get('owner_name', ''))
-        property_type = payload.get('propertyType', payload.get('property_type', 'property'))
-        state = payload.get('state', payload.get('propertyState', ''))
-        desired_outcome = payload.get('desiredOutcome', payload.get('desired_outcome', ''))
 
-        # Build context-aware details
-        property_context = f"{property_type} in {state}" if property_type and state else f"property in {state}" if state else property_type if property_type else "property"
-        owner_context = f" for {owner_name}" if owner_name else ""
-        address_context = f" at {property_address}" if property_address else ""
-        outcome_context = f" Your goal: {desired_outcome}." if desired_outcome else ""
+        # Create a basic prompt without documents
+        prompt = f"""Generate a preliminary case preview for this HOA dispute case (documents still being processed):
 
-        # Create a personalized, actionable prompt
-        prompt = f"""Generate a personalized case analysis for this HOA dispute. This should feel like an expert already understands their specific situation and can immediately help.
-
-CASE SPECIFICS:
+Case Details:
 - HOA: {hoa_name}
-- Violation: {violation_type}
-- Property: {property_context}{address_context}{owner_context}  
-- Situation: {case_description}{outcome_context}
+- Violation Type: {violation_type}
+- Property Address: {property_address}
+- Owner: {owner_name}
+- Case Description: {case_description}
+- Document Status: Documents are still being processed and analyzed
 
-Create a preview with exactly these sections:
+Create a preliminary case preview that includes:
+1. Case overview based on provided information
+2. General guidance for this type of HOA violation
+3. Common legal considerations for similar cases
+4. Recommended next steps
+5. Note that detailed analysis will be available once documents are processed
 
-**IMMEDIATE INSIGHT**
-Start with: "Based on what you submitted about {violation_type} at your {property_context}, here's what stands out..."
-Then provide one specific insight about their situation that shows you understand the details they provided.
-
-**WHY THIS MATTERS**
-Explain what typically goes wrong for homeowners in this exact type of situation. Be specific to their violation type and property context.
-
-**EARLY LEVERAGE POINTS**
-List 2-3 bullet points about procedural issues, timeline risks, or enforcement concerns that commonly apply to this situation:
-• [Point about HOA procedural requirements]
-• [Point about documentation or notice timing]  
-• [Point about enforcement consistency or escalation risks]
-
-**WHAT HAPPENS WHEN YOU UNLOCK**
-Clear bullets showing concrete outcomes:
-• Extract exact deadlines and response requirements
-• Validate whether the HOA's demands comply with your state's laws
-• Generate a ready-to-send response that protects your rights
-• Map out risk escalation paths and prevention strategies
-
-Tone: Calm, confident, immediately helpful. Show you already understand their specific situation. Avoid generic language, placeholders, or "awaiting documents" messaging. Maximum 650 words."""
+Keep it professional, factual, and under 600 words. Mention that this is a preliminary preview pending document analysis."""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1100,7 +1042,7 @@ Tone: Calm, confident, immediately helpful. Show you already understand their sp
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an expert HOA dispute analyst. Create personalized, actionable previews that immediately demonstrate understanding of the user's specific situation. Never use generic placeholder language."
+                    "content": "You are a legal case analyst specializing in HOA disputes. Provide professional, factual analysis even with limited information."
                 },
                 {
                     "role": "user",
@@ -1108,7 +1050,7 @@ Tone: Calm, confident, immediately helpful. Show you already understand their sp
                 }
             ],
             "temperature": 0.3,
-            "max_tokens": 1100
+            "max_tokens": 1000
         }
 
         response = requests.post(
@@ -1264,11 +1206,11 @@ def trigger_preview_update_after_document_processing(token: str) -> bool:
             logger.info(f"No ready documents yet for case {token[:12]}... - keeping existing preview")
             return True
 
-        # Force regenerate preview with newly ready documents
-        # This will automatically upgrade from preliminary to full
+        # Upgrade preview with newly ready documents (without forcing regeneration)
+        # This will only upgrade if the existing preview isn't already "ready"
         logger.info(f"Triggering preview upgrade with newly ready documents for case {token[:12]}...")
 
-        success = auto_generate_case_preview(token, case_id, force_regenerate=True)
+        success = auto_generate_case_preview(token, case_id, force_regenerate=False)
 
         if success:
             logger.info(f"Successfully updated preview with documents for case {token[:12]}...")
@@ -1386,21 +1328,29 @@ def case_created_webhook():
                 return jsonify({'error': 'Case not found for token'}), 404
             case_id = case.get('id')
 
-        # Schedule both immediate and delayed preview generation
-        # Immediate: Generate basic preview now
+        # Generate immediate preview
         immediate_success = auto_generate_case_preview(token, case_id)
 
-        # Delayed: Give time for documents to be uploaded and processed, then regenerate
-        schedule_delayed_preview_generation(token, case_id, delay_seconds=60)
+        # Check if there are any documents that might need processing
+        all_documents = fetch_any_documents_status_by_token(token)
+        pending_or_processing_docs = [doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]
 
-        # Also schedule a longer delay for cases where document processing might take longer
-        schedule_delayed_preview_generation(token, case_id, delay_seconds=300)  # 5 minutes
+        # Only schedule delayed jobs if there are documents that might become ready
+        if pending_or_processing_docs:
+            logger.info(f"Found {len(pending_or_processing_docs)} pending/processing documents - scheduling delayed preview generations")
+            # Delayed: Give time for documents to be uploaded and processed, then regenerate
+            schedule_delayed_preview_generation(token, case_id, delay_seconds=60)
+            # Also schedule a longer delay for cases where document processing might take longer
+            schedule_delayed_preview_generation(token, case_id, delay_seconds=300)  # 5 minutes
+        else:
+            logger.info(f"No pending/processing documents found - skipping delayed preview generations")
 
         return jsonify({
             'message': 'Case creation handled and preview generation scheduled',
             'token': token,
             'case_id': case_id,
-            'immediate_preview': immediate_success
+            'immediate_preview': immediate_success,
+            'delayed_jobs_scheduled': len(pending_or_processing_docs) > 0
         }), 200
 
     except Exception as e:
