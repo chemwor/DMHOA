@@ -832,14 +832,98 @@ def save_case_preview_to_new_table(case_id: str, preview_text: str, doc_brief: D
         return False
 
 
-def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple[str, Dict, int]:
-    """Generate case preview using OpenAI and return preview, token usage, and latency."""
+def render_preview_markdown(preview_json: Dict) -> str:
+    """Convert preview_json into a clean markdown string for existing UI."""
+    try:
+        markdown_parts = []
+
+        # Headline
+        headline = preview_json.get('headline', 'HOA Case Analysis')
+        markdown_parts.append(f"# {headline}\n")
+
+        # Why Now section
+        why_now = preview_json.get('why_now', '')
+        if why_now:
+            markdown_parts.append(f"## Urgent Situation\n{why_now}\n")
+
+        # Your Situation
+        situation = preview_json.get('your_situation', {})
+        if situation:
+            markdown_parts.append("## Your Current Situation\n")
+
+            alleged_violation = situation.get('alleged_violation')
+            if alleged_violation:
+                markdown_parts.append(f"**Alleged Violation:** {alleged_violation}\n")
+
+            deadline = situation.get('deadline', 'Not stated')
+            markdown_parts.append(f"**Deadline:** {deadline}\n")
+
+            hoa_demands = situation.get('hoa_demands', [])
+            if hoa_demands:
+                markdown_parts.append("**HOA Demands:**")
+                for demand in hoa_demands:
+                    markdown_parts.append(f"- {demand}")
+                markdown_parts.append("")
+
+            rules_cited = situation.get('rules_cited', [])
+            if rules_cited:
+                markdown_parts.append("**Rules/Regulations Cited:**")
+                for rule in rules_cited:
+                    markdown_parts.append(f"- {rule}")
+                markdown_parts.append("")
+
+        # Risk if wrong
+        risks = preview_json.get('risk_if_wrong', [])
+        if risks:
+            markdown_parts.append("## Risk If You Handle This Wrong\n")
+            for risk in risks:
+                markdown_parts.append(f"- {risk}")
+            markdown_parts.append("")
+
+        # What you get when you unlock
+        unlock_items = preview_json.get('what_you_get_when_you_unlock', [])
+        if unlock_items:
+            markdown_parts.append("## What You Get When You Unlock Full Response\n")
+            for item in unlock_items:
+                markdown_parts.append(f"- {item}")
+            markdown_parts.append("")
+
+        # Hard stop
+        hard_stop = preview_json.get('hard_stop', '')
+        if hard_stop:
+            markdown_parts.append(f"## Next Steps\n{hard_stop}\n")
+
+        # CTA
+        cta = preview_json.get('cta', {})
+        if cta:
+            primary = cta.get('primary', 'Unlock full response package')
+            secondary = cta.get('secondary', 'See exactly what proof the HOA will accept')
+            markdown_parts.append(f"**{primary}**\n*{secondary}*\n")
+
+        # Join all parts and limit to ~600 words
+        full_markdown = '\n'.join(markdown_parts)
+
+        # Simple word count check - if too long, truncate at reasonable point
+        words = full_markdown.split()
+        if len(words) > 600:
+            truncated_words = words[:600]
+            full_markdown = ' '.join(truncated_words) + "..."
+
+        return full_markdown
+
+    except Exception as e:
+        logger.error(f"Error rendering preview markdown: {str(e)}")
+        return "Error rendering preview. Please try again."
+
+
+def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple[str, Dict, int, Optional[Dict]]:
+    """Generate case preview using OpenAI and return preview, token usage, latency, and preview_json."""
     start_time = time.time()
 
     try:
         if not OPENAI_API_KEY:
             logger.warning("OpenAI API key not configured")
-            return "Preview generation unavailable - OpenAI not configured", {}, 0
+            return "Preview generation unavailable - OpenAI not configured", {}, 0, None
 
         # Extract case information from payload first, then fallback to top level
         payload = case_data.get('payload', {})
@@ -887,9 +971,10 @@ def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple
         doc_count = doc_brief.get('doc_count', 0)
         doc_status = doc_brief.get('doc_status', 'none')
 
-        # Prepare the prompt based on document availability
-        if doc_count > 0 and doc_text:
-            prompt = f"""Generate a comprehensive case preview for this HOA dispute:
+        # Prepare the conversion-optimized prompt based on document availability
+        if doc_status == "ready" and doc_text:
+            # Documents are ready - extract specific facts
+            user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. You must extract specific facts from the document analysis and output ONLY valid JSON.
 
 Case Details:
 - HOA: {hoa_name}
@@ -898,20 +983,49 @@ Case Details:
 - Owner: {owner_name}
 - Case Description: {case_description}
 
-Documents Analyzed ({doc_count} documents):
+Document Analysis ({doc_count} documents ready):
 {doc_text[:3000] if doc_text else 'No document content available'}
 
-Based on the case details and document analysis, create a detailed case preview that includes:
-1. Case summary with key facts
-2. Alleged violations and HOA demands
-3. Document analysis findings
-4. Legal considerations and potential defenses
-5. Recommended next steps and strategy
-6. Timeline and deadlines (if any mentioned in documents)
+Output ONLY valid JSON with this exact structure:
+{{
+  "version": "preview_v2_sales",
+  "headline": "string (8-14 words, specific to this case)",
+  "why_now": "string (1-2 sentences, urgency tied to deadline/fines/escalation)",
+  "your_situation": {{
+    "alleged_violation": "string (extracted from documents)",
+    "hoa_demands": ["string", "string", "..."],
+    "deadline": "string (use exact date if present; else 'Not stated')",
+    "rules_cited": ["string", "..."]
+  }},
+  "risk_if_wrong": [
+    "string (specific consequence)",
+    "string",
+    "string"
+  ],
+  "what_you_get_when_you_unlock": [
+    "Professional response letter tailored to your specific violation",
+    "Certified mail template with proper legal language", 
+    "Evidence checklist to document your defense",
+    "Extension request template if deadline is tight",
+    "Negotiation strategies for your specific situation"
+  ],
+  "hard_stop": "string (1-2 lines that create unfinished business - mention key wording or checklist being withheld)",
+  "cta": {{
+    "primary": "Unlock full response package",
+    "secondary": "See exactly what proof the HOA will accept"
+  }}
+}}
 
-Keep it professional, factual, and comprehensive but under 1000 words."""
+RULES:
+- Extract specific facts from document analysis for your_situation fields
+- Use "you" voice throughout
+- Be concrete and specific to this case
+- Include at least 5 concrete deliverables in what_you_get_when_you_unlock
+- Make hard_stop create genuine unfinished business"""
         else:
-            prompt = f"""Generate a preliminary case preview for this HOA dispute (document analysis pending):
+            # Documents pending or none - focus on what unlock will provide
+            docs_pending_text = "docs are still being processed" if doc_status == "processing" else "no documents uploaded yet"
+            user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. Documents are pending but you must still create a persuasive preview. Output ONLY valid JSON.
 
 Case Details:
 - HOA: {hoa_name}
@@ -919,16 +1033,43 @@ Case Details:
 - Property Address: {property_address}
 - Owner: {owner_name}
 - Case Description: {case_description}
-- Document Status: {doc_status}
+- Document Status: {docs_pending_text}
 
-Create a preliminary case preview that includes:
-1. Case overview based on provided information
-2. General guidance for this type of HOA violation
-3. Common legal considerations for similar cases
-4. Recommended immediate actions
-5. What to expect during document review process
+Output ONLY valid JSON with this exact structure:
+{{
+  "version": "preview_v2_sales",
+  "headline": "string (8-14 words, specific to this case type)",
+  "why_now": "string (1-2 sentences, mention documents pending but emphasize urgency)",
+  "your_situation": {{
+    "alleged_violation": "{violation_type} (details pending document analysis)",
+    "hoa_demands": ["Pending document analysis"],
+    "deadline": "Not stated - will be extracted from documents",
+    "rules_cited": ["Pending document analysis"]
+  }},
+  "risk_if_wrong": [
+    "Missing critical response deadlines",
+    "Accepting invalid HOA demands without challenge",
+    "Paying unnecessary fines or fees"
+  ],
+  "what_you_get_when_you_unlock": [
+    "Professional response letter once documents are analyzed",
+    "Certified mail template with proper legal language",
+    "Evidence checklist for your specific violation type",
+    "Deadline tracking and extension strategies",
+    "Complete document analysis and defense strategy"
+  ],
+  "hard_stop": "Your documents are being analyzed to identify the exact wording and deadlines the HOA cited. Once complete, you'll get the specific language and proof checklist needed for your response.",
+  "cta": {{
+    "primary": "Unlock full response package", 
+    "secondary": "Get complete analysis once documents are ready"
+  }}
+}}
 
-Keep it professional, factual, and under 700 words. Note that this is a preliminary analysis pending document review."""
+RULES:
+- Use "you" voice throughout
+- Be specific about what the unlock will provide once docs are ready  
+- Make it clear docs are pending but tool is still valuable
+- Create urgency around not missing opportunities"""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -940,15 +1081,15 @@ Keep it professional, factual, and under 700 words. Note that this is a prelimin
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a legal case analyst specializing in HOA disputes. Provide professional, factual analysis based on available information."
+                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object."
                 },
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": user_prompt
                 }
             ],
             "temperature": 0.3,
-            "max_tokens": 1400
+            "max_tokens": 1200
         }
 
         response = requests.post(
@@ -960,7 +1101,7 @@ Keep it professional, factual, and under 700 words. Note that this is a prelimin
         response.raise_for_status()
 
         result = response.json()
-        preview = result['choices'][0]['message']['content'].strip()
+        json_response = result['choices'][0]['message']['content'].strip()
 
         # Calculate latency
         latency_ms = int((time.time() - start_time) * 1000)
@@ -980,23 +1121,48 @@ Keep it professional, factual, and under 700 words. Note that this is a prelimin
             output_cost = (token_usage['completion_tokens'] / 1000) * 0.0006  # $0.60 per 1K output tokens
             token_usage['cost_usd'] = round(input_cost + output_cost, 6)
 
-        logger.info(f"Generated case preview: {len(preview)} characters, {latency_ms}ms")
-        return preview, token_usage, latency_ms
+        # Parse JSON safely and create markdown
+        preview_json = None
+        try:
+            # Clean the response in case there's extra text
+            json_start = json_response.find('{')
+            json_end = json_response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                clean_json = json_response[json_start:json_end]
+                preview_json = json.loads(clean_json)
+
+                # Create markdown from JSON
+                markdown_preview = render_preview_markdown(preview_json)
+
+                logger.info(f"Generated case preview: {len(markdown_preview)} characters, {latency_ms}ms")
+                return markdown_preview, token_usage, latency_ms, preview_json
+
+            else:
+                raise json.JSONDecodeError("No valid JSON found", json_response, 0)
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response: {str(e)}")
+            logger.warning(f"Raw response: {json_response}")
+
+            # Fallback to original response as markdown but no preview_json
+            markdown_preview = f"# HOA Case Analysis\n\n{json_response}"
+            logger.info(f"Generated fallback case preview: {len(markdown_preview)} characters, {latency_ms}ms")
+            return markdown_preview, token_usage, latency_ms, None
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
         logger.error(f"Failed to generate case preview: {str(e)}")
-        return f"Error generating preview: {str(e)}", {}, latency_ms
+        return f"Error generating preview: {str(e)}", {}, latency_ms, None
 
 
-def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int]:
-    """Generate a basic case preview when no documents are available yet."""
+def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int, Optional[Dict]]:
+    """Generate a conversion-optimized case preview when no documents are available yet."""
     start_time = time.time()
 
     try:
         if not OPENAI_API_KEY:
             logger.warning("OpenAI API key not configured")
-            return "Preview generation unavailable - OpenAI not configured", {}, 0
+            return "Preview generation unavailable - OpenAI not configured", {}, 0, None
 
         # Extract case information from payload
         payload = case_data.get('payload', {})
@@ -1012,8 +1178,8 @@ def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int]
         property_address = payload.get('propertyAddress', payload.get('property_address', ''))
         owner_name = payload.get('ownerName', payload.get('owner_name', ''))
 
-        # Create a basic prompt without documents
-        prompt = f"""Generate a preliminary case preview for this HOA dispute case (documents still being processed):
+        # Create conversion-optimized prompt for no documents case
+        user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. No documents have been uploaded yet, but you must still create a persuasive preview. Output ONLY valid JSON.
 
 Case Details:
 - HOA: {hoa_name}
@@ -1021,16 +1187,43 @@ Case Details:
 - Property Address: {property_address}
 - Owner: {owner_name}
 - Case Description: {case_description}
-- Document Status: Documents are still being processed and analyzed
+- Document Status: No documents uploaded yet
 
-Create a preliminary case preview that includes:
-1. Case overview based on provided information
-2. General guidance for this type of HOA violation
-3. Common legal considerations for similar cases
-4. Recommended next steps
-5. Note that detailed analysis will be available once documents are processed
+Output ONLY valid JSON with this exact structure:
+{{
+  "version": "preview_v2_sales",
+  "headline": "string (8-14 words, specific to this {violation_type} case)",
+  "why_now": "string (1-2 sentences, create urgency about acting before it's too late)",
+  "your_situation": {{
+    "alleged_violation": "{violation_type} by {hoa_name}",
+    "hoa_demands": ["Upload documents to see specific demands"],
+    "deadline": "Unknown - upload documents to identify deadlines",
+    "rules_cited": ["Upload documents to see specific rules cited"]
+  }},
+  "risk_if_wrong": [
+    "Missing critical response deadlines that could escalate penalties",
+    "Accepting invalid HOA demands without proper challenge", 
+    "Paying unnecessary fines or agreeing to unreasonable compliance"
+  ],
+  "what_you_get_when_you_unlock": [
+    "Professional response letter template for {violation_type} cases",
+    "Certified mail template with proper legal language",
+    "Evidence checklist for {violation_type} violations",
+    "Extension request strategies if deadlines are tight",
+    "Complete analysis once you upload your HOA documents"
+  ],
+  "hard_stop": "Upload your HOA notice and we'll analyze the exact language, deadlines, and rules they cited. You'll get the specific wording and proof checklist needed for your response.",
+  "cta": {{
+    "primary": "Unlock full response package",
+    "secondary": "Upload documents for complete analysis"
+  }}
+}}
 
-Keep it professional, factual, and under 600 words. Mention that this is a preliminary preview pending document analysis."""
+RULES:
+- Use "you" voice throughout
+- Be specific about {violation_type} violations
+- Create urgency around not delaying action
+- Make it clear uploading documents unlocks much more value"""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1042,11 +1235,11 @@ Keep it professional, factual, and under 600 words. Mention that this is a preli
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a legal case analyst specializing in HOA disputes. Provide professional, factual analysis even with limited information."
+                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object."
                 },
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": user_prompt
                 }
             ],
             "temperature": 0.3,
@@ -1062,7 +1255,7 @@ Keep it professional, factual, and under 600 words. Mention that this is a preli
         response.raise_for_status()
 
         result = response.json()
-        preview = result['choices'][0]['message']['content'].strip()
+        json_response = result['choices'][0]['message']['content'].strip()
 
         # Calculate latency
         latency_ms = int((time.time() - start_time) * 1000)
@@ -1082,13 +1275,38 @@ Keep it professional, factual, and under 600 words. Mention that this is a preli
             output_cost = (token_usage['completion_tokens'] / 1000) * 0.0006  # $0.60 per 1K output tokens
             token_usage['cost_usd'] = round(input_cost + output_cost, 6)
 
-        logger.info(f"Generated preliminary case preview: {len(preview)} characters, {latency_ms}ms")
-        return preview, token_usage, latency_ms
+        # Parse JSON safely and create markdown
+        preview_json = None
+        try:
+            # Clean the response in case there's extra text
+            json_start = json_response.find('{')
+            json_end = json_response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                clean_json = json_response[json_start:json_end]
+                preview_json = json.loads(clean_json)
+
+                # Create markdown from JSON
+                markdown_preview = render_preview_markdown(preview_json)
+
+                logger.info(f"Generated preliminary case preview: {len(markdown_preview)} characters, {latency_ms}ms")
+                return markdown_preview, token_usage, latency_ms, preview_json
+
+            else:
+                raise json.JSONDecodeError("No valid JSON found", json_response, 0)
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response: {str(e)}")
+            logger.warning(f"Raw response: {json_response}")
+
+            # Fallback to original response as markdown but no preview_json
+            markdown_preview = f"# HOA Case Analysis\n\n{json_response}"
+            logger.info(f"Generated fallback preliminary case preview: {len(markdown_preview)} characters, {latency_ms}ms")
+            return markdown_preview, token_usage, latency_ms, None
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
         logger.error(f"Failed to generate preliminary case preview: {str(e)}")
-        return f"Error generating preliminary preview: {str(e)}", {}, latency_ms
+        return f"Error generating preliminary preview: {str(e)}", {}, latency_ms, None
 
 
 def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
