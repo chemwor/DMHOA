@@ -11,6 +11,7 @@ import time
 
 import requests
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pypdf import PdfReader
 import stripe
 
@@ -28,6 +29,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -1167,6 +1169,88 @@ def send_email(to_email: str, subject: str, body: str, html_body: str = None) ->
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {str(e)}")
         return False
+
+
+@app.route('/api/save-case', methods=['POST', 'OPTIONS'])
+def save_case():
+    """Save case endpoint for frontend case creation."""
+    try:
+        # Parse request body
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON body'}), 400
+
+        token = data.get('token')
+        payload = data.get('payload')
+
+        if not token or not payload:
+            return jsonify({'error': 'Token and payload are required'}), 400
+
+        # Validate token format
+        if not str(token).startswith('case_'):
+            return jsonify({'error': 'Invalid token format'}), 400
+
+        # Check if case already exists
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        params = {
+            'token': f'eq.{token}',
+            'select': 'id,payload,created_at'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        cases = response.json()
+        existing_case = cases[0] if cases else None
+
+        if existing_case:
+            # Case exists - update with merged payload
+            existing_payload = existing_case.get('payload') or {}
+            if isinstance(existing_payload, str):
+                try:
+                    existing_payload = json.loads(existing_payload)
+                except:
+                    existing_payload = {}
+
+            merged_payload = {**existing_payload, **payload}
+
+            update_data = {
+                'payload': merged_payload,
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            headers['Prefer'] = 'return=representation'
+
+            update_response = requests.patch(url, params=params, headers=headers,
+                                           json=update_data, timeout=TIMEOUT)
+            update_response.raise_for_status()
+            result = update_response.json()
+            logger.info(f"Case updated: {token}")
+
+        else:
+            # Case doesn't exist - create new
+            insert_data = {
+                'token': token,
+                'payload': payload,
+                'status': 'new',
+                'unlocked': False,
+                'created_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            headers['Prefer'] = 'return=representation'
+
+            insert_response = requests.post(url, headers=headers,
+                                          json=insert_data, timeout=TIMEOUT)
+            insert_response.raise_for_status()
+            result = insert_response.json()
+            logger.info(f"Case created: {token}")
+
+        case_id = result[0].get('id') if result and len(result) > 0 else None
+        return jsonify({'success': True, 'case_id': case_id}), 200
+
+    except Exception as e:
+        logger.error(f"Save case error: {str(e)}")
+        return jsonify({'error': str(e) or 'Internal server error'}), 500
 
 
 if __name__ == '__main__':
