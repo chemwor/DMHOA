@@ -602,7 +602,7 @@ def doc_extract_webhook():
             logger.info(f"Processing as image using OCR: {filename}")
             extracted_text, page_count, char_count, extraction_error = extract_image_text(file_bytes, filename)
         else:
-            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path'. Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
+            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path}'. Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
             logger.warning(error_msg)
             update_document(document_id, token, {
                 'status': 'failed',
