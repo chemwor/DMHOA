@@ -1345,7 +1345,7 @@ def save_case():
     if request.method == 'OPTIONS':
         response = jsonify({'message': 'OK'})
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-client-info,x-supabase-api-version')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
         return response
 
@@ -1416,7 +1416,7 @@ def save_case():
 
         response = jsonify(response_data)
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-client-info,x-supabase-api-version')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
 
         return response, 200
@@ -1427,7 +1427,7 @@ def save_case():
 
         response = jsonify({'error': error_msg})
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-client-info,x-supabase-api-version')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
 
         return response, 500
