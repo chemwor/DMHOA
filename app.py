@@ -510,7 +510,6 @@ def doc_extract_webhook():
         mime_type = data.get('mime_type', '') or ''  # Handle null values
 
         logger.info(f"Processing document extraction - ID: {document_id}, Token: {token[:8]}...")
-        logger.info(f"Raw payload data - filename: {repr(filename)}, mime_type: {repr(mime_type)}, path: {path}")
 
         # Check if document is already processed
         current_doc = fetch_document_status(document_id)
@@ -602,44 +601,32 @@ def doc_extract_webhook():
             logger.info(f"Processing as image using OCR: {filename}")
             extracted_text, page_count, char_count, extraction_error = extract_image_text(file_bytes, filename)
         else:
-            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path}'. Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
-            logger.warning(error_msg)
+            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path}'"
             update_document(document_id, token, {
                 'status': 'failed',
                 'error': error_msg[:2000]
             })
-            return jsonify({
-                'error': error_msg,
-                'document_id': document_id
-            }, 400)
+            return jsonify({'error': error_msg, 'document_id': document_id}), 400
 
         if extraction_error:
-            # Handle extraction failure
             update_document(document_id, token, {
                 'status': 'failed',
                 'error': extraction_error[:2000],
                 'page_count': page_count
             })
-            return jsonify({
-                'error': extraction_error,
-                'document_id': document_id
-            }), 500
+            return jsonify({'error': extraction_error, 'document_id': document_id}), 500
 
         if char_count == 0:
-            # Handle no text found case
-            error_msg = "No text found in document - document may be blank or contain no readable text"
+            error_msg = "No text found in document"
             update_document(document_id, token, {
                 'status': 'failed',
                 'error': error_msg,
                 'page_count': page_count,
                 'char_count': 0
             })
-            return jsonify({
-                'error': error_msg,
-                'document_id': document_id
-            }), 500
+            return jsonify({'error': error_msg, 'document_id': document_id}), 500
 
-        # Update document with extracted text
+        # Update document with extracted text - MARK AS READY
         success = update_document(document_id, token, {
             'status': 'ready',
             'extracted_text': extracted_text,
@@ -654,14 +641,14 @@ def doc_extract_webhook():
                 'document_id': document_id
             }), 500
 
-        # Try to regenerate preview if documents are now ready
+        # CRITICAL FIX: Only regenerate preview AFTER document is marked as ready
+        # This ensures the proper order: Save Case -> Process Documents -> Generate Preview
         try:
+            logger.info(f"Document {document_id} is now ready. Checking if preview should be regenerated for token {token[:8]}...")
             regenerate_preview_if_documents_ready(token)
         except Exception as e:
-            logger.warning("Preview regeneration failed", extra={
-                "token": token[:12],
-                "error": str(e)
-            })
+            logger.warning(f"Preview regeneration failed for token {token[:8]}...: {str(e)}")
+            # Don't fail the document processing if preview regeneration fails
 
         file_type = "PDF" if is_pdf_file(filename, mime_type) else "image"
         logger.info(f"Successfully processed {file_type} document {document_id} - {page_count} pages, {char_count} characters")
@@ -676,19 +663,15 @@ def doc_extract_webhook():
         }), 200
 
     except Exception as e:
-        error_msg = str(e)[:2000]  # Truncate error message
+        error_msg = str(e)[:2000]
         logger.error(f"Unexpected error processing document: {error_msg}")
 
-        # Try to update document status to failed if we have the required data
         if document_id and token:
             update_document(document_id, token, {
                 'status': 'failed',
                 'error': error_msg
             })
-            return jsonify({
-                'error': error_msg,
-                'document_id': document_id
-            }), 500
+            return jsonify({'error': error_msg, 'document_id': document_id}), 500
         else:
             return jsonify({'error': error_msg}), 500
 
@@ -1207,7 +1190,7 @@ def create_checkout_session():
             return add_cors_headers(response), 400
 
         # 1) Fetch case (it may not exist yet — that's OK)
-        logger.info('[create-checkout-session] fetching case', extra={'token_preview': f"{token[:12]}…"})
+        logger.info('[create-checkout-session] fetching case', extra={'token_preview': f"{token[:12]}..."})
 
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
         params = {
@@ -1231,7 +1214,7 @@ def create_checkout_session():
         # 2) Create case if missing
         if not existing_case:
             logger.warning('[create-checkout-session] case not found, creating new case',
-                         extra={'token_preview': f"{token[:12]}…"})
+                         extra={'token_preview': f"{token[:12]}..."})
 
             insert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             insert_data = {
@@ -1833,877 +1816,82 @@ def regenerate_preview_if_documents_ready(token: str):
     - Documents exist with extracted_text
     - A preview exists
     - The preview was generated before docs were available
+
+    This ensures the proper order: Save Case -> Process Documents -> Generate Preview
     """
-
-    case = read_case_by_token(token)
-    if not case:
-        return
-
-    case_id = case.get("id")
-    if not case_id:
-        return
-
-    # Fetch documents with extracted text
-    docs = fetch_ready_documents_by_token(token)
-    usable_docs = [
-        d for d in docs
-        if isinstance(d.get("extracted_text"), str) and d["extracted_text"].strip()
-    ]
-
-    if not usable_docs:
-        return
-
-    existing_preview = read_active_preview(case_id)
-    if not existing_preview:
-        return
-
-    if not preview_was_generated_without_docs(existing_preview):
-        return
-
-    logger.info("Regenerating preview with documents", extra={
-        "token": token[:12],
-        "doc_count": len(usable_docs)
-    })
-
-    # Deactivate old previews
-    deactivate_previews(case_id)
-
-    # Generate a new preview using payload + docs
-    preview_content = generate_preview_with_gpt(case)
-
-    if not preview_content:
-        logger.error("Failed to regenerate preview")
-        return
-
-    insert_preview(case_id, preview_content)
-
-
-def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
-    """Fetch case from dmhoa_cases by token"""
     try:
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-        params = {
-            'token': f'eq.{token}',
-            'select': '*'
-        }
-        headers = supabase_headers()
-        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-        response.raise_for_status()
-        cases = response.json()
-        return cases[0] if cases else None
-    except Exception as e:
-        logger.error(f"Failed to fetch case by token: {str(e)}")
-        return None
-
-
-def read_active_preview(case_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch active preview for a case from dmhoa_case_previews"""
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
-        params = {
-            'case_id': f'eq.{case_id}',
-            'is_active': 'eq.true',
-            'select': '*',
-            'order': 'created_at.desc',
-            'limit': '1'
-        }
-        headers = supabase_headers()
-        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-        response.raise_for_status()
-        previews = response.json()
-        return previews[0] if previews else None
-    except Exception as e:
-        logger.error(f"Failed to fetch active preview: {str(e)}")
-        # Log response body for debugging
-        if hasattr(e, 'response') and hasattr(e.response, 'text'):
-            logger.error(f"Response body: {e.response.text}")
-        return None
-
-
-def deactivate_previews(case_id: str) -> bool:
-    """Deactivate all existing previews for a case"""
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
-        params = {
-            'case_id': f'eq.{case_id}'
-        }
-        data = {
-            'is_active': False
-        }
-        headers = supabase_headers()
-        response = requests.patch(url, params=params, headers=headers, json=data, timeout=TIMEOUT)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to deactivate previews: {str(e)}")
-        # Log response body for debugging
-        if hasattr(e, 'response') and hasattr(e.response, 'text'):
-            logger.error(f"Response body: {e.response.text}")
-        return False
-
-
-def generate_preview_with_gpt(case_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Generate structured preview using OpenAI GPT-4 with personalized content"""
-    payload = case_data.get('payload', {}) or {}
-    token = case_data.get('token', 'unknown')
-
-    # Fetch ready documents by token
-    docs = fetch_ready_documents_by_token(token)
-
-    # Build document brief
-    doc_brief = build_doc_brief(docs)
-
-    # Check for any documents in processing status
-    all_docs_status = fetch_any_documents_status_by_token(token)
-    processing_docs = [d for d in all_docs_status if d.get('status') in ['pending', 'processing']]
-
-    if processing_docs and doc_brief["doc_status"] == "none":
-        doc_brief["doc_status"] = "processing"
-
-    # Add logging for document retrieval and prompt inputs
-    logger.info("DOC BRIEF DEBUG", extra={
-        "token": token[:12] + "...",
-        "doc_status": doc_brief["doc_status"],
-        "doc_count": doc_brief["doc_count"],
-        "ready_docs": len(docs),
-        "processing_docs": len(processing_docs),
-        "brief_text_len": len(doc_brief.get("brief_text", ""))
-    })
-
-    def get_nested_value(obj: Any, path: str) -> Any:
-        """Get a value from a nested dict using dotted path notation"""
-        if not obj or not isinstance(obj, dict):
-            return None
-        parts = path.split('.')
-        current = obj
-        for part in parts:
-            if not isinstance(current, dict):
-                return None
-            current = current.get(part)
-            if current is None:
-                return None
-        return current
-
-    def get_first_string(payload: Dict[str, Any], paths: List[str]) -> str:
-        """Try multiple dotted paths and return the first non-empty string"""
-        for path in paths:
-            value = get_nested_value(payload, path)
-            if value and isinstance(value, str) and value.strip():
-                return value.strip()
-        return ''
-
-    def scan_for_text(payload: Dict[str, Any], array_keys: List[str]) -> str:
-        """Scan arrays like 'messages' or 'steps' for any dict containing 'text' or 'value'"""
-        for key in array_keys:
-            arr = payload.get(key)
-            if isinstance(arr, list):
-                for item in arr:
-                    if isinstance(item, dict):
-                        for text_key in ['text', 'value', 'content', 'message', 'description']:
-                            val = item.get(text_key)
-                            if val and isinstance(val, str) and val.strip():
-                                return val.strip()
-        return ''
-
-    # Paths to try for issue_text extraction (in priority order)
-    issue_paths = [
-        "issue_summary",
-        "issue",
-        "description",
-        "notice_text",
-        "hoa_notice_text",
-        "letter_text",
-        "user_input",
-        "summary",
-        "payload.issue_summary",
-        "form.issue_summary",
-        "form.description",
-        "form.notice_text",
-        "answers.issue_summary",
-        "answers.description",
-        "intake.issue_summary",
-        "intake.description",
-        "intake.notice_text",
-        "notice_summary",
-        "violationDetails",
-        "violation_details",
-    ]
-
-    # Try structured paths first
-    issue_text = get_first_string(payload, issue_paths)
-
-    # If still empty, try scanning arrays
-    if not issue_text:
-        issue_text = scan_for_text(payload, ['messages', 'steps', 'inputs', 'responses', 'history'])
-
-    # Improve issue extraction: use doc brief if payload issue is empty
-    if not issue_text and doc_brief.get("brief_text"):
-        issue_text = doc_brief["brief_text"]
-        logger.info("Using doc brief as issue_text fallback", extra={
-            "token": token[:12] + "...",
-            "brief_text_len": len(issue_text)
-        })
-
-    # Build normalized case_brief with fallback keys
-    state_paths = ["state", "property_state", "location.state", "form.state", "answers.state"]
-    state = get_first_string(payload, state_paths) or 'Not provided'
-
-    property_type_paths = ["property_type", "propertyType", "property", "form.property_type", "answers.property_type"]
-    property_type = get_first_string(payload, property_type_paths) or 'property'
-
-    user_role_paths = ["user_role", "userRole", "role", "form.user_role", "answers.user_role"]
-    user_role = get_first_string(payload, user_role_paths) or 'homeowner'
-
-    # Flexible extraction for desired outcome
-    desired_outcome_paths = ["desired_outcome", "desiredOutcome", "goal", "you_want_to", "form.desired_outcome", "answers.desired_outcome"]
-    desired_outcome = get_first_string(payload, desired_outcome_paths) or ''
-
-    # Additional context fields
-    what_hoa_requested_paths = ["what_hoa_requested", "hoaActions", "hoa_actions", "form.what_hoa_requested"]
-    what_hoa_requested = get_first_string(payload, what_hoa_requested_paths) or ''
-
-    deadline_paths = ["deadline", "due_date", "form.deadline", "answers.deadline"]
-    deadline = get_first_string(payload, deadline_paths) or 'Not provided'
-
-    # Additional fields for context
-    violation_type_paths = ["violationType", "violation_type", "form.violation_type"]
-    violation_type = get_first_string(payload, violation_type_paths) or ''
-
-    your_response_paths = ["yourResponse", "your_response", "form.your_response"]
-    your_response = get_first_string(payload, your_response_paths) or ''
-
-    # Log what we extracted BEFORE calling OpenAI
-    logger.info("PREVIEW INPUT DEBUG", extra={
-        "token": token[:12] + "...",
-        "issue_text_len": len(issue_text or ""),
-        "issue_text_sample": (issue_text or "")[:250],
-        "state": state,
-        "property_type": property_type,
-        "desired_outcome": desired_outcome,
-        "payload_keys": list(payload.keys()) if payload else [],
-        "doc_brief_status": doc_brief["doc_status"],
-        "doc_brief_text_len": len(doc_brief.get("brief_text", ""))
-    })
-
-    # Build the personalized prompt with conditional rules based on issue_text_len and doc availability
-    issue_text_len = len(issue_text or "")
-    doc_brief_text = doc_brief.get("brief_text", "")
-
-    if issue_text_len > 0:
-        if doc_brief_text:
-            issue_instructions = f"""CRITICAL - You have actual issue details from both form data AND uploaded HOA documents. You MUST:
-- Reference the specific issue: "{issue_text[:500]}"
-- DO NOT say "details not provided" or "information not available"  
-- DO NOT use placeholders like "[specific issue]" or "[your situation]"
-- The what_this_means and response_opening_preview MUST directly reference the user's actual issue
-- Be specific: if they mention "dryer vent", say "dryer vent". If they mention "parking", say "parking"."""
-        else:
-            issue_instructions = f"""CRITICAL - You have actual issue details from form data. You MUST:
-- Reference the specific issue: "{issue_text[:500]}"
-- DO NOT say "details not provided" or "information not available"
-- DO NOT use placeholders like "[specific issue]" or "[your situation]"  
-- The what_this_means and response_opening_preview MUST directly reference the user's actual issue
-- Be specific: if they mention "dryer vent", say "dryer vent". If they mention "parking", say "parking"."""
-    else:
-        if doc_brief_text:
-            issue_instructions = """NOTE: No form details were provided, but you have uploaded HOA document content. You should:
-- Use the document content to understand their situation
-- Reference specific details from the HOA notice when available
-- Still provide best-effort steps for their specific HOA dispute
-- Be honest if more details would help personalize the response"""
-        else:
-            issue_instructions = """NOTE: No specific issue details were provided. You should:
-- Ask ONE clarifying question to understand their situation better
-- Still provide best-effort general steps for HOA disputes
-- Be honest that more details would help personalize the response"""
-
-    # Build document section for the prompt
-    hoa_notice_section = ""
-    if doc_brief_text:
-        hoa_notice_section = f"\nHOA NOTICE BRIEF (from uploaded docs): {doc_brief_text}"
-    elif doc_brief["doc_status"] == "processing":
-        hoa_notice_section = "\nHOA NOTICE BRIEF: (Documents are still being processed - analysis will be updated when ready)"
-    else:
-        hoa_notice_section = "\nHOA NOTICE BRIEF: (none)"
-
-    prompt = f"""You are an educational HOA dispute assistant (not a lawyer). Generate a conversion-grade preview based on the ACTUAL user inputs below.
-
-{issue_instructions}
-
-FORMATTING RULES:
-- Tone: Calm, neutral, professional. Educational + drafting assistance only, NOT legal advice.
-- NO em dashes (—). Use regular dashes or restructure sentences.
-- Be concise but specific to their situation.
-- If doc_brief has content, you MUST reference it and MUST NOT say "details not provided".
-- If doc_brief empty, proceed as before.
-
-USER'S ACTUAL SITUATION:
-- State: {state}
-- Property Type: {property_type}
-- User Role: {user_role}
-- Issue Summary: {issue_text if issue_text else '(not provided)'}
-- What HOA Requested: {what_hoa_requested if what_hoa_requested else '(not provided)'}
-- Violation Type: {violation_type if violation_type else '(not provided)'}
-- User's Response So Far: {your_response if your_response else '(not provided)'}
-- Desired Outcome: {desired_outcome if desired_outcome else '(not provided)'}
-- Deadline: {deadline}{hoa_notice_section}
-
-DELIVERABLES:
-1. Preview Title: Brief, specific to their issue (e.g., "Responding to Dryer Vent Repair Request" not "HOA Dispute")
-2. What This Means: Explain their situation in plain language using THEIR specific details. If they said "dryer vent", mention "dryer vent". Reference the actual issue.
-3. Risk & Timeline: Assess deadline, risk level (Low/Medium/High), explain why based on THEIR situation
-4. Recommended Next Step: ONE clear action with 2-3 specific, actionable bullets (max 3)
-5. Response Opening Preview: Subject line + opening paragraph that references the SPECIFIC issue (e.g., "Re: Dryer Vent Compliance - Proof of Repair Attached")
-6. Unlock Teaser: What they get when they unlock - must be tangible (Full draft email, Certified mail version, Response checklist, Next-step options, Tone guidance)
-
-EXAMPLE of good personalization (if issue is about dryer vent proof):
-- Preview Title: "Responding to HOA Request for Dryer Vent Repair Proof"
-- What This Means: "Your HOA has requested proof that your dryer vent issue has been resolved. This is a compliance verification request..."
-- Subject: "Re: Dryer Vent Repair - Compliance Documentation Attached"
-"""
-
-    # Update unlock teaser if documents are processing
-    processing_teaser_addition = ""
-    if doc_brief["doc_status"] == "processing":
-        processing_teaser_addition = " We are still reading your uploaded notice. Unlock now to get the full draft as soon as processing finishes."
-
-    # Define the JSON schema with improved unlock_teaser
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "preview_title": {"type": "string"},
-            "what_this_means": {"type": "string"},
-            "risk_and_timeline": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "deadline": {"type": "string"},
-                    "risk_level": {"type": "string"},
-                    "why": {"type": "string"}
-                },
-                "required": ["deadline", "risk_level", "why"]
-            },
-            "recommended_next_step": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "headline": {"type": "string"},
-                    "bullets": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 3}
-                },
-                "required": ["headline", "bullets"]
-            },
-            "response_opening_preview": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "subject": {"type": "string"},
-                    "opening_paragraph": {"type": "string"}
-                },
-                "required": ["subject", "opening_paragraph"]
-            },
-            "unlock_teaser": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "headline": {"type": "string"},
-                    "includes": {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 5}
-                },
-                "required": ["headline", "includes"]
-            }
-        },
-        "required": ["preview_title", "what_this_means", "risk_and_timeline", "recommended_next_step", "response_opening_preview", "unlock_teaser"]
-    }
-
-    try:
-        # Call OpenAI API
-        headers = {
-            'Authorization': f'Bearer {OPENAI_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-
-        data = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an educational HOA dispute assistant. Provide clear, calm, personalized guidance without giving legal advice. Always use specific details from the user's situation."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "preview_response",
-                    "strict": True,
-                    "schema": schema
-                }
-            },
-            "temperature": 0.7,
-            "max_tokens": 1500
-        }
-
-        logger.info("Calling OpenAI API to generate personalized preview...")
-        response = requests.post(
-            'https://api.openai.com/v1/chat/completions',
-            headers=headers,
-            json=data,
-            timeout=30
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        content = result['choices'][0]['message']['content']
-        preview_dict = json.loads(content)
-
-        # Add processing teaser if documents are still being processed
-        if processing_teaser_addition:
-            current_headline = preview_dict.get("unlock_teaser", {}).get("headline", "")
-            preview_dict["unlock_teaser"]["headline"] = current_headline + processing_teaser_addition
-
-        logger.info(f"Successfully generated preview with GPT-4: {preview_dict.get('preview_title', 'N/A')}")
-
-        # Verify it's a dict before returning
-        logger.info("PREVIEW TYPE", extra={"type": str(type(preview_dict))})
-
-        return preview_dict
-
-    except Exception as e:
-        logger.error(f"Failed to generate preview with GPT-4: {str(e)}")
-        if hasattr(e, 'response') and hasattr(e.response, 'text'):
-            logger.error(f"API response: {e.response.text[:500]}")
-        return None
-
-
-def insert_preview(case_id: str, preview_content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Insert new preview into dmhoa_case_previews"""
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
-
-        # Verify preview_content is a dict before inserting (not a JSON string)
-        if isinstance(preview_content, str):
-            logger.warning("preview_content was a string, parsing as JSON")
-            preview_content = json.loads(preview_content)
-        
-        logger.info("INSERT PREVIEW DEBUG", extra={
-            "type": str(type(preview_content)),
-            "is_dict": isinstance(preview_content, dict)
-        })
-
-        # Generate snippet from structured content
-        risk_level = preview_content.get('risk_and_timeline', {}).get('risk_level', 'Unknown')
-        next_step = preview_content.get('recommended_next_step', {}).get('headline', 'Review situation')
-        preview_snippet = f"{risk_level}: {next_step}"
-
-        # Data dict - preview_content is a Python dict, NOT json.dumps()
-        # requests.post(..., json=data) will serialize the entire payload correctly
-        data = {
-            'case_id': case_id,
-            'preview_content': preview_content,  # Python dict -> stored as JSONB
-            'preview_snippet': preview_snippet,
-            'is_active': True,
-            'model': 'gpt-4o-mini',
-            'prompt_version': 'preview_v3_payload_fix',
-            'created_at': datetime.utcnow().isoformat()
-        }
-
-        headers = supabase_headers()
-        headers['Prefer'] = 'return=representation'
-
-        logger.info(f"Inserting preview for case {case_id}: {preview_snippet}")
-        # Using json=data ensures proper serialization for JSONB column
-        response = requests.post(url, headers=headers, json=data, timeout=TIMEOUT)
-        response.raise_for_status()
-
-        previews = response.json()
-        return previews[0] if previews else None
-
-    except Exception as e:
-        logger.error(f"Failed to insert preview: {str(e)}")
-        # Log response body for debugging
-        if hasattr(e, 'response') and hasattr(e.response, 'text'):
-            logger.error(f"Response body: {e.response.text}")
-        return None
-
-
-@app.route('/api/save-case', methods=['POST', 'OPTIONS'])
-def save_case():
-    """
-    Save or update a case in dmhoa_cases table.
-    Called by the frontend when the user completes the case form.
-    Automatically generates a preview after saving.
-
-    Request body:
-    {
-        "token": "unique-case-token",
-        "email": "user@example.com",
-        "payload": {...}  // case data
-    }
-
-    Response:
-    {
-        "ok": true,
-        "token": "...",
-        "case_id": "...",
-        "preview_generated": true
-    }
-    """
-    # Handle CORS preflight
-    if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
-        return response, 200
-
-    # Add CORS headers to actual response
-    def add_cors_headers(response):
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
-        return response
-
-    try:
-        # Validate environment variables
-        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-            response = jsonify({'error': 'Missing required environment variables'})
-            return add_cors_headers(response), 500
-
-        # Parse request body
-        try:
-            body = request.get_json() or {}
-        except Exception:
-            body = {}
-
-        token = (body.get('token') or '').strip()
-        email = (body.get('email') or '').strip()
-        payload = body.get('payload')
-
-        if not token:
-            response = jsonify({'error': 'token is required'})
-            return add_cors_headers(response), 400
-
-        logger.info(f'[save-case] Request for token: {token[:12]}..., has_email: {bool(email)}, has_payload: {bool(payload)}')
-
-        # Check if case already exists
-        case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-        case_params = {
-            'token': f'eq.{token}',
-            'select': 'id,token,status'
-        }
-        case_headers = supabase_headers()
-
-        try:
-            case_response = requests.get(case_url, params=case_params, headers=case_headers, timeout=TIMEOUT)
-            case_response.raise_for_status()
-            cases = case_response.json()
-            existing_case = cases[0] if cases else None
-        except Exception as e:
-            logger.error(f'[save-case] Failed to check existing case: {str(e)}')
-            response = jsonify({'error': 'Database error', 'details': str(e)})
-            return add_cors_headers(response), 500
-
-        case_id = None
-
-        if existing_case:
-            # Update existing case
-            logger.info(f'[save-case] Updating existing case {existing_case.get("id")}')
-
-            case_id = existing_case.get('id')
-            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            update_params = {'token': f'eq.{token}'}
-            update_data = {
-                'payload': payload,
-                'updated_at': datetime.utcnow().isoformat()
-            }
-
-            # Only update email if provided
-            if email:
-                update_data['email'] = email
-
-            update_headers = supabase_headers()
-            update_headers['Prefer'] = 'return=representation'
-
-            try:
-                update_response = requests.patch(update_url, params=update_params,
-                                                headers=update_headers, json=update_data, timeout=TIMEOUT)
-                update_response.raise_for_status()
-                updated_cases = update_response.json()
-                updated_case = updated_cases[0] if updated_cases else None
-
-                if updated_case:
-                    case_id = updated_case.get('id')
-
-            except Exception as e:
-                logger.error(f'[save-case] Failed to update case: {str(e)}')
-                response = jsonify({'error': 'Failed to update case', 'details': str(e)})
-                return add_cors_headers(response), 500
-        else:
-            # Insert new case
-            logger.info(f'[save-case] Creating new case with token {token[:12]}...')
-
-            insert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            insert_data = {
-                'token': token,
-                'email': email or None,
-                'payload': payload,
-                'status': 'draft',
-                'unlocked': False,
-                'created_at': datetime.utcnow().isoformat(),
-                'updated_at': datetime.utcnow().isoformat()
-            }
-            insert_headers = supabase_headers()
-            insert_headers['Prefer'] = 'return=representation'
-
-            try:
-                insert_response = requests.post(insert_url, headers=insert_headers,
-                                               json=insert_data, timeout=TIMEOUT)
-                insert_response.raise_for_status()
-                inserted_cases = insert_response.json()
-                inserted_case = inserted_cases[0] if inserted_cases else None
-
-                if inserted_case:
-                    case_id = inserted_case.get('id')
-
-            except Exception as e:
-                logger.error(f'[save-case] Failed to insert case: {str(e)}')
-                response = jsonify({'error': 'Failed to create case', 'details': str(e)})
-                return add_cors_headers(response), 500
-
-        # Now generate the preview automatically
-        preview_generated = False
-        preview_error = None
-
-        if case_id:
-            logger.info(f'[save-case] Starting preview generation for case {case_id}')
-
-            # Fetch the full case data with payload
-            case_data = read_case_by_token(token)
-            logger.info(f'[save-case] Fetched case data: {bool(case_data)}')
-
-            if case_data:
-                # Check if preview already exists
-                existing_preview = read_active_preview(case_id)
-                logger.info(f'[save-case] Existing preview check: {bool(existing_preview)}')
-
-                if not existing_preview:
-                    logger.info(f'[save-case] No existing preview, calling generate_preview_with_gpt...')
-
-                    # Generate new preview
-                    preview_content = generate_preview_with_gpt(case_data)
-                    logger.info(f'[save-case] GPT generation result: {bool(preview_content)}')
-
-                    if preview_content:
-                        logger.info(f'[save-case] Preview content generated, calling insert_preview...')
-
-                        # Insert preview
-                        new_preview = insert_preview(case_id, preview_content)
-                        logger.info(f'[save-case] Insert preview result: {bool(new_preview)}')
-
-                        if new_preview:
-                            preview_generated = True
-                            logger.info(f'[save-case] ✅ Successfully generated preview {new_preview.get("id")} for case {case_id}')
-                        else:
-                            preview_error = 'Failed to insert preview into database'
-                            logger.error(f'[save-case] ❌ Failed to insert preview for case {case_id}')
-                    else:
-                        preview_error = 'OpenAI API failed to generate preview content'
-                        logger.error(f'[save-case] ❌ Failed to generate preview content for case {case_id}')
-                else:
-                    logger.info(f'[save-case] Preview already exists for case {case_id}, skipping generation')
-                    preview_generated = True
+        case = read_case_by_token(token)
+        if not case:
+            logger.warning(f"Case not found for preview regeneration: {token[:8]}...")
+            return
+
+        case_id = case.get("id")
+        if not case_id:
+            logger.warning(f"Case ID not found for preview regeneration: {token[:8]}...")
+            return
+
+        # Fetch documents with extracted text
+        docs = fetch_ready_documents_by_token(token)
+        usable_docs = [
+            d for d in docs
+            if isinstance(d.get("extracted_text"), str) and d["extracted_text"].strip()
+        ]
+
+        if not usable_docs:
+            logger.info(f"No usable documents found for preview regeneration: {token[:8]}...")
+            return
+
+        # Check if preview exists
+        existing_preview = read_active_preview(case_id)
+        if not existing_preview:
+            logger.info(f"No existing preview found, generating new one with documents: {token[:8]}...")
+            # Generate a new preview using payload + docs
+            preview_content = generate_preview_with_gpt(case)
+            if preview_content:
+                insert_preview(case_id, preview_content)
+                logger.info(f"Successfully generated new preview with documents for case {case_id}")
             else:
-                preview_error = 'Could not fetch case data from database'
-                logger.error(f'[save-case] ❌ Could not fetch case data for preview generation')
+                logger.error(f"Failed to generate new preview for case {case_id}")
+            return
+
+        # Check if the existing preview was generated without documents
+        if not preview_was_generated_without_docs(existing_preview):
+            logger.info(f"Existing preview already includes document content: {token[:8]}...")
+            return
+
+        logger.info("Regenerating preview with documents", extra={
+            "token": token[:12],
+            "doc_count": len(usable_docs),
+            "case_id": case_id
+        })
+
+        # Deactivate old previews
+        if deactivate_previews(case_id):
+            logger.info(f"Deactivated old previews for case {case_id}")
         else:
-            preview_error = 'No case_id available'
-            logger.error(f'[save-case] ❌ No case_id for preview generation')
+            logger.warning(f"Failed to deactivate old previews for case {case_id}")
 
-        response_data = {
-            'ok': True,
-            'token': token,
-            'case_id': case_id,
-            'preview_generated': preview_generated
-        }
-
-        if preview_error:
-            response_data['preview_error'] = preview_error
-
-        logger.info(f'[save-case] Final response: {response_data}')
-
-        response = jsonify(response_data)
-        return add_cors_headers(response), 200
-
-    except Exception as e:
-        logger.error(f'[save-case] Unexpected error: {str(e)}')
-        response = jsonify({'error': 'Internal server error', 'details': str(e)})
-        return add_cors_headers(response), 500
-
-
-@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
-def get_case_data():
-    """
-    Fetch case data by token.
-    Used by the frontend to retrieve case information.
-
-    Query params:
-    ?token=case-token
-
-    Response:
-    {
-        "id": "...",
-        "token": "...",
-        "email": "...",
-        "status": "...",
-        "payload": {...},
-        "unlocked": false,
-        "created_at": "...",
-        "updated_at": "..."
-    }
-    """
-    # Handle CORS preflight
-    if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
-        return response, 200
-
-    # Add CORS headers to actual response
-    def add_cors_headers(response):
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
-        return response
-
-    try:
-        # Validate environment variables
-        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-            response = jsonify({'error': 'Missing required environment variables'})
-            return add_cors_headers(response), 500
-
-        # Get token from query params
-        token = request.args.get('token', '').strip()
-
-        if not token:
-            response = jsonify({'error': 'token parameter is required'})
-            return add_cors_headers(response), 400
-
-        logger.info(f'[case-data] Request for token: {token[:12]}...')
-
-        # Fetch case by token
-        case_data = read_case_by_token(token)
-
-        if not case_data:
-            response = jsonify({'error': 'Case not found'})
-            return add_cors_headers(response), 404
-
-        logger.info(f'[case-data] Found case {case_data.get("id")}')
-
-        response = jsonify(case_data)
-        return add_cors_headers(response), 200
-
-    except Exception as e:
-        logger.error(f'[case-data] Unexpected error: {str(e)}')
-        response = jsonify({'error': 'Internal server error', 'details': str(e)})
-        return add_cors_headers(response), 500
-
-
-@app.route('/api/case-preview', methods=['POST', 'OPTIONS'])
-def case_preview():
-    """
-    Generate and return a case preview.
-    Flow:
-    1) User submits case via form -> case saved to dmhoa_cases with unique token
-    2) Frontend calls /api/case-preview with {token, force:false} to generate and store a preview before payment
-    3) Preview page fetches from /api/case-preview (cached) to render the preview using the stored record
-
-    Request body:
-    {
-        "token": "case-token",
-        "force": false  // optional, defaults to false. If true, regenerate even if cached
-    }
-
-    Response:
-    {
-        "preview_content": {...},  // structured JSON object
-        "preview_snippet": "Risk: Next step",
-        "case_id": "...",
-        "created_at": "..."
-    }
-    """
-    if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
-        return add_cors_headers(response), 200
-
-    try:
-        body = request.get_json() or {}
-        token = body.get('token')
-        force = body.get('force', False)
-
-        if not token:
-            response = jsonify({'error': 'Missing token'})
-            return add_cors_headers(response), 400
-
-        logger.info(f'[case-preview] Request for token: {token[:12]}..., force: {force}')
-
-        # 1) Fetch case by token
-        case_data = read_case_by_token(token)
-        if not case_data:
-            response = jsonify({'error': 'Case not found'})
-            return add_cors_headers(response), 404
-
-        case_id = case_data.get('id')
-
-        # 2) Check for existing active preview
-        if not force:
-            existing_preview = read_active_preview(case_id)
-            if existing_preview:
-                logger.info(f'[case-preview] Returning cached preview for case {case_id}')
-                response = jsonify({
-                    'preview_content': existing_preview.get('preview_content'),
-                    'preview_snippet': existing_preview.get('preview_snippet'),
-                    'case_id': case_id,
-                    'created_at': existing_preview.get('created_at')
-                })
-                return add_cors_headers(response), 200
-
-        # 3) Generate new preview using GPT
-        logger.info(f'[case-preview] Generating new preview for case {case_id}')
-        preview_content = generate_preview_with_gpt(case_data)
+        # Generate a new preview using payload + docs
+        preview_content = generate_preview_with_gpt(case)
 
         if not preview_content:
-            logger.error(f'[case-preview] Failed to generate preview for case {case_id}')
-            response = jsonify({'error': 'Failed to generate preview'})
-            return add_cors_headers(response), 500
+            logger.error(f"Failed to regenerate preview for case {case_id}")
+            return
 
-        # 4) If force regenerate, deactivate old previews first
-        if force:
-            deactivate_previews(case_id)
-
-        # 5) Insert new preview
         new_preview = insert_preview(case_id, preview_content)
-
-        if not new_preview:
-            logger.error(f'[case-preview] Failed to save preview for case {case_id}')
-            response = jsonify({'error': 'Failed to save preview'})
-            return add_cors_headers(response), 500
-
-        logger.info(f'[case-preview] Successfully saved preview {new_preview.get("id")} for case {case_id}')
-
-        response = jsonify({
-            'preview_content': new_preview.get('preview_content'),
-            'preview_snippet': new_preview.get('preview_snippet'),
-            'case_id': case_id,
-            'created_at': new_preview.get('created_at')
-        })
-        return add_cors_headers(response), 200
+        if new_preview:
+            logger.info(f"Successfully regenerated preview {new_preview.get('id')} for case {case_id}")
+        else:
+            logger.error(f"Failed to save regenerated preview for case {case_id}")
 
     except Exception as e:
-        logger.error(f'[case-preview] error: {str(e)}')
-        response = jsonify({'error': 'Internal server error', 'details': str(e)})
-        return add_cors_headers(response), 500
+        logger.error(f"Exception during preview regeneration for token {token[:8]}...: {str(e)}")
+
+
+def add_cors_headers(response):
+    """Helper function to add CORS headers consistently across endpoints"""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
+    return response
 
