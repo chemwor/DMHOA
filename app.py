@@ -11,7 +11,6 @@ import time
 
 import requests
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from pypdf import PdfReader
 import stripe
 
@@ -29,13 +28,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Enable CORS for all routes with comprehensive headers
-CORS(app,
-     origins=['http://localhost:5173', 'https://disputemyhoa.com', 'https://www.disputemyhoa.com'],
-     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization', 'apikey', 'X-Webhook-Secret', 'X-Requested-With', 'Accept', 'Origin'],
-     supports_credentials=True)
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -387,7 +379,7 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
                 logger.info(f"Trying OCR with config: {config}")
                 current_text = pytesseract.image_to_string(image, config=config)
                 current_text = current_text.strip()
-                char_count = len(current_text);
+                char_count = len(current_text)
 
                 # Keep track of the best result (most text that looks reasonable)
                 if char_count > best_char_count:
@@ -619,7 +611,7 @@ def doc_extract_webhook():
             return jsonify({
                 'error': error_msg,
                 'document_id': document_id
-            }, 400)
+            }), 400
 
         # Update document with extraction results
         update_data = {
@@ -697,12 +689,148 @@ def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> str:
-    """Generate case preview using OpenAI."""
+def read_active_preview(case_id: str) -> Optional[Dict]:
+    """Read the active preview for a case from dmhoa_case_previews table."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        params = {
+            'case_id': f'eq.{case_id}',
+            'is_active': 'eq.true',
+            'select': '*',
+            'order': 'created_at.desc',
+            'limit': '1'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        previews = response.json()
+        if previews:
+            logger.info(f"Found active preview for case {case_id}")
+            return previews[0]
+
+        logger.info(f"No active preview found for case {case_id}")
+        return None
+
+    except Exception as e:
+        logger.error(f"Failed to read active preview for case {case_id}: {str(e)}")
+        return None
+
+
+def deactivate_previews(case_id: str) -> bool:
+    """Deactivate all existing previews for a case."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        params = {'case_id': f'eq.{case_id}'}
+        headers = supabase_headers()
+
+        update_data = {'is_active': False}
+
+        response = requests.patch(url, params=params, headers=headers,
+                                json=update_data, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        logger.info(f"Deactivated existing previews for case {case_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to deactivate previews for case {case_id}: {str(e)}")
+        return False
+
+
+def insert_preview(case_id: str, preview_content: Dict, preview_snippet: str = None,
+                  prompt_version: str = None, model: str = "gpt-4o-mini",
+                  token_input: int = None, token_output: int = None,
+                  cost_usd: float = None, latency_ms: int = None) -> Optional[str]:
+    """Insert a new preview into dmhoa_case_previews table."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        preview_data = {
+            'case_id': case_id,
+            'preview_content': preview_content,
+            'preview_snippet': preview_snippet,
+            'prompt_version': prompt_version,
+            'model': model,
+            'token_input': token_input,
+            'token_output': token_output,
+            'cost_usd': cost_usd,
+            'latency_ms': latency_ms,
+            'is_active': True
+        }
+
+        # Remove None values
+        preview_data = {k: v for k, v in preview_data.items() if v is not None}
+
+        response = requests.post(url, headers=headers, json=preview_data, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        result = response.json()
+        if result:
+            preview_id = result[0]['id']
+            logger.info(f"Inserted new preview {preview_id} for case {case_id}")
+            return preview_id
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Failed to insert preview for case {case_id}: {str(e)}")
+        return None
+
+
+def save_case_preview_to_new_table(case_id: str, preview_text: str, doc_brief: Dict,
+                                  token_usage: Dict = None, latency_ms: int = None) -> bool:
+    """Save generated case preview to the new dmhoa_case_previews table."""
+    try:
+        # Deactivate existing previews first
+        deactivate_previews(case_id)
+
+        # Prepare preview content as JSONB
+        preview_content = {
+            'preview_text': preview_text,
+            'doc_summary': doc_brief,
+            'generated_at': datetime.utcnow().isoformat()
+        }
+
+        # Extract first paragraph or 200 chars as snippet
+        preview_snippet = preview_text[:200] + "..." if len(preview_text) > 200 else preview_text
+
+        # Extract token usage if available
+        token_input = token_usage.get('prompt_tokens') if token_usage else None
+        token_output = token_usage.get('completion_tokens') if token_usage else None
+        cost_usd = token_usage.get('cost_usd') if token_usage else None
+
+        # Insert new preview
+        preview_id = insert_preview(
+            case_id=case_id,
+            preview_content=preview_content,
+            preview_snippet=preview_snippet,
+            prompt_version="v1.0",
+            model="gpt-4o-mini",
+            token_input=token_input,
+            token_output=token_output,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms
+        )
+
+        return preview_id is not None
+
+    except Exception as e:
+        logger.error(f"Failed to save case preview to new table for case {case_id}: {str(e)}")
+        return False
+
+
+def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple[str, Dict, int]:
+    """Generate case preview using OpenAI and return preview, token usage, and latency."""
+    start_time = time.time()
+
     try:
         if not OPENAI_API_KEY:
             logger.warning("OpenAI API key not configured")
-            return "Preview generation unavailable - OpenAI not configured"
+            return "Preview generation unavailable - OpenAI not configured", {}, 0
 
         # Extract case information
         hoa_name = case_data.get('hoa_name', 'Unknown HOA')
@@ -764,12 +892,31 @@ Keep it professional, factual, and under 800 words."""
         result = response.json()
         preview = result['choices'][0]['message']['content'].strip()
 
-        logger.info(f"Generated case preview: {len(preview)} characters")
-        return preview
+        # Calculate latency
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        # Extract token usage
+        token_usage = {}
+        if 'usage' in result:
+            usage = result['usage']
+            token_usage = {
+                'prompt_tokens': usage.get('prompt_tokens', 0),
+                'completion_tokens': usage.get('completion_tokens', 0),
+                'total_tokens': usage.get('total_tokens', 0)
+            }
+
+            # Estimate cost (approximate rates for gpt-4o-mini)
+            input_cost = (token_usage['prompt_tokens'] / 1000) * 0.00015  # $0.15 per 1K input tokens
+            output_cost = (token_usage['completion_tokens'] / 1000) * 0.0006  # $0.60 per 1K output tokens
+            token_usage['cost_usd'] = round(input_cost + output_cost, 6)
+
+        logger.info(f"Generated case preview: {len(preview)} characters, {latency_ms}ms")
+        return preview, token_usage, latency_ms
 
     except Exception as e:
+        latency_ms = int((time.time() - start_time) * 1000)
         logger.error(f"Failed to generate case preview: {str(e)}")
-        return f"Error generating preview: {str(e)}"
+        return f"Error generating preview: {str(e)}", {}, latency_ms
 
 
 def save_case_preview(token: str, preview_text: str, doc_brief: Dict) -> bool:
@@ -844,13 +991,18 @@ def case_preview_endpoint():
         doc_brief = build_doc_brief(documents)
 
         # Generate case preview
-        preview_text = generate_case_preview_with_openai(case, doc_brief)
+        preview_text, token_usage, latency_ms = generate_case_preview_with_openai(case, doc_brief)
 
-        # Save the preview
-        if save_case_preview(token, preview_text, doc_brief):
-            logger.info(f"Successfully generated and saved preview for token {token[:12]}...")
+        # Save the preview to the new table using case_id
+        case_id = case.get('id')
+        if case_id and save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms):
+            logger.info(f"Successfully generated and saved preview to new table for token {token[:12]}...")
         else:
-            logger.warning(f"Generated preview but failed to save for token {token[:12]}...")
+            # Fallback to old table for backward compatibility
+            if save_case_preview(token, preview_text, doc_brief):
+                logger.info(f"Successfully generated and saved preview to old table for token {token[:12]}...")
+            else:
+                logger.warning(f"Generated preview but failed to save for token {token[:12]}...")
 
         return jsonify({
             'preview': preview_text,
@@ -1017,244 +1169,7 @@ def send_email(to_email: str, subject: str, body: str, html_body: str = None) ->
         return False
 
 
-@app.route('/api/save-case', methods=['POST'])
-def save_case_endpoint():
-    """Save or update case details."""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Invalid JSON body'}), 400
-
-        token = data.get('token')
-        if not token:
-            return jsonify({'error': 'Missing required field: token'}), 400
-
-        logger.info(f"Processing save case request for token: {token[:12]}...")
-        logger.info(f"Request data keys: {list(data.keys())}")
-
-        # Extract payload data if it exists (nested structure)
-        payload = data.get('payload', {})
-        if payload:
-            logger.info(f"Found nested payload with keys: {list(payload.keys())}")
-            # Use the nested payload as the main payload
-            case_payload = payload
-        else:
-            # Use the entire data as payload, excluding system fields
-            system_fields = {'token'}
-            case_payload = {k: v for k, v in data.items() if k not in system_fields}
-
-        logger.info(f"Final payload keys: {list(case_payload.keys())}")
-
-        # Prepare case data for dmhoa_cases table schema
-        case_data = {
-            'token': token,
-            'payload': case_payload
-        }
-
-        # Add email if it exists in the payload or top level
-        email = data.get('email') or payload.get('email')
-        if email:
-            case_data['email'] = email
-
-        # Add status if specified, otherwise default to 'preview'
-        status = data.get('status') or payload.get('status')
-        if status:
-            case_data['status'] = status
-
-        logger.info(f"Case data for database: {list(case_data.keys())}")
-
-        # Check if case exists
-        existing_case = read_case_by_token(token)
-        if existing_case:
-            # Update existing case
-            logger.info(f"Updating existing case ID {existing_case.get('id')} for token {token[:12]}...")
-
-            url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            params = {'id': f"eq.{existing_case.get('id')}"}
-            headers = supabase_headers()
-            headers['Prefer'] = 'return=representation'
-
-            # For updates, don't include created_at
-            update_data = {k: v for k, v in case_data.items() if k != 'created_at'}
-
-            response = requests.patch(url, params=params, headers=headers,
-                                    json=update_data, timeout=TIMEOUT)
-
-            logger.info(f"Update response status: {response.status_code}")
-            if response.status_code >= 400:
-                logger.error(f"Update failed - Response: {response.text}")
-                try:
-                    error_details = response.json()
-                    return jsonify({
-                        'error': 'Failed to update case',
-                        'supabase_error': error_details,
-                        'status_code': response.status_code
-                    }), 500
-                except:
-                    return jsonify({
-                        'error': 'Failed to update case',
-                        'supabase_error': response.text,
-                        'status_code': response.status_code
-                    }), 500
-
-            response.raise_for_status()
-            updated_case = response.json()
-            return jsonify({'message': 'Case updated successfully', 'case': updated_case}), 200
-        else:
-            # Create new case
-            logger.info(f"Creating new case for token {token[:12]}...")
-
-            url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            headers = supabase_headers()
-            headers['Prefer'] = 'return=representation'
-
-            response = requests.post(url, headers=headers, json=case_data, timeout=TIMEOUT)
-
-            logger.info(f"Create response status: {response.status_code}")
-
-            if response.status_code >= 400:
-                logger.error(f"Create failed - Response: {response.text}")
-                try:
-                    error_details = response.json()
-                    logger.error(f"Parsed error details: {error_details}")
-                    return jsonify({
-                        'error': 'Failed to create case in database',
-                        'supabase_error': error_details,
-                        'status_code': response.status_code
-                    }), 500
-                except:
-                    return jsonify({
-                        'error': 'Failed to create case in database',
-                        'supabase_error': response.text,
-                        'status_code': response.status_code
-                    }), 500
-
-            response.raise_for_status()
-            new_case = response.json()
-
-            # Handle both single object and array responses from Supabase
-            case_id = None
-            if isinstance(new_case, list) and len(new_case) > 0:
-                case_id = new_case[0].get('id')
-            elif isinstance(new_case, dict):
-                case_id = new_case.get('id')
-
-            logger.info(f"New case created successfully with ID: {case_id}")
-            return jsonify({
-                'message': 'Case saved successfully',
-                'case': new_case,
-                'case_id': case_id
-            }), 201
-
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP error in save case endpoint: {str(e)}")
-        error_response = e.response.text if e.response else 'No response details'
-        logger.error(f"Error response: {error_response}")
-        return jsonify({
-            'error': f'Database request failed: {str(e)}',
-            'details': error_response
-        }), 500
-    except Exception as e:
-        logger.error(f"Unexpected error in save case endpoint: {str(e)}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
-
-
-@app.route('/api/case-data', methods=['GET'])
-def get_case_data():
-    """Get case data by token."""
-    try:
-        token = request.args.get('token')
-        if not token:
-            return jsonify({'error': 'Missing token parameter'}), 400
-
-        logger.info(f"Fetching case data for token: {token[:12]}...")
-
-        # Fetch case details
-        case = read_case_by_token(token)
-        if not case:
-            return jsonify({'error': 'Case not found'}), 404
-
-        # Fetch document status
-        documents = fetch_any_documents_status_by_token(token)
-
-        # Add document info to case data
-        case['documents'] = documents
-        case['document_count'] = len(documents)
-
-        logger.info(f"Found case with {len(documents)} documents for token {token[:12]}...")
-        return jsonify(case), 200
-
-    except Exception as e:
-        logger.error(f"Error fetching case data: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/case-previews', methods=['POST'])
-def create_case_preview():
-    """Create/generate case preview."""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Invalid JSON body'}), 400
-
-        token = data.get('token')
-        if not token:
-            return jsonify({'error': 'Missing required field: token'}), 400
-
-        logger.info(f"Creating case preview for token: {token[:12]}...")
-
-        # Fetch case details
-        case = read_case_by_token(token)
-        if not case:
-            return jsonify({'error': 'Case not found'}), 404
-
-        # Fetch and analyze documents
-        documents = fetch_ready_documents_by_token(token, limit=5)
-        doc_brief = build_doc_brief(documents)
-
-        # Generate case preview
-        preview_text = generate_case_preview_with_openai(case, doc_brief)
-
-        # Save the preview to dmhoa_case_previews table
-        preview_data = {
-            'token': token,
-            'case_id': case.get('id'),
-            'preview_text': preview_text[:10000],  # Limit size
-            'doc_summary': doc_brief,
-            'generated_at': datetime.utcnow().isoformat() + 'Z',
-            'created_at': datetime.utcnow().isoformat() + 'Z'
-        }
-
-        # Insert into dmhoa_case_previews table
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
-        headers = supabase_headers()
-        headers['Prefer'] = 'return=representation'
-
-        response = requests.post(url, headers=headers, json=preview_data, timeout=TIMEOUT)
-
-        if response.status_code >= 400:
-            logger.error(f"Failed to create case preview - Response: {response.text}")
-            # Still return the preview even if saving to previews table fails
-            return jsonify({
-                'preview': preview_text,
-                'doc_summary': doc_brief,
-                'generated_at': datetime.utcnow().isoformat(),
-                'warning': 'Preview generated but not saved to database'
-            }), 200
-
-        response.raise_for_status()
-        saved_preview = response.json()
-
-        logger.info(f"Case preview created and saved for token {token[:12]}...")
-        return jsonify({
-            'preview': preview_text,
-            'doc_summary': doc_brief,
-            'generated_at': datetime.utcnow().isoformat(),
-            'preview_id': saved_preview[0].get('id') if isinstance(saved_preview, list) else saved_preview.get('id')
-        }), 201
-
-    except Exception as e:
-        logger.error(f"Error creating case preview: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    app.run(host='0.0.0.0', port=port, debug=debug)

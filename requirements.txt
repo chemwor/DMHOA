@@ -1,9 +1,11 @@
-Flask==2.3.3
-Flask-CORS==4.0.0
-requests==2.31.0
-pypdf==3.15.2
-stripe==5.5.0
-Pillow==9.5.0
-pytesseract==0.3.10
-gunicorn==21.2.0
+flask>=2.3.0
+gunicorn>=21.2.0
+requests>=2.31.0
+pypdf>=3.17.0
+pillow>=10.0.0
+pytesseract>=0.3.10
+stripe>=7.0.0
+
+
+
 
