@@ -1363,50 +1363,80 @@ def save_case():
         # Log the incoming data for debugging
         logger.info(f"Received case data: {json.dumps(case_data, indent=2)}")
 
-        # Handle multiple possible field name variations
-        hoa_name = (case_data.get('hoaName') or
-                   case_data.get('hoa_name') or
-                   case_data.get('HOAName') or
-                   case_data.get('organizationName') or
-                   case_data.get('organization_name'))
+        # Handle nested payload structure - check both top level and inside payload
+        payload_data = case_data.get('payload', {})
 
-        violation_type = (case_data.get('violationType') or
-                         case_data.get('violation_type') or
-                         case_data.get('ViolationType') or
-                         case_data.get('noticeType') or
-                         case_data.get('notice_type') or
-                         case_data.get('violationCategory'))
+        # Combine top-level fields and payload fields for field extraction
+        combined_data = {**case_data, **payload_data}
 
-        token = case_data.get('token')
+        logger.info(f"Combined data fields: {list(combined_data.keys())}")
+
+        # Handle multiple possible field name variations from combined data
+        hoa_name = (combined_data.get('hoaName') or
+                   combined_data.get('hoa_name') or
+                   combined_data.get('HOAName') or
+                   combined_data.get('organizationName') or
+                   combined_data.get('organization_name'))
+
+        violation_type = (combined_data.get('violationType') or
+                         combined_data.get('violation_type') or
+                         combined_data.get('ViolationType') or
+                         combined_data.get('noticeType') or
+                         combined_data.get('notice_type') or
+                         combined_data.get('violationCategory'))
+
+        token = combined_data.get('token')
 
         # Log extracted values
         logger.info(f"Extracted values - Token: {token}, HOA: {hoa_name}, Violation: {violation_type}")
 
-        # Validate required fields with better error messages
+        # If we don't have HOA name or violation type, try to infer from other fields
+        if not hoa_name:
+            # Try to get organization info from other fields
+            hoa_name = (combined_data.get('organization') or
+                       combined_data.get('company') or
+                       combined_data.get('entity') or
+                       "Unknown HOA")
+            logger.info(f"Inferred HOA name: {hoa_name}")
+
+        if not violation_type:
+            # Use noticeType or infer from context
+            violation_type = (combined_data.get('noticeType') or
+                             combined_data.get('issueType') or
+                             combined_data.get('category') or
+                             "violation")  # Default fallback
+            logger.info(f"Using violation type: {violation_type}")
+
+        # Validate required fields with more flexible requirements
         missing_fields = []
         if not token:
             missing_fields.append('token')
-        if not hoa_name:
-            missing_fields.append('hoaName (or hoa_name, HOAName, organizationName)')
-        if not violation_type:
-            missing_fields.append('violationType (or violation_type, noticeType, violationCategory)')
 
         if missing_fields:
             error_msg = f'Missing required fields: {", ".join(missing_fields)}'
             logger.error(f"Validation failed: {error_msg}")
-            logger.error(f"Available fields in request: {list(case_data.keys())}")
+            logger.error(f"Available fields in combined data: {list(combined_data.keys())}")
             return jsonify({'error': error_msg}), 400
 
-        # Normalize the case data with consistent field names
-        normalized_case_data = case_data.copy()
-        normalized_case_data['hoaName'] = hoa_name
-        normalized_case_data['violationType'] = violation_type
-        normalized_case_data['token'] = token
+        # Create the final case data structure
+        if 'payload' in case_data and isinstance(case_data['payload'], dict):
+            # If payload exists, use it as the base and add normalized fields
+            final_case_data = case_data['payload'].copy()
+            final_case_data['token'] = token
+            final_case_data['hoaName'] = hoa_name
+            final_case_data['violationType'] = violation_type
+        else:
+            # Otherwise use the combined data
+            final_case_data = combined_data.copy()
+            final_case_data['token'] = token
+            final_case_data['hoaName'] = hoa_name
+            final_case_data['violationType'] = violation_type
 
-        logger.info(f"Saving new case - Token: {token[:8]}..., HOA: {hoa_name}, Violation: {violation_type}")
+        logger.info(f"Saving case - Token: {token[:8]}..., HOA: {hoa_name}, Violation: {violation_type}")
+        logger.info(f"Final case data keys: {list(final_case_data.keys())}")
 
         # Create case in database
-        success, case_id, returned_token = create_case_in_supabase(normalized_case_data)
+        success, case_id, returned_token = create_case_in_supabase(final_case_data)
 
         if not success:
             return jsonify({
