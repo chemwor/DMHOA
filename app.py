@@ -1327,11 +1327,57 @@ def save_case():
             logger.info(f"Case created: {token}")
 
         case_id = result[0].get('id') if result and len(result) > 0 else None
+
+        # Automatically generate case preview if documents are ready
+        auto_generate_success = auto_generate_case_preview(token, case_id)
+
         return jsonify({'success': True, 'case_id': case_id}), 200
 
     except Exception as e:
         logger.error(f"Save case error: {str(e)}")
         return jsonify({'error': str(e) or 'Internal server error'}), 500
+
+
+def auto_generate_case_preview(token: str, case_id: str) -> bool:
+    """Automatically generate case preview if documents are ready."""
+    try:
+        # Check if documents are ready
+        documents = fetch_ready_documents_by_token(token, limit=5)
+        if not documents:
+            logger.info(f"No ready documents found for case {token[:12]}... - skipping preview generation")
+            return False
+
+        # Check if preview already exists
+        existing_preview = read_active_preview(case_id)
+        if existing_preview:
+            logger.info(f"Preview already exists for case {token[:12]}... - skipping generation")
+            return True
+
+        # Fetch case data
+        case = read_case_by_token(token)
+        if not case:
+            logger.error(f"Case not found for token {token[:12]}...")
+            return False
+
+        # Build document brief
+        doc_brief = build_doc_brief(documents)
+
+        # Generate preview with OpenAI
+        preview_text, token_usage, latency_ms = generate_case_preview_with_openai(case, doc_brief)
+
+        # Save to new table
+        success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
+        
+        if success:
+            logger.info(f"Successfully auto-generated preview for case {token[:12]}...")
+        else:
+            logger.error(f"Failed to save auto-generated preview for case {token[:12]}...")
+            
+        return success
+
+    except Exception as e:
+        logger.error(f"Error auto-generating preview for case {token[:12]}...: {str(e)}")
+        return False
 
 
 if __name__ == '__main__':
