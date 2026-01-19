@@ -1032,23 +1032,63 @@ def save_case_endpoint():
         logger.info(f"Processing save case request for token: {token[:12]}...")
         logger.info(f"Request data keys: {list(data.keys())}")
 
+        # Extract payload data if it exists (nested structure)
+        payload = data.get('payload', {})
+        if payload:
+            logger.info(f"Found nested payload with keys: {list(payload.keys())}")
+            # Merge payload data with top-level data, payload takes priority
+            merged_data = {**data, **payload}
+        else:
+            merged_data = data
+
+        logger.info(f"Merged data keys: {list(merged_data.keys())}")
+
         # Extract and clean case fields from request
         case_data = {}
 
-        # Required fields
+        # Required field
         case_data['token'] = token
 
-        # Optional fields - only add if they exist and are not empty
-        if data.get('hoa_name') and str(data.get('hoa_name')).strip():
-            case_data['hoa_name'] = str(data.get('hoa_name')).strip()
+        # Map frontend fields to backend fields and clean them
+        field_mapping = {
+            'role': 'role',
+            'email': 'email',
+            'state': 'state',
+            'outcome': 'outcome',
+            'deadline': 'deadline',
+            'issueText': 'case_description',
+            'noticeType': 'violation_type',
+            'pastedText': 'pasted_text',
+            'propertyType': 'property_type',
+            'document_id': 'document_id',
+            'extract_status': 'extract_status',
+            'additional_docs': 'additional_docs',
+            'notice_filename': 'notice_filename',
+            'notice_mime_type': 'notice_mime_type',
+            'webhook_response': 'webhook_response',
+            'extract_queued_at': 'extract_queued_at',
+            'notice_storage_path': 'notice_storage_path',
+            'extract_triggered_at': 'extract_triggered_at',
+            'hoa_name': 'hoa_name'  # Legacy field mapping
+        }
 
-        if data.get('violation_type') and str(data.get('violation_type')).strip():
-            case_data['violation_type'] = str(data.get('violation_type')).strip()
+        # Process each field
+        for frontend_field, backend_field in field_mapping.items():
+            value = merged_data.get(frontend_field)
+            if value is not None:
+                # Handle different data types
+                if isinstance(value, str) and value.strip():
+                    case_data[backend_field] = value.strip()
+                elif isinstance(value, (dict, list, bool, int, float)):
+                    case_data[backend_field] = value
+                elif value is None:
+                    case_data[backend_field] = None
 
-        if data.get('case_description') and str(data.get('case_description')).strip():
-            case_data['case_description'] = str(data.get('case_description')).strip()
+        # Handle createdAt timestamp
+        if merged_data.get('createdAt'):
+            case_data['created_at'] = merged_data['createdAt']
 
-        logger.info(f"Cleaned case data: {case_data}")
+        logger.info(f"Processed case data with {len(case_data)} fields")
 
         # Check if case exists
         existing_case = read_case_by_token(token)
@@ -1076,11 +1116,12 @@ def save_case_endpoint():
             updated_case = response.json()
             return jsonify({'message': 'Case updated successfully', 'case': updated_case}), 200
         else:
-            # Create new case - add timestamp for creation
-            case_data['created_at'] = datetime.utcnow().isoformat() + 'Z'  # Add Z for UTC timezone
+            # Create new case - add timestamp if not provided
+            if 'created_at' not in case_data:
+                case_data['created_at'] = datetime.utcnow().isoformat() + 'Z'
 
             logger.info(f"Creating new case for token {token[:12]}...")
-            logger.info(f"Final case data for creation: {case_data}")
+            logger.info(f"Final case data fields: {list(case_data.keys())}")
 
             url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             headers = supabase_headers()
@@ -1089,15 +1130,9 @@ def save_case_endpoint():
             response = requests.post(url, headers=headers, json=case_data, timeout=TIMEOUT)
 
             logger.info(f"Create response status: {response.status_code}")
-            logger.info(f"Create response headers: {dict(response.headers)}")
 
             if response.status_code >= 400:
                 logger.error(f"Create failed - Response: {response.text}")
-                logger.error(f"Request URL: {url}")
-                logger.error(f"Request headers: {headers}")
-                logger.error(f"Request data: {case_data}")
-
-                # Try to parse the error response
                 try:
                     error_details = response.json()
                     logger.error(f"Parsed error details: {error_details}")
@@ -1145,7 +1180,100 @@ def save_case_endpoint():
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    app.run(host='0.0.0.0', port=port, debug=debug)
+@app.route('/api/case-data', methods=['GET'])
+def get_case_data():
+    """Get case data by token."""
+    try:
+        token = request.args.get('token')
+        if not token:
+            return jsonify({'error': 'Missing token parameter'}), 400
+
+        logger.info(f"Fetching case data for token: {token[:12]}...")
+
+        # Fetch case details
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Fetch document status
+        documents = fetch_any_documents_status_by_token(token)
+
+        # Add document info to case data
+        case['documents'] = documents
+        case['document_count'] = len(documents)
+
+        logger.info(f"Found case with {len(documents)} documents for token {token[:12]}...")
+        return jsonify(case), 200
+
+    except Exception as e:
+        logger.error(f"Error fetching case data: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/case-previews', methods=['POST'])
+def create_case_preview():
+    """Create/generate case preview."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON body'}), 400
+
+        token = data.get('token')
+        if not token:
+            return jsonify({'error': 'Missing required field: token'}), 400
+
+        logger.info(f"Creating case preview for token: {token[:12]}...")
+
+        # Fetch case details
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Fetch and analyze documents
+        documents = fetch_ready_documents_by_token(token, limit=5)
+        doc_brief = build_doc_brief(documents)
+
+        # Generate case preview
+        preview_text = generate_case_preview_with_openai(case, doc_brief)
+
+        # Save the preview to dmhoa_case_previews table
+        preview_data = {
+            'token': token,
+            'case_id': case.get('id'),
+            'preview_text': preview_text[:10000],  # Limit size
+            'doc_summary': doc_brief,
+            'generated_at': datetime.utcnow().isoformat() + 'Z',
+            'created_at': datetime.utcnow().isoformat() + 'Z'
+        }
+
+        # Insert into dmhoa_case_previews table
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        response = requests.post(url, headers=headers, json=preview_data, timeout=TIMEOUT)
+
+        if response.status_code >= 400:
+            logger.error(f"Failed to create case preview - Response: {response.text}")
+            # Still return the preview even if saving to previews table fails
+            return jsonify({
+                'preview': preview_text,
+                'doc_summary': doc_brief,
+                'generated_at': datetime.utcnow().isoformat(),
+                'warning': 'Preview generated but not saved to database'
+            }), 200
+
+        response.raise_for_status()
+        saved_preview = response.json()
+
+        logger.info(f"Case preview created and saved for token {token[:12]}...")
+        return jsonify({
+            'preview': preview_text,
+            'doc_summary': doc_brief,
+            'generated_at': datetime.utcnow().isoformat(),
+            'preview_id': saved_preview[0].get('id') if isinstance(saved_preview, list) else saved_preview.get('id')
+        }), 201
+
+    except Exception as e:
+        logger.error(f"Error creating case preview: {str(e)}")
+        return jsonify({'error': str(e)}), 500
