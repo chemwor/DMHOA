@@ -30,10 +30,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Enable CORS for all routes
-CORS(app, origins=['http://localhost:5173', 'https://disputemyhoa.com'],
-     methods=['GET', 'POST', 'OPTIONS'],
-     allow_headers=['Content-Type', 'X-Webhook-Secret'])
+# Enable CORS for all routes with comprehensive headers
+CORS(app,
+     origins=['http://localhost:5173', 'https://disputemyhoa.com', 'https://www.disputemyhoa.com'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Authorization', 'X-Webhook-Secret', 'X-Requested-With', 'Accept', 'Origin'],
+     supports_credentials=True)
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')

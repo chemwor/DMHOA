@@ -3,6 +3,14 @@
   <component name="CopilotDiffPersistence">
     <option name="pendingDiffs">
       <map>
+        <entry key="$PROJECT_DIR$/.python-version">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/.python-version" />
+              <option name="updatedContent" value="3.11.7" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
         <entry key="$PROJECT_DIR$/app.py">
           <value>
             <PendingDiffInfo>
@@ -16,8 +24,8 @@
           <value>
             <PendingDiffInfo>
               <option name="filePath" value="$PROJECT_DIR$/requirements.txt" />
-              <option name="originalContent" value="flask&gt;=2.3.0&#10;gunicorn&gt;=21.2.0&#10;requests&gt;=2.31.0&#10;pypdf&gt;=3.17.0&#10;pillow&gt;=10.0.0&#10;pytesseract&gt;=0.3.10&#10;stripe&gt;=7.0.0&#10;" />
-              <option name="updatedContent" value="Flask==2.3.3&#10;Flask-CORS==4.0.0&#10;requests==2.31.0&#10;pypdf==3.15.2&#10;stripe==5.5.0&#10;Pillow==10.0.0&#10;pytesseract==0.3.10" />
+              <option name="originalContent" value="flask&gt;=2.3.0&#10;gunicorn&gt;=21.2.0&#10;requests&gt;=2.31.0&#10;pypdf&gt;=3.17.0&#10;pillow&gt;=10.0.0&#10;pytesseract&gt;=0.3.10&#10;stripe&gt;=7.0.0&#10;&#10;&#10;" />
+              <option name="updatedContent" value="Flask==2.3.3&#10;Flask-CORS==4.0.0&#10;requests==2.31.0&#10;pypdf==3.15.2&#10;stripe==5.5.0&#10;Pillow==9.5.0&#10;pytesseract==0.3.10&#10;gunicorn==21.2.0" />
             </PendingDiffInfo>
           </value>
         </entry>
