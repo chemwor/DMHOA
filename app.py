@@ -1036,59 +1036,32 @@ def save_case_endpoint():
         payload = data.get('payload', {})
         if payload:
             logger.info(f"Found nested payload with keys: {list(payload.keys())}")
-            # Merge payload data with top-level data, payload takes priority
-            merged_data = {**data, **payload}
+            # Use the nested payload as the main payload
+            case_payload = payload
         else:
-            merged_data = data
+            # Use the entire data as payload, excluding system fields
+            system_fields = {'token'}
+            case_payload = {k: v for k, v in data.items() if k not in system_fields}
 
-        logger.info(f"Merged data keys: {list(merged_data.keys())}")
+        logger.info(f"Final payload keys: {list(case_payload.keys())}")
 
-        # Extract and clean case fields from request
-        case_data = {}
-
-        # Required field
-        case_data['token'] = token
-
-        # Map frontend fields to backend fields and clean them
-        field_mapping = {
-            'role': 'role',
-            'email': 'email',
-            'state': 'state',
-            'outcome': 'outcome',
-            'deadline': 'deadline',
-            'issueText': 'case_description',
-            'noticeType': 'violation_type',
-            'pastedText': 'pasted_text',
-            'propertyType': 'property_type',
-            'document_id': 'document_id',
-            'extract_status': 'extract_status',
-            'additional_docs': 'additional_docs',
-            'notice_filename': 'notice_filename',
-            'notice_mime_type': 'notice_mime_type',
-            'webhook_response': 'webhook_response',
-            'extract_queued_at': 'extract_queued_at',
-            'notice_storage_path': 'notice_storage_path',
-            'extract_triggered_at': 'extract_triggered_at',
-            'hoa_name': 'hoa_name'  # Legacy field mapping
+        # Prepare case data for dmhoa_cases table schema
+        case_data = {
+            'token': token,
+            'payload': case_payload
         }
 
-        # Process each field
-        for frontend_field, backend_field in field_mapping.items():
-            value = merged_data.get(frontend_field)
-            if value is not None:
-                # Handle different data types
-                if isinstance(value, str) and value.strip():
-                    case_data[backend_field] = value.strip()
-                elif isinstance(value, (dict, list, bool, int, float)):
-                    case_data[backend_field] = value
-                elif value is None:
-                    case_data[backend_field] = None
+        # Add email if it exists in the payload or top level
+        email = data.get('email') or payload.get('email')
+        if email:
+            case_data['email'] = email
 
-        # Handle createdAt timestamp
-        if merged_data.get('createdAt'):
-            case_data['created_at'] = merged_data['createdAt']
+        # Add status if specified, otherwise default to 'preview'
+        status = data.get('status') or payload.get('status')
+        if status:
+            case_data['status'] = status
 
-        logger.info(f"Processed case data with {len(case_data)} fields")
+        logger.info(f"Case data for database: {list(case_data.keys())}")
 
         # Check if case exists
         existing_case = read_case_by_token(token)
@@ -1101,27 +1074,35 @@ def save_case_endpoint():
             headers = supabase_headers()
             headers['Prefer'] = 'return=representation'
 
+            # For updates, don't include created_at
+            update_data = {k: v for k, v in case_data.items() if k != 'created_at'}
+
             response = requests.patch(url, params=params, headers=headers,
-                                    json=case_data, timeout=TIMEOUT)
+                                    json=update_data, timeout=TIMEOUT)
 
             logger.info(f"Update response status: {response.status_code}")
             if response.status_code >= 400:
                 logger.error(f"Update failed - Response: {response.text}")
-                return jsonify({
-                    'error': f'Failed to update case: {response.text}',
-                    'status_code': response.status_code
-                }), 500
+                try:
+                    error_details = response.json()
+                    return jsonify({
+                        'error': 'Failed to update case',
+                        'supabase_error': error_details,
+                        'status_code': response.status_code
+                    }), 500
+                except:
+                    return jsonify({
+                        'error': 'Failed to update case',
+                        'supabase_error': response.text,
+                        'status_code': response.status_code
+                    }), 500
 
             response.raise_for_status()
             updated_case = response.json()
             return jsonify({'message': 'Case updated successfully', 'case': updated_case}), 200
         else:
-            # Create new case - add timestamp if not provided
-            if 'created_at' not in case_data:
-                case_data['created_at'] = datetime.utcnow().isoformat() + 'Z'
-
+            # Create new case
             logger.info(f"Creating new case for token {token[:12]}...")
-            logger.info(f"Final case data fields: {list(case_data.keys())}")
 
             url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             headers = supabase_headers()
