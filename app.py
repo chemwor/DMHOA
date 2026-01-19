@@ -387,7 +387,7 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
                 logger.info(f"Trying OCR with config: {config}")
                 current_text = pytesseract.image_to_string(image, config=config)
                 current_text = current_text.strip()
-                char_count = len(current_text)
+                char_count = len(current_text);
 
                 # Keep track of the best result (most text that looks reasonable)
                 if char_count > best_char_count:
@@ -1030,35 +1030,64 @@ def save_case_endpoint():
             return jsonify({'error': 'Missing required field: token'}), 400
 
         logger.info(f"Processing save case request for token: {token[:12]}...")
+        logger.info(f"Request data: {data}")
 
         # Extract case fields from request
         case_fields = [
             'hoa_name', 'violation_type', 'case_description', 'token'
         ]
-        case_data = {field: data.get(field) for field in case_fields}
+        case_data = {field: data.get(field) for field in case_fields if data.get(field) is not None}
+
+        # Add created_at timestamp for new cases
+        case_data['created_at'] = datetime.utcnow().isoformat()
+
+        logger.info(f"Prepared case data: {case_data}")
 
         # Check if case exists
         existing_case = read_case_by_token(token)
         if existing_case:
-            # Update existing case
-            logger.info(f"Updating existing case for token {token[:12]}...")
-            if not update_document(existing_case['id'], token, case_data):
-                return jsonify({'error': 'Failed to update case'}), 500
+            # Update existing case - remove created_at since it shouldn't be updated
+            update_data = {k: v for k, v in case_data.items() if k != 'created_at'}
+            logger.info(f"Updating existing case for token {token[:12]}... with data: {update_data}")
+
+            url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            params = {'token': f'eq.{token}'}
+            headers = supabase_headers()
+            headers['Prefer'] = 'return=representation'
+
+            response = requests.patch(url, params=params, headers=headers,
+                                    json=update_data, timeout=TIMEOUT)
+
+            logger.info(f"Update response status: {response.status_code}")
+            if response.status_code >= 400:
+                logger.error(f"Update response text: {response.text}")
+
+            response.raise_for_status()
             return jsonify({'message': 'Case updated successfully'}), 200
         else:
             # Create new case
-            logger.info(f"Creating new case for token {token[:12]}...")
+            logger.info(f"Creating new case for token {token[:12]}... with data: {case_data}")
             url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             headers = supabase_headers()
             headers['Prefer'] = 'return=representation'
 
             response = requests.post(url, headers=headers, json=case_data, timeout=TIMEOUT)
+
+            logger.info(f"Create response status: {response.status_code}")
+            if response.status_code >= 400:
+                logger.error(f"Create response text: {response.text}")
+                logger.error(f"Create response headers: {response.headers}")
+
             response.raise_for_status()
 
             new_case = response.json()
-            logger.info(f"New case created with ID {new_case.get('id')}")
-            return jsonify({'message': 'Case saved successfully', 'case_id': new_case.get('id')}), 201
+            logger.info(f"New case created with ID: {new_case[0].get('id') if isinstance(new_case, list) else new_case.get('id')}")
+            return jsonify({'message': 'Case saved successfully', 'case': new_case}), 201
 
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error in save case endpoint: {str(e)}")
+        logger.error(f"Response content: {e.response.text if e.response else 'No response'}")
+        return jsonify({'error': f'Database error: {str(e)}', 'details': e.response.text if e.response else 'No details'}), 500
     except Exception as e:
         logger.error(f"Error in save case endpoint: {str(e)}")
         return jsonify({'error': str(e)}), 500
