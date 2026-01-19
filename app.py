@@ -1355,19 +1355,53 @@ def save_case():
         if not case_data:
             return jsonify({'error': 'Invalid JSON body'}), 400
 
-        # Validate required fields
-        required_fields = ['token', 'hoaName', 'violationType']
-        missing_fields = [field for field in required_fields if not case_data.get(field)]
-        if missing_fields:
-            return jsonify({
-                'error': f'Missing required fields: {", ".join(missing_fields)}'
-            }), 400
+        # Log the incoming data for debugging
+        logger.info(f"Received case data: {json.dumps(case_data, indent=2)}")
 
-        token = case_data['token']
-        logger.info(f"Saving new case - Token: {token[:8]}...")
+        # Handle multiple possible field name variations
+        hoa_name = (case_data.get('hoaName') or
+                   case_data.get('hoa_name') or
+                   case_data.get('HOAName') or
+                   case_data.get('organizationName') or
+                   case_data.get('organization_name'))
+
+        violation_type = (case_data.get('violationType') or
+                         case_data.get('violation_type') or
+                         case_data.get('ViolationType') or
+                         case_data.get('noticeType') or
+                         case_data.get('notice_type') or
+                         case_data.get('violationCategory'))
+
+        token = case_data.get('token')
+
+        # Log extracted values
+        logger.info(f"Extracted values - Token: {token}, HOA: {hoa_name}, Violation: {violation_type}")
+
+        # Validate required fields with better error messages
+        missing_fields = []
+        if not token:
+            missing_fields.append('token')
+        if not hoa_name:
+            missing_fields.append('hoaName (or hoa_name, HOAName, organizationName)')
+        if not violation_type:
+            missing_fields.append('violationType (or violation_type, noticeType, violationCategory)')
+
+        if missing_fields:
+            error_msg = f'Missing required fields: {", ".join(missing_fields)}'
+            logger.error(f"Validation failed: {error_msg}")
+            logger.error(f"Available fields in request: {list(case_data.keys())}")
+            return jsonify({'error': error_msg}), 400
+
+        # Normalize the case data with consistent field names
+        normalized_case_data = case_data.copy()
+        normalized_case_data['hoaName'] = hoa_name
+        normalized_case_data['violationType'] = violation_type
+        normalized_case_data['token'] = token
+
+        logger.info(f"Saving new case - Token: {token[:8]}..., HOA: {hoa_name}, Violation: {violation_type}")
 
         # Create case in database
-        success, case_id, returned_token = create_case_in_supabase(case_data)
+        success, case_id, returned_token = create_case_in_supabase(normalized_case_data)
 
         if not success:
             return jsonify({
