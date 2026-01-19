@@ -1816,44 +1816,89 @@ def save_case():
         import secrets
         token = data.get('token') or secrets.token_urlsafe(32)
 
-        # Prepare case data for database insertion
+        # Check if case already exists
+        check_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        check_params = {
+            'token': f'eq.{token}',
+            'select': 'id,token,created_at'
+        }
+        check_headers = supabase_headers()
+
+        existing_response = requests.get(check_url, params=check_params, headers=check_headers, timeout=TIMEOUT)
+        existing_response.raise_for_status()
+        existing_cases = existing_response.json()
+
+        # Prepare case data
         case_data = {
             'token': token,
-            'created_at': datetime.utcnow().isoformat() + 'Z',
             'updated_at': datetime.utcnow().isoformat() + 'Z',
             **data  # Include all other data from the frontend
         }
 
-        # Remove token from case_data to avoid duplication since it's already set
-        if 'token' in data:
-            case_data.update(data)
-
-        # Insert into Supabase
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
         headers = supabase_headers()
         headers['Prefer'] = 'return=representation'
 
-        response = requests.post(url, json=case_data, headers=headers, timeout=TIMEOUT)
+        if existing_cases:
+            # Case exists - UPDATE it
+            logger.info(f"Updating existing case with token {token[:12]}...")
 
-        if response.status_code == 201:
-            result = response.json()
-            logger.info(f"Successfully created case with token {token[:12]}...")
+            # Don't update created_at for existing cases
+            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            update_params = {'token': f'eq.{token}'}
 
-            response_data = {
-                'success': True,
-                'case': result[0] if isinstance(result, list) and len(result) > 0 else result,
-                'token': token
-            }
-            flask_response = jsonify(response_data)
-            return add_cors_headers(flask_response)
+            response = requests.patch(update_url, params=update_params, json=case_data, headers=headers, timeout=TIMEOUT)
+
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Successfully updated case with token {token[:12]}...")
+
+                response_data = {
+                    'success': True,
+                    'case': result[0] if isinstance(result, list) and len(result) > 0 else result,
+                    'token': token,
+                    'action': 'updated'
+                }
+                flask_response = jsonify(response_data)
+                return add_cors_headers(flask_response)
+            else:
+                logger.error(f"Failed to update case: {response.status_code} - {response.text}")
+                error_response = jsonify({
+                    'error': f'Failed to update case: {response.status_code}',
+                    'details': response.text
+                })
+                error_response.status_code = 500
+                return add_cors_headers(error_response)
         else:
-            logger.error(f"Failed to create case: {response.status_code} - {response.text}")
-            error_response = jsonify({
-                'error': f'Failed to save case: {response.status_code}',
-                'details': response.text
-            })
-            error_response.status_code = 500
-            return add_cors_headers(error_response)
+            # Case doesn't exist - CREATE it
+            logger.info(f"Creating new case with token {token[:12]}...")
+
+            # Add created_at for new cases
+            case_data['created_at'] = datetime.utcnow().isoformat() + 'Z'
+
+            create_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+
+            response = requests.post(create_url, json=case_data, headers=headers, timeout=TIMEOUT)
+
+            if response.status_code == 201:
+                result = response.json()
+                logger.info(f"Successfully created case with token {token[:12]}...")
+
+                response_data = {
+                    'success': True,
+                    'case': result[0] if isinstance(result, list) and len(result) > 0 else result,
+                    'token': token,
+                    'action': 'created'
+                }
+                flask_response = jsonify(response_data)
+                return add_cors_headers(flask_response)
+            else:
+                logger.error(f"Failed to create case: {response.status_code} - {response.text}")
+                error_response = jsonify({
+                    'error': f'Failed to create case: {response.status_code}',
+                    'details': response.text
+                })
+                error_response.status_code = 500
+                return add_cors_headers(error_response)
 
     except Exception as e:
         logger.error(f"Exception in save_case endpoint: {str(e)}")
