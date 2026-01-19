@@ -1072,9 +1072,58 @@ def get_case_data():
         if not case:
             return jsonify({'error': 'Case not found'}), 404
 
+        # Extract payload data and ensure proper structure
+        payload = case.get('payload', {})
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except:
+                payload = {}
+
+        # Map the payload fields to ensure frontend compatibility
+        # Add default values for missing properties
+        case_data = {
+            'id': case.get('id'),
+            'token': case.get('token'),
+            'status': case.get('status'),
+            'unlocked': case.get('unlocked'),
+            'created_at': case.get('created_at'),
+            'updated_at': case.get('updated_at'),
+            'preview_text': case.get('preview_text'),
+            'preview_generated_at': case.get('preview_generated_at'),
+            'doc_summary': case.get('doc_summary'),
+            'payload': {
+                # Core case information
+                'noticeType': payload.get('noticeType', payload.get('violationType', 'Unknown')),
+                'violationType': payload.get('violationType', payload.get('noticeType', 'Unknown')),
+                'hoaName': payload.get('hoaName', payload.get('hoa_name', 'Unknown HOA')),
+                'hoa_name': payload.get('hoa_name', payload.get('hoaName', 'Unknown HOA')),
+                'propertyAddress': payload.get('propertyAddress', payload.get('property_address', '')),
+                'property_address': payload.get('property_address', payload.get('propertyAddress', '')),
+                'caseDescription': payload.get('caseDescription', payload.get('case_description', '')),
+                'case_description': payload.get('case_description', payload.get('caseDescription', '')),
+                'ownerName': payload.get('ownerName', payload.get('owner_name', '')),
+                'owner_name': payload.get('owner_name', payload.get('ownerName', '')),
+                'ownerEmail': payload.get('ownerEmail', payload.get('owner_email', '')),
+                'owner_email': payload.get('owner_email', payload.get('ownerEmail', '')),
+                'ownerPhone': payload.get('ownerPhone', payload.get('owner_phone', '')),
+                'owner_phone': payload.get('owner_phone', payload.get('ownerPhone', '')),
+
+                # Include any additional fields from the payload
+                **{k: v for k, v in payload.items() if k not in [
+                    'noticeType', 'violationType', 'hoaName', 'hoa_name',
+                    'propertyAddress', 'property_address', 'caseDescription', 'case_description',
+                    'ownerName', 'owner_name', 'ownerEmail', 'owner_email',
+                    'ownerPhone', 'owner_phone'
+                ]}
+            }
+        }
+
+        logger.info(f"Returning case data for token {token[:12]}... with payload keys: {list(case_data['payload'].keys())}")
+
         # Return the case data
         return jsonify({
-            'case': case,
+            'case': case_data,
             'success': True
         }), 200
 
