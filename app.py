@@ -34,7 +34,7 @@ app = Flask(__name__)
 CORS(app,
      origins=['http://localhost:5173', 'https://disputemyhoa.com', 'https://www.disputemyhoa.com'],
      methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization', 'X-Webhook-Secret', 'X-Requested-With', 'Accept', 'Origin'],
+     allow_headers=['Content-Type', 'Authorization', 'apikey', 'X-Webhook-Secret', 'X-Requested-With', 'Accept', 'Origin'],
      supports_credentials=True)
 
 # Configuration
