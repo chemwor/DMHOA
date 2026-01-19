@@ -791,33 +791,46 @@ def insert_preview(case_id: str, preview_content: Dict, preview_snippet: str = N
 
 
 def save_case_preview_to_new_table(case_id: str, preview_text: str, doc_brief: Dict,
-                                  token_usage: Dict = None, latency_ms: int = None) -> bool:
+                                  token_usage: Dict = None, latency_ms: int = None, preview_json: Optional[Dict] = None) -> bool:
     """Save generated case preview to the new dmhoa_case_previews table."""
     try:
         # Deactivate existing previews first
         deactivate_previews(case_id)
 
-        # Prepare preview content as JSONB
+        # Prepare preview content as JSONB with preview_json
         preview_content = {
             'preview_text': preview_text,
             'doc_summary': doc_brief,
-            'generated_at': datetime.utcnow().isoformat()
+            'generated_at': datetime.utcnow().isoformat(),
+            'preview_json': preview_json
         }
 
-        # Extract first paragraph or 200 chars as snippet
-        preview_snippet = preview_text[:200] + "..." if len(preview_text) > 200 else preview_text
+        # Create preview_snippet from preview_json if available, otherwise fallback
+        if preview_json:
+            headline = preview_json.get('headline', 'HOA Case Analysis')
+            deadline = preview_json.get('your_situation', {}).get('deadline', 'Not stated')
+            risks = preview_json.get('risk_if_wrong', [])
+            first_risk = risks[0] if risks else 'Various consequences'
+
+            preview_snippet = f"{headline} | Deadline: {deadline} | Risk: {first_risk}"
+            # Limit snippet length
+            if len(preview_snippet) > 200:
+                preview_snippet = preview_snippet[:197] + "..."
+        else:
+            # Fallback to old method
+            preview_snippet = preview_text[:200] + "..." if len(preview_text) > 200 else preview_text
 
         # Extract token usage if available
         token_input = token_usage.get('prompt_tokens') if token_usage else None
         token_output = token_usage.get('completion_tokens') if token_usage else None
         cost_usd = token_usage.get('cost_usd') if token_usage else None
 
-        # Insert new preview
+        # Insert new preview with updated prompt version
         preview_id = insert_preview(
             case_id=case_id,
             preview_content=preview_content,
             preview_snippet=preview_snippet,
-            prompt_version="v1.0",
+            prompt_version="v2.0_sales",  # Updated to indicate new conversion-optimized format
             model="gpt-4o-mini",
             token_input=token_input,
             token_output=token_output,
@@ -1358,11 +1371,12 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
             return True
 
         # Generate preview based on available data
+        preview_json = None
         if documents:
             # Documents are ready - generate full preview with document analysis
             logger.info(f"Generating full preview with {len(documents)} ready documents for case {token[:12]}...")
             doc_brief = build_doc_brief(documents)
-            preview_text, token_usage, latency_ms = generate_case_preview_with_openai(case, doc_brief)
+            preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_openai(case, doc_brief)
             preview_type = "full"
 
         elif has_processing_documents:
@@ -1374,7 +1388,7 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 "sources": [],
                 "brief_text": "Documents are currently being processed and analyzed."
             }
-            preview_text, token_usage, latency_ms = generate_preview_without_documents(case)
+            preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
             preview_type = "preliminary"
 
         else:
@@ -1386,11 +1400,11 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 "sources": [],
                 "brief_text": "No documents have been uploaded for analysis."
             }
-            preview_text, token_usage, latency_ms = generate_preview_without_documents(case)
+            preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
             preview_type = "basic"
 
         # Save preview (this will deactivate existing ones automatically)
-        success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms)
+        success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms, preview_json)
 
         if success:
             logger.info(f"Successfully generated {preview_type} preview for case {token[:12]}...")
