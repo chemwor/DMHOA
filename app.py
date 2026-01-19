@@ -1910,7 +1910,53 @@ def save_case():
         return add_cors_headers(error_response)
 
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
+def get_case_data():
+    """Get case data by token."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        return add_cors_headers(response)
 
+    try:
+        token = request.args.get('token')
+        if not token:
+            response = jsonify({'error': 'Token parameter is required'})
+            response.status_code = 400
+            return add_cors_headers(response)
+
+        # Fetch case data
+        case = read_case_by_token(token)
+        if not case:
+            response = jsonify({'error': 'Case not found'})
+            response.status_code = 404
+            return add_cors_headers(response)
+
+        # Fetch associated documents
+        docs = fetch_ready_documents_by_token(token)
+        doc_brief = build_doc_brief(docs)
+
+        # Fetch active preview if exists
+        case_id = case.get('id')
+        preview = None
+        if case_id:
+            preview = read_active_preview(case_id)
+
+        response_data = {
+            'case': case,
+            'documents': doc_brief,
+            'preview': preview,
+            'token': token
+        }
+
+        flask_response = jsonify(response_data)
+        return add_cors_headers(flask_response)
+
+    except Exception as e:
+        logger.error(f"Exception in get_case_data endpoint: {str(e)}")
+        error_response = jsonify({
+            'error': 'Internal server error',
+            'details': str(e)
+        })
+        error_response.status_code = 500
+        return add_cors_headers(error_response)
