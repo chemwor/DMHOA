@@ -68,6 +68,157 @@ def supabase_headers() -> Dict[str, str]:
         'Content-Type': 'application/json'
     }
 
+def fetch_ready_documents_by_token(token: str, limit: int = 3) -> List[Dict]:
+    """Query Supabase for ready documents by case token."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_documents"
+        params = {
+            'token': f'eq.{token}',
+            'status': 'eq.ready',
+            'select': 'id,filename,mime_type,page_count,char_count,updated_at,extracted_text',
+            'order': 'updated_at.desc',
+            'limit': str(limit)
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        documents = response.json()
+        logger.info(f"Found {len(documents)} ready documents for token {token[:12]}...")
+        return documents
+
+    except Exception as e:
+        logger.error(f"Failed to fetch ready documents for token {token[:12]}...: {str(e)}")
+        return []
+
+def fetch_any_documents_status_by_token(token: str) -> List[Dict]:
+    """Check for any documents (including processing/pending) by token."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_documents"
+        params = {
+            'token': f'eq.{token}',
+            'select': 'id,status,updated_at',
+            'order': 'updated_at.desc'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        return response.json()
+
+    except Exception as e:
+        logger.error(f"Failed to fetch document status for token {token[:12]}...: {str(e)}")
+        return []
+
+def summarize_doc_text_with_openai(token: str, raw_text: str) -> str:
+    """Summarize document text using OpenAI gpt-4o-mini."""
+    try:
+        # Clip text to avoid token limits
+        clipped_text = raw_text[:12000] if raw_text else ""
+
+        if not clipped_text.strip():
+            return ""
+
+        headers = {
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+
+        prompt = """Summarize the HOA notice into: (a) alleged violation, (b) what HOA demands, (c) deadlines/fines/next actions, (d) evidence/rules cited. Be factual, quote exact deadlines/amounts when present. 8-12 bullets max."""
+
+        data = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a document summarizer for HOA notices. Extract key facts concisely."
+                },
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\nDocument text:\n{clipped_text}"
+                }
+            ],
+            "temperature": 0.3,
+            "max_tokens": 800
+        }
+
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        summary = result['choices'][0]['message']['content'].strip()
+
+        # Limit summary length
+        if len(summary) > 1200:
+            summary = summary[:1200] + "..."
+
+        logger.info(f"Successfully summarized document for token {token[:12]}...")
+        return summary
+
+    except Exception as e:
+        logger.error(f"Failed to summarize document text for token {token[:12]}...: {str(e)}")
+        # Fallback to clipped excerpt
+        return raw_text[:1200] + "..." if len(raw_text) > 1200 else raw_text
+
+def build_doc_brief(docs: List[Dict]) -> Dict:
+    """Build document brief from ready documents."""
+    if not docs:
+        return {
+            "doc_status": "none",
+            "doc_count": 0,
+            "sources": [],
+            "brief_text": ""
+        }
+
+    sources = []
+    raw_texts = []
+
+    for doc in docs:
+        sources.append({
+            "filename": doc.get("filename", "unknown"),
+            "page_count": doc.get("page_count", 0),
+            "char_count": doc.get("char_count", 0)
+        })
+
+        # Extract text with limits
+        extracted_text = doc.get("extracted_text", "")
+        if extracted_text:
+            # Limit per document to 6000 chars
+            doc_text = extracted_text[:6000]
+            raw_texts.append(doc_text)
+
+    if not raw_texts:
+        return {
+            "doc_status": "ready",
+            "doc_count": len(docs),
+            "sources": sources,
+            "brief_text": ""
+        }
+
+    # Combine texts with total limit of 12000 chars
+    combined_text = " ".join(raw_texts)
+    if len(combined_text) > 12000:
+        combined_text = combined_text[:12000]
+
+    # Try to summarize with OpenAI
+    token = docs[0].get("token", "unknown") if docs else "unknown"
+    brief_text = summarize_doc_text_with_openai(token, combined_text)
+
+    return {
+        "doc_status": "ready",
+        "doc_count": len(docs),
+        "sources": sources,
+        "brief_text": brief_text
+    }
+
+
 def fetch_document_status(document_id: str) -> Optional[Dict[str, Any]]:
     """Fetch current document status from Supabase."""
     try:
@@ -1542,8 +1693,8 @@ def doc_extract_start():
 
         webhook_headers = {
             'Content-Type': 'application/json',
-            'X-Webhook-Secret': WEBHOOK_SECRET,
-            'X-Doc-Extract-Secret': WEBHOOK_SECRET  # Alternative header name
+            'X-Webhook-Secret': DOC_EXTRACT_WEBHOOK_SECRET,
+            'X-Doc-Extract-Secret': DOC_EXTRACT_WEBHOOK_SECRET  # Alternative header name
         }
 
         try:
@@ -1714,6 +1865,29 @@ def generate_preview_with_gpt(case_data: Dict[str, Any]) -> Optional[Dict[str, A
     payload = case_data.get('payload', {}) or {}
     token = case_data.get('token', 'unknown')
 
+    # Fetch ready documents by token
+    docs = fetch_ready_documents_by_token(token)
+
+    # Build document brief
+    doc_brief = build_doc_brief(docs)
+
+    # Check for any documents in processing status
+    all_docs_status = fetch_any_documents_status_by_token(token)
+    processing_docs = [d for d in all_docs_status if d.get('status') in ['pending', 'processing']]
+
+    if processing_docs and doc_brief["doc_status"] == "none":
+        doc_brief["doc_status"] = "processing"
+
+    # Add logging for document retrieval and prompt inputs
+    logger.info("DOC BRIEF DEBUG", extra={
+        "token": token[:12] + "...",
+        "doc_status": doc_brief["doc_status"],
+        "doc_count": doc_brief["doc_count"],
+        "ready_docs": len(docs),
+        "processing_docs": len(processing_docs),
+        "brief_text_len": len(doc_brief.get("brief_text", ""))
+    })
+
     def get_nested_value(obj: Any, path: str) -> Any:
         """Get a value from a nested dict using dotted path notation"""
         if not obj or not isinstance(obj, dict):
@@ -1780,6 +1954,14 @@ def generate_preview_with_gpt(case_data: Dict[str, Any]) -> Optional[Dict[str, A
     if not issue_text:
         issue_text = scan_for_text(payload, ['messages', 'steps', 'inputs', 'responses', 'history'])
 
+    # Improve issue extraction: use doc brief if payload issue is empty
+    if not issue_text and doc_brief.get("brief_text"):
+        issue_text = doc_brief["brief_text"]
+        logger.info("Using doc brief as issue_text fallback", extra={
+            "token": token[:12] + "...",
+            "brief_text_len": len(issue_text)
+        })
+
     # Build normalized case_brief with fallback keys
     state_paths = ["state", "property_state", "location.state", "form.state", "answers.state"]
     state = get_first_string(payload, state_paths) or 'Not provided'
@@ -1810,30 +1992,57 @@ def generate_preview_with_gpt(case_data: Dict[str, Any]) -> Optional[Dict[str, A
 
     # Log what we extracted BEFORE calling OpenAI
     logger.info("PREVIEW INPUT DEBUG", extra={
-        "token": token,
+        "token": token[:12] + "...",
         "issue_text_len": len(issue_text or ""),
         "issue_text_sample": (issue_text or "")[:250],
         "state": state,
         "property_type": property_type,
         "desired_outcome": desired_outcome,
-        "payload_keys": list(payload.keys()) if payload else []
+        "payload_keys": list(payload.keys()) if payload else [],
+        "doc_brief_status": doc_brief["doc_status"],
+        "doc_brief_text_len": len(doc_brief.get("brief_text", ""))
     })
 
-    # Build the personalized prompt with conditional rules based on issue_text_len
+    # Build the personalized prompt with conditional rules based on issue_text_len and doc availability
     issue_text_len = len(issue_text or "")
+    doc_brief_text = doc_brief.get("brief_text", "")
 
     if issue_text_len > 0:
-        issue_instructions = f"""CRITICAL - You have actual issue details. You MUST:
+        if doc_brief_text:
+            issue_instructions = f"""CRITICAL - You have actual issue details from both form data AND uploaded HOA documents. You MUST:
 - Reference the specific issue: "{issue_text[:500]}"
-- DO NOT say "details not provided" or "information not available"
+- DO NOT say "details not provided" or "information not available"  
 - DO NOT use placeholders like "[specific issue]" or "[your situation]"
 - The what_this_means and response_opening_preview MUST directly reference the user's actual issue
 - Be specific: if they mention "dryer vent", say "dryer vent". If they mention "parking", say "parking"."""
+        else:
+            issue_instructions = f"""CRITICAL - You have actual issue details from form data. You MUST:
+- Reference the specific issue: "{issue_text[:500]}"
+- DO NOT say "details not provided" or "information not available"
+- DO NOT use placeholders like "[specific issue]" or "[your situation]"  
+- The what_this_means and response_opening_preview MUST directly reference the user's actual issue
+- Be specific: if they mention "dryer vent", say "dryer vent". If they mention "parking", say "parking"."""
     else:
-        issue_instructions = """NOTE: No specific issue details were provided. You should:
+        if doc_brief_text:
+            issue_instructions = """NOTE: No form details were provided, but you have uploaded HOA document content. You should:
+- Use the document content to understand their situation
+- Reference specific details from the HOA notice when available
+- Still provide best-effort steps for their specific HOA dispute
+- Be honest if more details would help personalize the response"""
+        else:
+            issue_instructions = """NOTE: No specific issue details were provided. You should:
 - Ask ONE clarifying question to understand their situation better
 - Still provide best-effort general steps for HOA disputes
 - Be honest that more details would help personalize the response"""
+
+    # Build document section for the prompt
+    hoa_notice_section = ""
+    if doc_brief_text:
+        hoa_notice_section = f"\nHOA NOTICE BRIEF (from uploaded docs): {doc_brief_text}"
+    elif doc_brief["doc_status"] == "processing":
+        hoa_notice_section = "\nHOA NOTICE BRIEF: (Documents are still being processed - analysis will be updated when ready)"
+    else:
+        hoa_notice_section = "\nHOA NOTICE BRIEF: (none)"
 
     prompt = f"""You are an educational HOA dispute assistant (not a lawyer). Generate a conversion-grade preview based on the ACTUAL user inputs below.
 
@@ -1843,6 +2052,8 @@ FORMATTING RULES:
 - Tone: Calm, neutral, professional. Educational + drafting assistance only, NOT legal advice.
 - NO em dashes (—). Use regular dashes or restructure sentences.
 - Be concise but specific to their situation.
+- If doc_brief has content, you MUST reference it and MUST NOT say "details not provided".
+- If doc_brief empty, proceed as before.
 
 USER'S ACTUAL SITUATION:
 - State: {state}
@@ -1853,7 +2064,7 @@ USER'S ACTUAL SITUATION:
 - Violation Type: {violation_type if violation_type else '(not provided)'}
 - User's Response So Far: {your_response if your_response else '(not provided)'}
 - Desired Outcome: {desired_outcome if desired_outcome else '(not provided)'}
-- Deadline: {deadline}
+- Deadline: {deadline}{hoa_notice_section}
 
 DELIVERABLES:
 1. Preview Title: Brief, specific to their issue (e.g., "Responding to Dryer Vent Repair Request" not "HOA Dispute")
@@ -1868,6 +2079,11 @@ EXAMPLE of good personalization (if issue is about dryer vent proof):
 - What This Means: "Your HOA has requested proof that your dryer vent issue has been resolved. This is a compliance verification request..."
 - Subject: "Re: Dryer Vent Repair - Compliance Documentation Attached"
 """
+
+    # Update unlock teaser if documents are processing
+    processing_teaser_addition = ""
+    if doc_brief["doc_status"] == "processing":
+        processing_teaser_addition = " We are still reading your uploaded notice. Unlock now to get the full draft as soon as processing finishes."
 
     # Define the JSON schema with improved unlock_teaser
     schema = {
@@ -1960,6 +2176,11 @@ EXAMPLE of good personalization (if issue is about dryer vent proof):
         result = response.json()
         content = result['choices'][0]['message']['content']
         preview_dict = json.loads(content)
+
+        # Add processing teaser if documents are still being processed
+        if processing_teaser_addition:
+            current_headline = preview_dict.get("unlock_teaser", {}).get("headline", "")
+            preview_dict["unlock_teaser"]["headline"] = current_headline + processing_teaser_addition
 
         logger.info(f"Successfully generated preview with GPT-4: {preview_dict.get('preview_title', 'N/A')}")
 
