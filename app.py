@@ -1298,11 +1298,21 @@ def case_created_webhook():
 
 
 def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Create a new case in Supabase database."""
+    """Create a new case in Supabase database or update existing one."""
     try:
-        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-        headers = supabase_headers()
-        headers['Prefer'] = 'return=representation'
+        token = case_data.get('token')
+        if not token:
+            logger.error("No token provided for case creation")
+            return False, None, None
+
+        # First, check if case already exists
+        check_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        check_params = {'token': f'eq.{token}', 'select': 'id,token,status'}
+        check_headers = supabase_headers()
+
+        check_response = requests.get(check_url, params=check_params, headers=check_headers, timeout=TIMEOUT)
+        check_response.raise_for_status()
+        existing_cases = check_response.json()
 
         # Get email from the case data (check multiple possible field names)
         email = (case_data.get('email') or
@@ -1313,7 +1323,7 @@ def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optio
 
         # Prepare case data according to the actual table structure
         case_payload = {
-            'token': case_data.get('token'),
+            'token': token,
             'email': email,
             'payload': case_data,  # Store the entire case data as JSONB in payload column
             'status': 'preview'  # Set default status
@@ -1322,24 +1332,62 @@ def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optio
         # Remove None/empty values except for payload which should always be included
         case_payload = {k: v for k, v in case_payload.items() if v is not None and (k == 'payload' or v)}
 
-        logger.info(f"Creating case with payload keys: {list(case_payload.keys())}")
-        logger.info(f"Payload structure: {json.dumps(case_data, indent=2)}")
+        if existing_cases and len(existing_cases) > 0:
+            # Case exists, update it
+            existing_case = existing_cases[0]
+            case_id = existing_case.get('id')
 
-        response = requests.post(url, headers=headers, json=case_payload, timeout=TIMEOUT)
-        response.raise_for_status()
+            logger.info(f"Case with token {token[:8]}... already exists, updating with ID: {case_id}")
 
-        result = response.json()
-        if result and len(result) > 0:
-            case_id = result[0].get('id')
-            token = result[0].get('token')
-            logger.info(f"Created case successfully - ID: {case_id}, Token: {token[:8]}...")
-            return True, case_id, token
+            # Update existing case
+            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            update_params = {'id': f'eq.{case_id}'}
+            update_headers = supabase_headers()
+            update_headers['Prefer'] = 'return=representation'
+
+            # Only update payload and email, preserve other fields
+            update_payload = {
+                'payload': case_data,
+                'email': email
+            }
+            update_payload = {k: v for k, v in update_payload.items() if v is not None}
+
+            update_response = requests.patch(update_url, params=update_params, headers=update_headers, json=update_payload, timeout=TIMEOUT)
+            update_response.raise_for_status()
+
+            result = update_response.json()
+            if result and len(result) > 0:
+                logger.info(f"Updated existing case successfully - ID: {case_id}, Token: {token[:8]}...")
+                return True, case_id, token
+            else:
+                logger.warning(f"Update succeeded but no data returned for case {case_id}")
+                return True, case_id, token
+
         else:
-            logger.error("No case data returned from Supabase")
-            return False, None, None
+            # Case doesn't exist, create new one
+            logger.info(f"Creating new case with token {token[:8]}...")
+
+            url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            headers = supabase_headers()
+            headers['Prefer'] = 'return=representation'
+
+            logger.info(f"Creating case with payload keys: {list(case_payload.keys())}")
+
+            response = requests.post(url, headers=headers, json=case_payload, timeout=TIMEOUT)
+            response.raise_for_status()
+
+            result = response.json()
+            if result and len(result) > 0:
+                case_id = result[0].get('id')
+                token_returned = result[0].get('token')
+                logger.info(f"Created case successfully - ID: {case_id}, Token: {token_returned[:8]}...")
+                return True, case_id, token_returned
+            else:
+                logger.error("No case data returned from Supabase")
+                return False, None, None
 
     except Exception as e:
-        logger.error(f"Failed to create case in Supabase: {str(e)}")
+        logger.error(f"Failed to create/update case in Supabase: {str(e)}")
         return False, None, None
 
 
