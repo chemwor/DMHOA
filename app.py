@@ -1,3 +1,4 @@
+# Flask app with CORS fixes deployed on January 18, 2026
 import os
 import io
 import json
@@ -1894,4 +1895,3 @@ def add_cors_headers(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
     return response
-
