@@ -1788,110 +1788,84 @@ def doc_extract_start():
         return add_cors_headers(response), 500
 
 
-# Helper functions for case preview
-def preview_was_generated_without_docs(preview: dict) -> bool:
-    """
-    Returns True if the preview text indicates it was generated
-    before document content was available.
-    """
-    try:
-        content = preview.get("preview_content") or {}
-        what_this_means = (content.get("what_this_means") or "").lower()
-
-        indicators = [
-            "details not provided",
-            "without specific details",
-            "more information is needed",
-            "clarify the situation",
-            "unable to determine"
-        ]
-
-        return any(i in what_this_means for i in indicators)
-    except Exception:
-        return True
-
-
-def regenerate_preview_if_documents_ready(token: str):
-    """
-    Regenerates the preview ONLY if:
-    - Documents exist with extracted_text
-    - A preview exists
-    - The preview was generated before docs were available
-
-    This ensures the proper order: Save Case -> Process Documents -> Generate Preview
-    """
-    try:
-        case = read_case_by_token(token)
-        if not case:
-            logger.warning(f"Case not found for preview regeneration: {token[:8]}...")
-            return
-
-        case_id = case.get("id")
-        if not case_id:
-            logger.warning(f"Case ID not found for preview regeneration: {token[:8]}...")
-            return
-
-        # Fetch documents with extracted text
-        docs = fetch_ready_documents_by_token(token)
-        usable_docs = [
-            d for d in docs
-            if isinstance(d.get("extracted_text"), str) and d["extracted_text"].strip()
-        ]
-
-        if not usable_docs:
-            logger.info(f"No usable documents found for preview regeneration: {token[:8]}...")
-            return
-
-        # Check if preview exists
-        existing_preview = read_active_preview(case_id)
-        if not existing_preview:
-            logger.info(f"No existing preview found, generating new one with documents: {token[:8]}...")
-            # Generate a new preview using payload + docs
-            preview_content = generate_preview_with_gpt(case)
-            if preview_content:
-                insert_preview(case_id, preview_content)
-                logger.info(f"Successfully generated new preview with documents for case {case_id}")
-            else:
-                logger.error(f"Failed to generate new preview for case {case_id}")
-            return
-
-        # Check if the existing preview was generated without documents
-        if not preview_was_generated_without_docs(existing_preview):
-            logger.info(f"Existing preview already includes document content: {token[:8]}...")
-            return
-
-        logger.info("Regenerating preview with documents", extra={
-            "token": token[:12],
-            "doc_count": len(usable_docs),
-            "case_id": case_id
-        })
-
-        # Deactivate old previews
-        if deactivate_previews(case_id):
-            logger.info(f"Deactivated old previews for case {case_id}")
-        else:
-            logger.warning(f"Failed to deactivate old previews for case {case_id}")
-
-        # Generate a new preview using payload + docs
-        preview_content = generate_preview_with_gpt(case)
-
-        if not preview_content:
-            logger.error(f"Failed to regenerate preview for case {case_id}")
-            return
-
-        new_preview = insert_preview(case_id, preview_content)
-        if new_preview:
-            logger.info(f"Successfully regenerated preview {new_preview.get('id')} for case {case_id}")
-        else:
-            logger.error(f"Failed to save regenerated preview for case {case_id}")
-
-    except Exception as e:
-        logger.error(f"Exception during preview regeneration for token {token[:8]}...: {str(e)}")
-
-
 def add_cors_headers(response):
     """Helper function to add CORS headers consistently across endpoints"""
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     response.headers.add('Access-Control-Allow-Headers', 'authorization, x-client-info, apikey, content-type')
     return response
+
+
+@app.route('/api/save-case', methods=['POST', 'OPTIONS'])
+def save_case():
+    """Save case data to the database."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        return add_cors_headers(response)
+
+    try:
+        # Get the JSON data from the request
+        data = request.get_json()
+        if not data:
+            response = jsonify({'error': 'No JSON data provided'})
+            response.status_code = 400
+            return add_cors_headers(response)
+
+        # Generate a token for the case if not provided
+        import secrets
+        token = data.get('token') or secrets.token_urlsafe(32)
+
+        # Prepare case data for database insertion
+        case_data = {
+            'token': token,
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'updated_at': datetime.utcnow().isoformat() + 'Z',
+            **data  # Include all other data from the frontend
+        }
+
+        # Remove token from case_data to avoid duplication since it's already set
+        if 'token' in data:
+            case_data.update(data)
+
+        # Insert into Supabase
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        response = requests.post(url, json=case_data, headers=headers, timeout=TIMEOUT)
+
+        if response.status_code == 201:
+            result = response.json()
+            logger.info(f"Successfully created case with token {token[:12]}...")
+
+            response_data = {
+                'success': True,
+                'case': result[0] if isinstance(result, list) and len(result) > 0 else result,
+                'token': token
+            }
+            flask_response = jsonify(response_data)
+            return add_cors_headers(flask_response)
+        else:
+            logger.error(f"Failed to create case: {response.status_code} - {response.text}")
+            error_response = jsonify({
+                'error': f'Failed to save case: {response.status_code}',
+                'details': response.text
+            })
+            error_response.status_code = 500
+            return add_cors_headers(error_response)
+
+    except Exception as e:
+        logger.error(f"Exception in save_case endpoint: {str(e)}")
+        error_response = jsonify({
+            'error': 'Internal server error',
+            'details': str(e)
+        })
+        error_response.status_code = 500
+        return add_cors_headers(error_response)
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
