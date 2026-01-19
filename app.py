@@ -602,7 +602,7 @@ def doc_extract_webhook():
             logger.info(f"Processing as image using OCR: {filename}")
             extracted_text, page_count, char_count, extraction_error = extract_image_text(file_bytes, filename)
         else:
-            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path}'. Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
+            error_msg = f"Unsupported file type: filename='{filename}', mime_type='{mime_type}', path='{path'. Supported formats: PDF, JPG, JPEG, PNG, GIF, BMP, TIFF, WEBP"
             logger.warning(error_msg)
             update_document(document_id, token, {
                 'status': 'failed',
@@ -653,6 +653,15 @@ def doc_extract_webhook():
                 'error': 'Failed to update document with extracted text',
                 'document_id': document_id
             }), 500
+
+        # Try to regenerate preview if documents are now ready
+        try:
+            regenerate_preview_if_documents_ready(token)
+        except Exception as e:
+            logger.warning("Preview regeneration failed", extra={
+                "token": token[:12],
+                "error": str(e)
+            })
 
         file_type = "PDF" if is_pdf_file(filename, mime_type) else "image"
         logger.info(f"Successfully processed {file_type} document {document_id} - {page_count} pages, {char_count} characters")
@@ -1796,6 +1805,79 @@ def doc_extract_start():
 
 
 # Helper functions for case preview
+def preview_was_generated_without_docs(preview: dict) -> bool:
+    """
+    Returns True if the preview text indicates it was generated
+    before document content was available.
+    """
+    try:
+        content = preview.get("preview_content") or {}
+        what_this_means = (content.get("what_this_means") or "").lower()
+
+        indicators = [
+            "details not provided",
+            "without specific details",
+            "more information is needed",
+            "clarify the situation",
+            "unable to determine"
+        ]
+
+        return any(i in what_this_means for i in indicators)
+    except Exception:
+        return True
+
+
+def regenerate_preview_if_documents_ready(token: str):
+    """
+    Regenerates the preview ONLY if:
+    - Documents exist with extracted_text
+    - A preview exists
+    - The preview was generated before docs were available
+    """
+
+    case = read_case_by_token(token)
+    if not case:
+        return
+
+    case_id = case.get("id")
+    if not case_id:
+        return
+
+    # Fetch documents with extracted text
+    docs = fetch_ready_documents_by_token(token)
+    usable_docs = [
+        d for d in docs
+        if isinstance(d.get("extracted_text"), str) and d["extracted_text"].strip()
+    ]
+
+    if not usable_docs:
+        return
+
+    existing_preview = read_active_preview(case_id)
+    if not existing_preview:
+        return
+
+    if not preview_was_generated_without_docs(existing_preview):
+        return
+
+    logger.info("Regenerating preview with documents", extra={
+        "token": token[:12],
+        "doc_count": len(usable_docs)
+    })
+
+    # Deactivate old previews
+    deactivate_previews(case_id)
+
+    # Generate a new preview using payload + docs
+    preview_content = generate_preview_with_gpt(case)
+
+    if not preview_content:
+        logger.error("Failed to regenerate preview")
+        return
+
+    insert_preview(case_id, preview_content)
+
+
 def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
     """Fetch case from dmhoa_cases by token"""
     try:
