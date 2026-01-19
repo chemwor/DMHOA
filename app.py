@@ -1304,21 +1304,26 @@ def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optio
         headers = supabase_headers()
         headers['Prefer'] = 'return=representation'
 
-        # Prepare case data
+        # Get email from the case data (check multiple possible field names)
+        email = (case_data.get('email') or
+                case_data.get('ownerEmail') or
+                case_data.get('owner_email') or
+                case_data.get('userEmail') or
+                case_data.get('user_email'))
+
+        # Prepare case data according to the actual table structure
         case_payload = {
             'token': case_data.get('token'),
-            'hoa_name': case_data.get('hoaName', ''),
-            'violation_type': case_data.get('violationType', ''),
-            'case_description': case_data.get('caseDescription', ''),
-            'owner_name': case_data.get('ownerName', ''),
-            'owner_email': case_data.get('ownerEmail', ''),
-            'property_address': case_data.get('propertyAddress', ''),
-            'payload': json.dumps(case_data),  # Store full payload as JSON
-            'status': 'active'
+            'email': email,
+            'payload': case_data,  # Store the entire case data as JSONB in payload column
+            'status': 'preview'  # Set default status
         }
 
-        # Remove None/empty values
-        case_payload = {k: v for k, v in case_payload.items() if v}
+        # Remove None/empty values except for payload which should always be included
+        case_payload = {k: v for k, v in case_payload.items() if v is not None and (k == 'payload' or v)}
+
+        logger.info(f"Creating case with payload keys: {list(case_payload.keys())}")
+        logger.info(f"Payload structure: {json.dumps(case_data, indent=2)}")
 
         response = requests.post(url, headers=headers, json=case_payload, timeout=TIMEOUT)
         response.raise_for_status()
