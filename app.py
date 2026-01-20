@@ -2202,12 +2202,9 @@ def stripe_webhook():
         try:
             case_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             case_update_params = {'id': f'eq.{case_id}'}
+            # Only update fields that exist in the database schema
             case_update_data = {
-                'unlocked': True,
                 'status': 'paid',
-                'payment_session_id': session['id'],
-                'payment_amount': session.get('amount_total'),
-                'payment_completed_at': datetime.utcnow().isoformat(),
                 'updated_at': datetime.utcnow().isoformat()
             }
             case_update_headers = supabase_headers()
@@ -2216,10 +2213,16 @@ def stripe_webhook():
                                            headers=case_update_headers, json=case_update_data, timeout=TIMEOUT)
             update_response.raise_for_status()
 
-            logger.info(f"Successfully marked case {case_id} as unlocked/paid")
+            logger.info(f"Successfully marked case {case_id} as paid")
 
         except Exception as e:
-            logger.error(f"Failed to mark case {case_id} as unlocked: {str(e)}")
+            logger.error(f"Failed to mark case {case_id} as paid: {str(e)}")
+            # Log the full response for debugging
+            try:
+                logger.error(f"Response status: {update_response.status_code}")
+                logger.error(f"Response text: {update_response.text}")
+            except:
+                pass
             return jsonify({'error': 'Failed to update case status'}), 500
 
         # STEP 2: Generate the actual full case analysis using GPT
