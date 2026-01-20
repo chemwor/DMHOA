@@ -945,6 +945,31 @@ def render_preview_markdown(preview_json: Dict) -> str:
         return "Error rendering preview. Please try again."
 
 
+# NEW: Helper function to clean up rules_cited narrative text
+def clean_rules_cited(rules_cited_list):
+    """Clean up rules_cited to prefer citations over narrative."""
+    if not rules_cited_list:
+        return rules_cited_list
+
+    cleaned = []
+    for rule in rules_cited_list:
+        if isinstance(rule, str):
+            # Convert narrative "previous notices" to compressed form
+            if "previous notices" in rule.lower():
+                # Extract year if present, otherwise use generic
+                import re
+                year_match = re.search(r'\b(20\d{2})\b', rule)
+                if year_match:
+                    cleaned.append(f"Prior notices ({year_match.group(1)})")
+                else:
+                    cleaned.append("Prior notices (2024)")
+            else:
+                cleaned.append(rule)
+        else:
+            cleaned.append(rule)
+
+    return cleaned
+
 def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple[str, Dict, int, Optional[Dict]]:
     """Generate case preview using OpenAI and return preview, token usage, latency, and preview_json."""
     start_time = time.time()
@@ -1002,7 +1027,7 @@ def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple
 
         # Prepare the conversion-optimized prompt based on document availability
         if doc_status == "ready" and doc_text:
-            # Documents are ready - extract specific facts
+            # NEW: Updated prompt for documents ready - improved headline, why_now, rules_cited, hard_stop, and critical_detail_locked
             user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. You must extract specific facts from the document analysis and output ONLY valid JSON.
 
 Case Details:
@@ -1018,17 +1043,17 @@ Document Analysis ({doc_count} documents ready):
 Output ONLY valid JSON with this exact structure:
 {{
   "version": "preview_v2_sales",
-  "headline": "string (8-14 words, specific to this case)",
-  "why_now": "string (1-2 sentences, urgency tied to deadline/fines/escalation)",
+  "headline": "string (8-14 words, specific to this case. If a deadline is present, headline must include it as 'X-Day Deadline' or the exact date)",
+  "why_now": "string (1-2 sentences, tie urgency to the required action: inspection + written report + video, and the deadline)",
   "your_situation": {{
     "alleged_violation": "string (extracted from documents)",
     "hoa_demands": ["string", "string", "..."],
     "deadline": "string (use exact date if present; else 'Not stated')",
-    "rules_cited": ["string", "..."]
+    "rules_cited": ["string (each entry must be either 'Paragraph <...>' / 'Section <...>' / 'Article <...>' if present, otherwise 'Not stated'. Do NOT include vague narrative like 'previous notices' unless no citations exist; if included, compress to 'Prior notices (YYYY)')", "..."]
   }},
   "critical_detail_locked": {{
     "title": "Critical Response Wording (Locked)",
-    "body": "The exact paragraph wording that will preserve your extension rights and avoid admitting liability is locked. Our analysis shows specific language about [evidence acceptance/rule interpretation/compliance deadlines] that could be irreversible if worded incorrectly. This critical phrasing is included in the unlock package."
+    "body": "The exact clause/paragraph language to cite, proof checklist (what the HOA will accept: report + video format), and extension request wording (preserves rights without admitting fault) are locked. Our analysis shows specific language about [evidence acceptance/rule interpretation/compliance deadlines] that could weaken your position if worded incorrectly. This critical phrasing is included in the unlock package."
   }},
   "risk_if_wrong": [
     "string (specific consequence)",
@@ -1042,7 +1067,7 @@ Output ONLY valid JSON with this exact structure:
     "Extension request template if deadline is tight",
     "Negotiation strategies for your specific situation"
   ],
-  "hard_stop": "string (1-2 lines that create unfinished business - mention key wording or checklist being withheld)",
+  "hard_stop": "string (1-2 lines that create unfinished business - must mention 2-3 concrete items such as: exact paragraph language to quote, proof checklist, extension request template)",
   "cta": {{
     "primary": "Unlock full response package",
     "secondary": "See exactly what proof the HOA will accept"
@@ -1054,10 +1079,11 @@ RULES:
 - Use "you" voice throughout
 - Be concrete and specific to this case
 - Include at least 5 concrete deliverables in what_you_get_when_you_unlock
-- Make hard_stop create genuine unfinished business
-- For critical_detail_locked body, reference 1-2 specific aspects from: paragraph wording, admitting liability, preserving extension rights, evidence acceptance that match the extracted facts"""
+- Make hard_stop create genuine unfinished business with concrete locked items
+- For critical_detail_locked body, reference exact clause language, proof checklist, extension request wording
+- Avoid 'admit liability' language unless phrased as 'without admitting fault' or 'without admitting liability'"""
         else:
-            # Documents pending or none - focus on what unlock will provide
+            # NEW: Updated prompt for documents pending - improved hard_stop and critical_detail_locked
             docs_pending_text = "docs are still being processed" if doc_status == "processing" else "no documents uploaded yet"
             user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. Documents are pending but you must still create a persuasive preview. Output ONLY valid JSON.
 
@@ -1082,7 +1108,7 @@ Output ONLY valid JSON with this exact structure:
   }},
   "critical_detail_locked": {{
     "title": "Critical Response Wording (Locked)",
-    "body": "Deadlines and exact rule wording are being extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
+    "body": "Exact rule language, deadline extraction, proof checklist, and extension request template are being extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
   }},
   "risk_if_wrong": [
     "Missing critical response deadlines",
@@ -1096,7 +1122,7 @@ Output ONLY valid JSON with this exact structure:
     "Deadline tracking and extension strategies",
     "Complete document analysis and defense strategy"
   ],
-  "hard_stop": "Your documents are being analyzed to identify the exact wording and deadlines the HOA cited. Once complete, you'll get the specific language and proof checklist needed for your response.",
+  "hard_stop": "Your documents are being analyzed to identify exact rule language, deadline extraction, proof checklist, and extension request template. Once complete, you'll get these specific locked items needed for your response.",
   "cta": {{
     "primary": "Unlock full response package",
     "secondary": "Get complete analysis once documents are ready"
@@ -1170,6 +1196,10 @@ RULES:
                 clean_json = json_response[json_start:json_end]
                 preview_json = json.loads(clean_json)
 
+                # NEW: Post-processing to clean up rules_cited narrative
+                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json['your_situation']:
+                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(preview_json['your_situation']['rules_cited'])
+
                 # Create markdown from JSON
                 markdown_preview = render_preview_markdown(preview_json)
 
@@ -1217,7 +1247,7 @@ def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int,
         property_address = payload.get('propertyAddress', payload.get('property_address', ''))
         owner_name = payload.get('ownerName', payload.get('owner_name', ''))
 
-        # Create conversion-optimized prompt for no documents case
+        # NEW: Updated prompt for no documents case - improved hard_stop and critical_detail_locked
         user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. No documents have been uploaded yet, but you must still create a persuasive preview. Output ONLY valid JSON.
 
 Case Details:
@@ -1241,7 +1271,7 @@ Output ONLY valid JSON with this exact structure:
   }},
   "critical_detail_locked": {{
     "title": "Critical Response Wording (Locked)",
-    "body": "Deadlines and exact rule wording are being extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
+    "body": "Exact rule language, deadline extraction, proof checklist, and extension request template will be extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
   }},
   "risk_if_wrong": [
     "Missing critical response deadlines that could escalate penalties",
@@ -1255,7 +1285,7 @@ Output ONLY valid JSON with this exact structure:
     "Extension request strategies if deadlines are tight",
     "Complete analysis once you upload your HOA documents"
   ],
-  "hard_stop": "Upload your HOA notice and we'll analyze the exact language, deadlines, and rules they cited. You'll get the specific wording and proof checklist needed for your response.",
+  "hard_stop": "Upload your HOA notice and we'll analyze exact rule language, deadline extraction, proof checklist, and extension request template. You'll get these specific locked items needed for your response.",
   "cta": {{
     "primary": "Unlock full response package",
     "secondary": "Upload documents for complete analysis"
@@ -1329,6 +1359,10 @@ RULES:
                 clean_json = json_response[json_start:json_end]
                 preview_json = json.loads(clean_json)
 
+                # NEW: Post-processing to clean up rules_cited narrative
+                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json['your_situation']:
+                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(preview_json['your_situation']['rules_cited'])
+
                 # Create markdown from JSON
                 markdown_preview = render_preview_markdown(preview_json)
 
@@ -1349,8 +1383,8 @@ RULES:
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
-        logger.error(f"Failed to generate preliminary case preview: {str(e)}")
-        return f"Error generating preliminary preview: {str(e)}", {}, latency_ms, None
+        logger.error(f"Failed to generate case preview: {str(e)}")
+        return f"Error generating preview: {str(e)}", {}, latency_ms, None
 
 
 def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
