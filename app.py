@@ -2207,21 +2207,63 @@ def stripe_webhook():
         # Create case URL as specified
         case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
 
-        # Prepare data for dmhoa_case_outputs table
+        # First, let's check if the table exists and what its schema looks like
+        try:
+            test_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            test_params = {'limit': '0'}  # Just get schema info, no data
+            test_headers = supabase_headers()
+
+            test_response = requests.get(test_url, params=test_params, headers=test_headers, timeout=TIMEOUT)
+            logger.info(f"Table access test - Status: {test_response.status_code}")
+            logger.info(f"Table access test - Headers: {dict(test_response.headers)}")
+
+            if test_response.status_code == 404:
+                logger.error("dmhoa_case_outputs table does not exist!")
+                return jsonify({'error': 'Case outputs table not found'}), 500
+
+        except Exception as e:
+            logger.error(f"Error testing table access: {str(e)}")
+
+        # Prepare data for dmhoa_case_outputs table with minimal required fields first
         case_output_data = {
             'case_id': case_id,
             'case_token': case_token,
             'session_id': session['id'],
-            'case_url': case_url,
-            'preview_id': preview.get('id'),
-            'preview_content': preview.get('preview_content'),
+            'case_url': case_url
+        }
+
+        # Add optional fields if they exist and aren't too large
+        if preview:
+            case_output_data['preview_id'] = preview.get('id')
+
+            # Handle preview_content carefully - it might be too large or have wrong structure
+            preview_content = preview.get('preview_content')
+            if preview_content and isinstance(preview_content, dict):
+                # Try to include preview content, but limit its size
+                try:
+                    content_str = json.dumps(preview_content)
+                    if len(content_str) < 10000:  # Limit to 10KB
+                        case_output_data['preview_content'] = preview_content
+                    else:
+                        logger.warning(f"Preview content too large ({len(content_str)} chars), skipping")
+                except Exception as e:
+                    logger.warning(f"Error serializing preview content: {e}")
+
+        # Add payment details
+        case_output_data.update({
             'payment_status': 'completed',
             'payment_amount': session.get('amount_total'),
             'currency': session.get('currency'),
-            'customer_email': session.get('customer_details', {}).get('email'),
-            'created_at': datetime.utcnow().isoformat(),
             'stripe_session_id': session['id']
-        }
+        })
+
+        # Add customer email if available
+        customer_details = session.get('customer_details', {})
+        if customer_details and customer_details.get('email'):
+            case_output_data['customer_email'] = customer_details['email']
+
+        # Add created timestamp
+        case_output_data['created_at'] = datetime.utcnow().isoformat()
 
         # Insert into dmhoa_case_outputs table
         success = insert_case_output(case_output_data)
@@ -2248,7 +2290,15 @@ def insert_case_output(output_data: Dict) -> bool:
         # Remove None values
         output_data = {k: v for k, v in output_data.items() if v is not None}
 
+        # Log the data being sent for debugging
+        logger.info(f"Attempting to insert case output with data: {json.dumps(output_data, indent=2, default=str)}")
+
         response = requests.post(url, headers=headers, json=output_data, timeout=TIMEOUT)
+
+        # Log the full response for debugging
+        logger.info(f"Supabase response status: {response.status_code}")
+        logger.info(f"Supabase response body: {response.text}")
+
         response.raise_for_status()
 
         result = response.json()
@@ -2259,6 +2309,11 @@ def insert_case_output(output_data: Dict) -> bool:
 
         return False
 
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error inserting case output: {e}")
+        logger.error(f"Response status: {e.response.status_code}")
+        logger.error(f"Response body: {e.response.text}")
+        return False
     except Exception as e:
         logger.error(f"Failed to insert case output: {str(e)}")
         return False
