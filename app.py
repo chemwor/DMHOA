@@ -29,7 +29,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+# NEW: Updated CORS configuration with comprehensive headers and methods
+CORS(app, resources={r"/*": {"origins": "*"}},
+     supports_credentials=False,
+     allow_headers=["Content-Type", "Authorization", "apikey", "x-client-info", "x-supabase-api-version", "X-Webhook-Secret"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -62,6 +66,10 @@ SMTP_SENDER_WEBHOOK_URL = os.environ.get("SMTP_SENDER_WEBHOOK_URL")
 
 # Request timeouts
 TIMEOUT = (5, 60)  # (connect, read)
+
+# NEW: In-process lock to prevent duplicate preview generation
+preview_generation_locks = {}
+preview_lock = threading.Lock()
 
 def supabase_headers() -> Dict[str, str]:
     """Return headers for Supabase API requests."""
@@ -885,6 +893,14 @@ def render_preview_markdown(preview_json: Dict) -> str:
                     markdown_parts.append(f"- {rule}")
                 markdown_parts.append("")
 
+        # NEW: Critical Detail (Locked) section
+        critical_detail = preview_json.get('critical_detail_locked', {})
+        if critical_detail:
+            title = critical_detail.get('title', 'Critical Detail (Locked)')
+            body = critical_detail.get('body', '')
+            if body:
+                markdown_parts.append(f"## {title}\n{body}\n")
+
         # Risk if wrong
         risks = preview_json.get('risk_if_wrong', [])
         if risks:
@@ -956,7 +972,7 @@ def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple
         violation_type = (payload.get('violationType') or
                          payload.get('violation_type') or
                          payload.get('noticeType') or
-                         case_data.get('violation_type') or
+                         case_data.get('case_description') or
                          case_data.get('violationType') or
                          'Unknown violation')
 
@@ -1010,6 +1026,10 @@ Output ONLY valid JSON with this exact structure:
     "deadline": "string (use exact date if present; else 'Not stated')",
     "rules_cited": ["string", "..."]
   }},
+  "critical_detail_locked": {{
+    "title": "Critical Response Wording (Locked)",
+    "body": "The exact paragraph wording that will preserve your extension rights and avoid admitting liability is locked. Our analysis shows specific language about [evidence acceptance/rule interpretation/compliance deadlines] that could be irreversible if worded incorrectly. This critical phrasing is included in the unlock package."
+  }},
   "risk_if_wrong": [
     "string (specific consequence)",
     "string",
@@ -1017,7 +1037,7 @@ Output ONLY valid JSON with this exact structure:
   ],
   "what_you_get_when_you_unlock": [
     "Professional response letter tailored to your specific violation",
-    "Certified mail template with proper legal language", 
+    "Certified mail template with proper legal language",
     "Evidence checklist to document your defense",
     "Extension request template if deadline is tight",
     "Negotiation strategies for your specific situation"
@@ -1034,7 +1054,8 @@ RULES:
 - Use "you" voice throughout
 - Be concrete and specific to this case
 - Include at least 5 concrete deliverables in what_you_get_when_you_unlock
-- Make hard_stop create genuine unfinished business"""
+- Make hard_stop create genuine unfinished business
+- For critical_detail_locked body, reference 1-2 specific aspects from: paragraph wording, admitting liability, preserving extension rights, evidence acceptance that match the extracted facts"""
         else:
             # Documents pending or none - focus on what unlock will provide
             docs_pending_text = "docs are still being processed" if doc_status == "processing" else "no documents uploaded yet"
@@ -1059,6 +1080,10 @@ Output ONLY valid JSON with this exact structure:
     "deadline": "Not stated - will be extracted from documents",
     "rules_cited": ["Pending document analysis"]
   }},
+  "critical_detail_locked": {{
+    "title": "Critical Response Wording (Locked)",
+    "body": "Deadlines and exact rule wording are being extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
+  }},
   "risk_if_wrong": [
     "Missing critical response deadlines",
     "Accepting invalid HOA demands without challenge",
@@ -1073,16 +1098,17 @@ Output ONLY valid JSON with this exact structure:
   ],
   "hard_stop": "Your documents are being analyzed to identify the exact wording and deadlines the HOA cited. Once complete, you'll get the specific language and proof checklist needed for your response.",
   "cta": {{
-    "primary": "Unlock full response package", 
+    "primary": "Unlock full response package",
     "secondary": "Get complete analysis once documents are ready"
   }}
 }}
 
 RULES:
 - Use "you" voice throughout
-- Be specific about what the unlock will provide once docs are ready  
+- Be specific about what the unlock will provide once docs are ready
 - Make it clear docs are pending but tool is still valuable
-- Create urgency around not missing opportunities"""
+- Create urgency around not missing opportunities
+- For critical_detail_locked, emphasize that exact response phrasing comes after document analysis"""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1213,9 +1239,13 @@ Output ONLY valid JSON with this exact structure:
     "deadline": "Unknown - upload documents to identify deadlines",
     "rules_cited": ["Upload documents to see specific rules cited"]
   }},
+  "critical_detail_locked": {{
+    "title": "Critical Response Wording (Locked)",
+    "body": "Deadlines and exact rule wording are being extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
+  }},
   "risk_if_wrong": [
     "Missing critical response deadlines that could escalate penalties",
-    "Accepting invalid HOA demands without proper challenge", 
+    "Accepting invalid HOA demands without proper challenge",
     "Paying unnecessary fines or agreeing to unreasonable compliance"
   ],
   "what_you_get_when_you_unlock": [
@@ -1236,7 +1266,8 @@ RULES:
 - Use "you" voice throughout
 - Be specific about {violation_type} violations
 - Create urgency around not delaying action
-- Make it clear uploading documents unlocks much more value"""
+- Make it clear uploading documents unlocks much more value
+- For critical_detail_locked, emphasize that exact response phrasing comes after document analysis"""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1325,135 +1356,110 @@ RULES:
 def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
     """Automatically generate case preview - immediate or deferred based on document status."""
     try:
-        # Fetch case data first
-        case = read_case_by_token(token)
-        if not case:
-            logger.error(f"Case not found for token {token[:12]}...")
-            return False
+        # NEW: Use improved concurrency guard to prevent duplicate active previews
+        if not force_regenerate and not upsert_active_preview_lock(case_id):
+            return True  # Skip generation, already handled or in progress
 
-        # Check document status
-        documents = fetch_ready_documents_by_token(token, limit=5)
-        all_documents = fetch_any_documents_status_by_token(token)
+        try:
+            # Fetch case data first
+            case = read_case_by_token(token)
+            if not case:
+                logger.error(f"Case not found for token {token[:12]}...")
+                return False
 
-        has_processing_documents = any(doc.get('status') in ['pending', 'processing'] for doc in all_documents)
+            # Check document status
+            documents = fetch_ready_documents_by_token(token, limit=5)
+            all_documents = fetch_any_documents_status_by_token(token)
 
-        # Check existing preview
-        existing_preview = read_active_preview(case_id)
+            has_processing_documents = any(doc.get('status') in ['pending', 'processing'] for doc in all_documents)
 
-        # Determine if we need to generate/upgrade preview
-        should_generate = False
-        preview_type = "preliminary"
+            # Check existing preview
+            existing_preview = read_active_preview(case_id)
 
-        if not existing_preview:
-            # No preview exists - always generate
-            should_generate = True
-            logger.info(f"No preview exists for case {token[:12]}... - generating new preview")
-        elif force_regenerate:
-            # Forced regeneration
-            should_generate = True
-            logger.info(f"Force regenerating preview for case {token[:12]}...")
-        else:
-            # Check if we can upgrade from preliminary to full
-            existing_content = existing_preview.get('preview_content', {})
-            existing_doc_summary = existing_content.get('doc_summary', {})
-            existing_doc_status = existing_doc_summary.get('doc_status', 'none')
-
-            if documents and existing_doc_status in ['none', 'processing']:
-                # We have ready documents but existing preview doesn't - upgrade to full
-                should_generate = True
-                preview_type = "upgrade"
-                logger.info(f"Upgrading preview from {existing_doc_status} to full for case {token[:12]}...")
-            else:
-                logger.info(f"Preview already exists and up-to-date for case {token[:12]}... - skipping generation")
-                return True
-
-        if not should_generate:
-            return True
-
-        # Generate preview based on available data
-        preview_json = None
-        if documents:
-            # Documents are ready - generate full preview with document analysis
-            logger.info(f"Generating full preview with {len(documents)} ready documents for case {token[:12]}...")
-            doc_brief = build_doc_brief(documents)
-            preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_openai(case, doc_brief)
-            preview_type = "full"
-
-        elif has_processing_documents:
-            # Documents are still processing - generate preliminary preview
-            logger.info(f"Documents still processing for case {token[:12]}... - generating preliminary preview")
-            doc_brief = {
-                "doc_status": "processing",
-                "doc_count": len(all_documents),
-                "sources": [],
-                "brief_text": "Documents are currently being processed and analyzed."
-            }
-            preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
+            # Determine if we need to generate/upgrade preview
+            should_generate = False
             preview_type = "preliminary"
 
-        else:
-            # No documents at all - generate basic preview
-            logger.info(f"No documents found for case {token[:12]}... - generating basic preview")
-            doc_brief = {
-                "doc_status": "none",
-                "doc_count": 0,
-                "sources": [],
-                "brief_text": "No documents have been uploaded for analysis."
-            }
-            preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
-            preview_type = "basic"
+            if not existing_preview:
+                # No preview exists - always generate
+                should_generate = True
+                logger.info(f"No preview exists for case {token[:12]}... - generating new preview")
+            elif force_regenerate:
+                # Forced regeneration
+                should_generate = True
+                logger.info(f"Force regenerating preview for case {token[:12]}...")
+            else:
+                # Check if we can upgrade from preliminary to full
+                existing_content = existing_preview.get('preview_content', {})
+                existing_doc_summary = existing_content.get('doc_summary', {})
+                existing_doc_status = existing_doc_summary.get('doc_status', 'none')
 
-        # Save preview (this will deactivate existing ones automatically)
-        success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms, preview_json)
+                if documents and existing_doc_status in ['none', 'processing']:
+                    # We have ready documents but existing preview doesn't - upgrade to full
+                    should_generate = True
+                    preview_type = "upgrade"
+                    logger.info(f"Upgrading preview from {existing_doc_status} to full for case {token[:12]}...")
+                else:
+                    logger.info(f"Preview already exists and up-to-date for case {token[:12]}... - skipping generation")
+                    return True
 
-        if success:
-            logger.info(f"Successfully generated {preview_type} preview for case {token[:12]}...")
-        else:
-            logger.error(f"Failed to save {preview_type} preview for case {token[:12]}...")
+            if not should_generate:
+                return True
 
-        return success
+            # Generate preview based on available data
+            preview_json = None
+            if documents:
+                # Documents are ready - generate full preview with document analysis
+                logger.info(f"Generating full preview with {len(documents)} ready documents for case {token[:12]}...")
+                doc_brief = build_doc_brief(documents)
+                preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_openai(case, doc_brief)
+                preview_type = "full"
+
+            elif has_processing_documents:
+                # Documents are still processing - generate preliminary preview
+                logger.info(f"Documents still processing for case {token[:12]}... - generating preliminary preview")
+                doc_brief = {
+                    "doc_status": "processing",
+                    "doc_count": len(all_documents),
+                    "sources": [],
+                    "brief_text": "Documents are currently being processed and analyzed."
+                }
+                preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
+                preview_type = "preliminary"
+
+            else:
+                # No documents at all - generate basic preview
+                logger.info(f"No documents found for case {token[:12]}... - generating basic preview")
+                doc_brief = {
+                    "doc_status": "none",
+                    "doc_count": 0,
+                    "sources": [],
+                    "brief_text": "No documents have been uploaded for analysis."
+                }
+                preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
+                preview_type = "basic"
+
+            # Save preview (this will deactivate existing ones automatically)
+            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms, preview_json)
+
+            if success:
+                logger.info(f"Successfully generated {preview_type} preview for case {token[:12]}...")
+            else:
+                logger.error(f"Failed to save {preview_type} preview for case {token[:12]}...")
+
+            return success
+
+        finally:
+            # NEW: Always release the lock when done
+            release_preview_lock(case_id)
 
     except Exception as e:
+        # NEW: Release lock on exception
+        release_preview_lock(case_id)
         logger.error(f"Error auto-generating preview for case {token[:12]}...: {str(e)}")
         return False
 
 
-def trigger_preview_update_after_document_processing(token: str) -> bool:
-    """Trigger preview update when documents become ready (called from doc-extract webhook)."""
-    try:
-        # Find the case
-        case = read_case_by_token(token)
-        if not case:
-            logger.warning(f"Case not found for document processing completion: {token[:12]}...")
-            return False
-
-        case_id = case.get('id')
-        if not case_id:
-            logger.warning(f"Case ID not found for token: {token[:12]}...")
-            return False
-
-        # Check if we have ready documents now
-        documents = fetch_ready_documents_by_token(token, limit=5)
-        if not documents:
-            logger.info(f"No ready documents yet for case {token[:12]}... - keeping existing preview")
-            return True
-
-        # Upgrade preview with newly ready documents (without forcing regeneration)
-        # This will only upgrade if the existing preview isn't already "ready"
-        logger.info(f"Triggering preview upgrade with newly ready documents for case {token[:12]}...")
-
-        success = auto_generate_case_preview(token, case_id, force_regenerate=False)
-
-        if success:
-            logger.info(f"Successfully updated preview with documents for case {token[:12]}...")
-        else:
-            logger.error(f"Failed to update preview with documents for case {token[:12]}...")
-
-        return success
-
-    except Exception as e:
-        logger.error(f"Error updating preview after document processing for {token[:12]}...: {str(e)}")
-        return False
 
 @app.route('/webhooks/generate-preview', methods=['POST'])
 def generate_preview_webhook():
@@ -1691,9 +1697,6 @@ def save_case():
     # Handle CORS preflight
     if request.method == 'OPTIONS':
         response = jsonify({'message': 'OK'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-client-info,x-supabase-api-version')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
         return response
 
     try:
@@ -1785,37 +1788,34 @@ def save_case():
                 'error': 'Failed to create case in database'
             }), 500
 
-        # Trigger case creation webhook to start preview generation
+        # NEW: Direct preview generation trigger instead of HTTP call to localhost
         try:
             if case_id:
-                # Call our own case-created webhook to trigger preview generation
-                webhook_data = {
-                    'token': token,
-                    'case_id': case_id
-                }
+                logger.info(f"Triggering direct preview generation for case {token[:8]}...")
 
-                # Make internal webhook call
-                webhook_headers = {
-                    'X-Webhook-Secret': DOC_EXTRACT_WEBHOOK_SECRET,
-                    'Content-Type': 'application/json'
-                }
+                # Call auto_generate_case_preview directly instead of making HTTP request
+                immediate_success = auto_generate_case_preview(token, case_id, force_regenerate=False)
 
-                # Use localhost for internal calls
-                webhook_url = f"http://localhost:{os.environ.get('PORT', 5000)}/webhooks/case-created"
+                # Check if there are any documents that might need processing
+                all_documents = fetch_any_documents_status_by_token(token)
+                pending_or_processing_docs = [doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]
 
-                webhook_response = requests.post(
-                    webhook_url,
-                    headers=webhook_headers,
-                    json=webhook_data,
-                    timeout=5
-                )
-
-                if webhook_response.status_code == 200:
-                    logger.info(f"Successfully triggered preview generation for case {token[:8]}...")
+                # Only schedule delayed jobs if there are documents that might become ready
+                if pending_or_processing_docs:
+                    logger.info(f"Found {len(pending_or_processing_docs)} pending/processing documents - scheduling delayed preview generations")
+                    # Delayed: Give time for documents to be uploaded and processed, then regenerate
+                    schedule_delayed_preview_generation(token, case_id, delay_seconds=60)
+                    # Also schedule a longer delay for cases where document processing might take longer
+                    schedule_delayed_preview_generation(token, case_id, delay_seconds=300)  # 5 minutes
                 else:
-                    logger.warning(f"Failed to trigger preview generation: {webhook_response.status_code}")
+                    logger.info(f"No pending/processing documents found - skipping delayed preview generations")
+
+                if immediate_success:
+                    logger.info(f"Successfully generated immediate preview for case {token[:8]}...")
+                else:
+                    logger.warning(f"Failed to generate immediate preview for case {token[:8]}...")
         except Exception as e:
-            logger.warning(f"Failed to trigger preview generation webhook: {str(e)}")
+            logger.warning(f"Failed to trigger preview generation: {str(e)}")
             # Don't fail the main request if preview generation fails
 
         response_data = {
@@ -1825,23 +1825,46 @@ def save_case():
             'case_id': case_id
         }
 
-        response = jsonify(response_data)
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-client-info,x-supabase-api-version')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-
-        return response, 200
+        return jsonify(response_data), 200
 
     except Exception as e:
         error_msg = f"Unexpected error saving case: {str(e)}"
         logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
 
-        response = jsonify({'error': error_msg})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-client-info,x-supabase-api-version')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
 
-        return response, 500
+# NEW: Concurrency guard function to prevent duplicate preview generation
+def upsert_active_preview_lock(case_id: str) -> bool:
+    """
+    Check if preview generation should proceed to prevent duplicates.
+    Returns True if generation should proceed, False if should skip.
+    """
+    with preview_lock:
+        # Check if another thread is already generating for this case
+        if case_id in preview_generation_locks:
+            logger.info(f"Preview generation already in progress for case {case_id}")
+            return False
+
+        # Check existing active preview and doc status
+        existing_preview = read_active_preview(case_id)
+        if existing_preview:
+            existing_content = existing_preview.get('preview_content', {})
+            existing_doc_summary = existing_content.get('doc_summary', {})
+            existing_doc_status = existing_doc_summary.get('doc_status', 'none')
+
+            # If we already have a "ready" status preview, skip generation
+            if existing_doc_status == "ready":
+                logger.info(f"Preview with ready docs already exists for case {case_id}")
+                return False
+
+        # Mark this case as being processed
+        preview_generation_locks[case_id] = True
+        return True
+
+def release_preview_lock(case_id: str):
+    """Release the preview generation lock for a case."""
+    with preview_lock:
+        preview_generation_locks.pop(case_id, None)
 
 
 if __name__ == '__main__':
