@@ -2088,552 +2088,66 @@ def get_case_data():
         return jsonify({'error': error_msg}), 500
 
 
-# NEW: Concurrency guard function to prevent duplicate preview generation
-def upsert_active_preview_lock(case_id: str) -> bool:
-    """
-    Check if preview generation should proceed to prevent duplicates.
-    Returns True if generation should proceed, False if should skip.
-    """
-    with preview_lock:
-        # Check if another thread is already generating for this case
-        if case_id in preview_generation_locks:
-            logger.info(f"Preview generation already in progress for case {case_id}")
-            return False
-
-        # Check existing active preview and doc status
-        existing_preview = read_active_preview(case_id)
-        if existing_preview:
-            existing_content = existing_preview.get('preview_content', {})
-            existing_doc_summary = existing_content.get('doc_summary', {})
-            existing_doc_status = existing_doc_summary.get('doc_status', 'none')
-
-            # If we already have a "ready" status preview, skip generation
-            if existing_doc_status == "ready":
-                logger.info(f"Preview with ready docs already exists for case {case_id}")
-                return False
-
-        # Mark this case as being processed
-        preview_generation_locks[case_id] = True
-        return True
-
-def release_preview_lock(case_id: str):
-    """Release the preview generation lock for a case."""
-    with preview_lock:
-        preview_generation_locks.pop(case_id, None)
-
-
-@app.route('/api/create-checkout-session', methods=['POST', 'OPTIONS'])
-def create_checkout_session():
-    """Create a Stripe checkout session for case purchase."""
+@app.route('/api/read-messages', methods=['GET', 'OPTIONS'])
+def read_messages():
+    """Read chat messages for a case."""
     # Handle CORS preflight
     if request.method == 'OPTIONS':
         response = jsonify({'message': 'OK'})
         return response
 
     try:
-        # Validate required environment variables
-        if not STRIPE_SECRET_KEY:
-            logger.error("STRIPE_SECRET_KEY not configured")
-            return jsonify({'error': 'Payment system not configured'}), 500
+        # Get parameters from query string
+        token = request.args.get('token', '').strip()
+        limit_param = request.args.get('limit', '50')
 
-        if not STRIPE_PRICE_ID:
-            logger.error("STRIPE_PRICE_ID not configured")
-            return jsonify({'error': 'Product pricing not configured'}), 500
-
-        # Get request data
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-
-        # Accept either case_id or case_token for flexibility
-        case_id = data.get('case_id')
-        case_token = data.get('case_token') or data.get('token')
-
-        logger.info(f"Checkout request received - case_id: {case_id}, case_token: {case_token}")
-
-        if not case_id and not case_token:
-            return jsonify({'error': 'case_id or case_token is required'}), 400
-
-        # If we have a token but no case_id, look up the case_id by token
-        if case_token and not case_id:
-            case = read_case_by_token(case_token)
-            if not case:
-                return jsonify({'error': 'Case not found for token'}), 404
-            case_id = case.get('id')
-            if not case_id:
-                return jsonify({'error': 'Case ID not found for token'}), 404
-        elif case_id:
-            # Validate case exists by case_id
-            case = read_case_by_id(case_id)
-            if not case:
-                return jsonify({'error': 'Case not found'}), 404
-        else:
-            return jsonify({'error': 'Unable to identify case'}), 400
-
-        # Create Stripe checkout session
+        # Parse and validate limit (min 1, max 200, default 50)
         try:
-            # Use the correct frontend URL for development/staging
-            frontend_url = "https://dmhoadev.netlify.app"  # Use your actual frontend domain
+            limit = max(1, min(int(limit_param) or 50, 200))
+        except (ValueError, TypeError):
+            limit = 50
 
-            checkout_session = stripe.checkout.Session.create(
-                payment_method_types=['card'],
-                line_items=[{
-                    'price': STRIPE_PRICE_ID,
-                    'quantity': 1,
-                }],
-                mode='payment',
-                success_url=f"{frontend_url}/success?case_id={case_id}&session_id={{CHECKOUT_SESSION_ID}}",
-                cancel_url=f"{frontend_url}/case-preview?case={case_id}",
-                metadata={
-                    'case_id': case_id,
-                    'case_token': case.get('token', ''),
-                }
-            )
+        if not token:
+            return jsonify({'error': 'token is required'}), 400
 
-            logger.info(f"Created checkout session {checkout_session.id} for case {case_id}")
+        logger.info(f"Reading messages for token: {token[:8]}..., limit: {limit}")
 
-            # Create response with multiple field names for frontend compatibility
-            response_data = {
-                'checkout_url': checkout_session.url,
-                'url': checkout_session.url,  # Alternative field name
-                'session_id': checkout_session.id,
-                'id': checkout_session.id,  # Alternative field name
-                'success': True
-            }
-
-            logger.info(f"Returning checkout response: {response_data}")
-            return jsonify(response_data), 200
-
-        except stripe.error.StripeError as e:
-            logger.error(f"Stripe error creating checkout session: {str(e)}")
-            return jsonify({'error': 'Payment system error'}), 500
-
-    except Exception as e:
-        error_msg = f"Error creating checkout session: {str(e)}"
-        logger.error(error_msg)
-        return jsonify({'error': error_msg}), 500
-
-
-@app.route('/webhooks/stripe', methods=['POST'])
-def stripe_webhook():
-    """Handle Stripe webhook events, particularly checkout.session.completed."""
-    payload = request.get_data()
-    sig_header = request.headers.get('Stripe-Signature')
-
-    try:
-        # Verify webhook signature
-        if not STRIPE_WEBHOOK_SECRET:
-            logger.error("STRIPE_WEBHOOK_SECRET not configured")
-            return jsonify({'error': 'Webhook secret not configured'}), 500
-
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError as e:
-        logger.error(f"Invalid payload: {e}")
-        return jsonify({'error': 'Invalid payload'}), 400
-    except stripe.error.SignatureVerificationError as e:
-        logger.error(f"Invalid signature: {e}")
-        return jsonify({'error': 'Invalid signature'}), 400
-
-    # Handle the event
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        logger.info(f"Payment completed for session: {session['id']}")
-
-        # Extract metadata
-        metadata = session.get('metadata', {})
-        case_id = metadata.get('case_id')
-        case_token = metadata.get('case_token')
-
-        if not case_id:
-            logger.error(f"No case_id in session metadata: {session['id']}")
-            return jsonify({'error': 'No case_id in metadata'}), 400
-
-        # Get case info
-        case = read_case_by_id(case_id)
+        # Check if case exists and get status
+        case = read_case_by_token(token)
         if not case:
-            logger.error(f"Case not found for ID: {case_id}")
             return jsonify({'error': 'Case not found'}), 404
 
-        # Get the token from case if not in metadata
-        if not case_token:
-            case_token = case.get('token')
+        # Check if case is paid/unlocked - only return messages if case is paid
+        case_status = case.get('status', 'preview')
+        if case_status != 'paid':
+            # Return empty messages array if case is not paid/unlocked
+            logger.info(f"Case {token[:8]}... not paid, returning empty messages")
+            return jsonify({'ok': True, 'messages': []}), 200
 
-        if not case_token:
-            logger.error(f"No token found for case: {case_id}")
-            return jsonify({'error': 'No token found for case'}), 400
-
-        # STEP 1: Mark the case as unlocked/paid in the database
+        # Fetch messages for the case from dmhoa_messages table
         try:
-            case_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            case_update_params = {'id': f'eq.{case_id}'}
-            # Only update fields that exist in the database schema
-            case_update_data = {
-                'status': 'paid',
-                'updated_at': datetime.utcnow().isoformat()
+            messages_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            messages_params = {
+                'token': f'eq.{token}',
+                'select': 'id,token,role,content,created_at',
+                'order': 'created_at.asc',
+                'limit': str(limit)
             }
-            case_update_headers = supabase_headers()
+            messages_headers = supabase_headers()
 
-            update_response = requests.patch(case_update_url, params=case_update_params,
-                                           headers=case_update_headers, json=case_update_data, timeout=TIMEOUT)
-            update_response.raise_for_status()
+            messages_response = requests.get(messages_url, params=messages_params,
+                                           headers=messages_headers, timeout=TIMEOUT)
+            messages_response.raise_for_status()
+            messages = messages_response.json()
 
-            logger.info(f"Successfully marked case {case_id} as paid")
-
-        except Exception as e:
-            logger.error(f"Failed to mark case {case_id} as paid: {str(e)}")
-            # Log the full response for debugging
-            try:
-                logger.error(f"Response status: {update_response.status_code}")
-                logger.error(f"Response text: {update_response.text}")
-            except:
-                pass
-            return jsonify({'error': 'Failed to update case status'}), 500
-
-        # STEP 2: Generate the actual full case analysis using GPT (asynchronously)
-        logger.info(f"Scheduling full case analysis for paid case {case_token}")
-
-        try:
-            # Schedule the analysis generation in a background thread to avoid webhook timeout
-            def generate_analysis_async():
-                try:
-                    logger.info(f"Starting background analysis generation for {case_token}")
-                    full_analysis_result = generate_full_case_analysis_internal(case_token)
-
-                    if not full_analysis_result['success']:
-                        logger.error(f"Background analysis failed for {case_token}: {full_analysis_result['error']}")
-                        return
-
-                    logger.info(f"Successfully generated background analysis for {case_token}")
-
-                    # Add payment metadata to the existing output
-                    case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
-
-                    # Update the case outputs with payment information
-                    try:
-                        outputs_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-                        outputs_update_params = {'case_token': f'eq.{case_token}'}
-
-                        # Get the current outputs to merge with payment info
-                        current_outputs = full_analysis_result['outputs']
-
-                        # Add payment metadata to the outputs
-                        enhanced_outputs = {
-                            **current_outputs,
-                            'payment_info': {
-                                'case_url': case_url,
-                                'session_id': session['id'],
-                                'payment_amount': session.get('amount_total'),
-                                'currency': session.get('currency'),
-                                'customer_email': session.get('customer_details', {}).get('email'),
-                                'payment_completed_at': datetime.utcnow().isoformat()
-                            }
-                        }
-
-                        outputs_update_data = {
-                            'outputs': enhanced_outputs,
-                            'updated_at': datetime.utcnow().isoformat()
-                        }
-                        outputs_update_headers = supabase_headers()
-
-                        outputs_update_response = requests.patch(outputs_update_url, params=outputs_update_params,
-                                                                headers=outputs_update_headers, json=outputs_update_data, timeout=TIMEOUT)
-                        outputs_update_response.raise_for_status()
-
-                        logger.info(f"Successfully enhanced case outputs with payment info for {case_token}")
-                        logger.info(f"Case URL: {case_url}")
-
-                    except Exception as e:
-                        logger.error(f"Failed to enhance outputs with payment info: {str(e)}")
-                        # Don't fail the whole process if this fails - the analysis is already generated
-
-                except Exception as e:
-                    logger.error(f"Error in background analysis generation for {case_token}: {str(e)}")
-
-            # Start the analysis in a background thread
-            analysis_thread = threading.Thread(target=generate_analysis_async, daemon=True)
-            analysis_thread.start()
-
-            logger.info(f"Successfully scheduled background analysis generation for {case_token}")
+            logger.info(f"Found {len(messages)} messages for token {token[:8]}...")
+            return jsonify({'ok': True, 'messages': messages or []}), 200
 
         except Exception as e:
-            logger.error(f"Failed to schedule analysis generation for {case_token}: {str(e)}")
-            # Don't fail the webhook response - we can retry later
-
-    else:
-        logger.info(f"Unhandled event type: {event['type']}")
-
-    return jsonify({'status': 'success'}), 200
-
-
-def generate_full_case_analysis_internal(case_token: str) -> Dict[str, Any]:
-    """
-    Generate a comprehensive GPT-powered case analysis for a paid case.
-    This replaces the preview with a full, detailed analysis.
-    """
-    logger.info(f"Starting internal case analysis for token: {case_token}")
-
-    try:
-        # Fetch documents for this case
-        docs = fetch_ready_documents_by_token(case_token, limit=5)
-        if not docs:
-            logger.error(f"No ready documents found for token: {case_token}")
-            return {'success': False, 'error': 'No documents available for analysis'}
-
-        # Get case information
-        case_info = read_case_by_token(case_token)
-        if not case_info:
-            logger.error(f"Case not found for token: {case_token}")
-            return {'success': False, 'error': 'Case not found'}
-
-        # Prepare document content for GPT
-        usable_docs = [d for d in docs if d.get('extracted_text') and len(d.get('extracted_text', '').strip()) > 100]
-
-        if not usable_docs:
-            logger.error(f"No usable documents with extracted text for token: {case_token}")
-            return {'success': False, 'error': 'No usable documents with text content'}
-
-        docs_newest = max(d.get('updated_at', '') for d in docs)
-        docs_block = "\n\n".join([
-            f"=== Document {i+1} ===\n"
-            f"Filename: {d.get('filename', 'Unknown')}\n"
-            f"Pages: {d.get('page_count', 'Unknown')}\n"
-            f"Characters: {d.get('char_count', 'Unknown')}\n\n"
-            f"{d.get('extracted_text', '').strip()}"
-            for i, d in enumerate(usable_docs)
-        ])
-
-        # Prepare case payload for GPT
-        payload = {
-            'case_token': case_token,
-            'customer_email': case_info.get('customer_email'),
-            'documents_count': len(docs),
-            'usable_documents_count': len(usable_docs)
-        }
-
-        # Define draft titles - these are the three main response types we generate
-        draft_titles = {
-            'clarification': 'Request for Clarification and Documentation',
-            'extension': 'Request for Deadline Extension',
-            'compliance': 'Compliance Response and Action Plan'
-        }
-
-        # Define the JSON schema for structured output
-        schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "summary_html": {"type": "string"},
-                "letter_summary": {"type": "string"},
-                "draft_titles": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "clarification": {"type": "string"},
-                        "extension": {"type": "string"},
-                        "compliance": {"type": "string"}
-                    },
-                    "required": ["clarification", "extension", "compliance"]
-                },
-                "risks_and_deadlines": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "deadlines": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "risks": {"type": "array", "items": {"type": "string"}, "minItems": 3}
-                    },
-                    "required": ["deadlines", "risks"]
-                },
-                "action_plan": {"type": "array", "items": {"type": "string"}, "minItems": 6},
-                "drafts": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "clarification": {"type": "string"},
-                        "extension": {"type": "string"},
-                        "compliance": {"type": "string"}
-                    },
-                    "required": ["clarification", "extension", "compliance"]
-                },
-                "questions_to_ask": {"type": "array", "items": {"type": "string"}, "minItems": 6},
-                "lowest_cost_path": {"type": "array", "items": {"type": "string"}, "minItems": 4}
-            },
-            "required": [
-                "summary_html", "letter_summary", "draft_titles", "risks_and_deadlines",
-                "action_plan", "drafts", "questions_to_ask", "lowest_cost_path"
-            ]
-        }
-
-        doc_fingerprint = {
-            'count': len(docs),
-            'usableCount': len(usable_docs),
-            'newestUpdatedAt': docs_newest,
-            'ids': [d['id'] for d in docs],
-            'statuses': [d.get('status') for d in docs],
-            'charCounts': [d.get('char_count') for d in docs]
-        }
-
-        # Prepare messages for GPT
-        messages = [
-            {
-                "role": "system",
-                "content": """You are an expert HOA dispute assistant helping homeowners respond to violations and disputes.
-
-Your job is to analyze the homeowner's situation and provide comprehensive, actionable guidance including:
-1. A detailed HTML summary of their situation
-2. Three complete draft response letters (clarification, extension, compliance)  
-3. Risk assessment with specific deadlines
-4. Step-by-step action plan
-5. Strategic questions to ask the HOA
-6. Lowest-cost resolution path
-
-OUTPUT RULES (CRITICAL):
-- ONLY "summary_html" may contain HTML tags
-- summary_html must use ONLY these HTML tags: <div>, <strong>, <ul>, <li>, <p>
-- ALL draft letters MUST be PLAIN TEXT with \\n for line breaks
-- Each draft must be a complete, professional letter ready to send
-- Include specific facts, dates, amounts, and references from the documents
-- Be professional but firm in tone
-
-TONE AND POSITIONING RULES (VERY IMPORTANT):
-- NEVER admit fault, liability, or acknowledge violations in any draft
-- Use non-admitting language: "responding to your notice" instead of "acknowledging the violation"
-- For compliance drafts, say "addressing the Association's stated concerns" not "acknowledging the violation"
-- For extension requests, provide specific, factual reasons (vendor availability, scheduling constraints) not vague excuses
-- Preserve homeowner's rights while showing cooperation
-- Frame responses as addressing concerns, not admitting wrongdoing
-
-DRAFT REQUIREMENTS:
-Each draft letter must include:
-- Professional subject line
-- Proper greeting and introduction
-- Specific references to HOA rules/violations mentioned (without admission)
-- Clear requests with deadlines
-- Professional closing requesting written confirmation
-- Homeowner's rights and procedural protections
-
-SPECIFIC LANGUAGE GUIDANCE:
-- Compliance Draft: "I am responding to the notice regarding [issue] and am taking steps to address the Association's stated concerns"
-- Extension Draft: "Due to vendor availability and inspection scheduling constraints" (not "unforeseen circumstances")
-- Never use phrases like "I acknowledge the violation" or "I admit fault"
-- Always frame as "responding to notice" or "addressing concerns"
-
-Make this comprehensive - worth the $29 the customer paid."""
-            },
-            {
-                "role": "user",
-                "content": f"""Please analyze this HOA case and provide comprehensive assistance.
-
-CASE INFORMATION:
-{json.dumps(payload, indent=2)}
-
-DOCUMENT ANALYSIS:
-{docs_block}
-
-REQUIRED DRAFT TYPES:
-- Clarification: "{draft_titles['clarification']}"
-- Extension: "{draft_titles['extension']}"  
-- Compliance: "{draft_titles['compliance']}"
-
-Please provide a thorough analysis with actionable advice, specific draft letters, and strategic guidance. Focus on protecting the homeowner's rights while working toward resolution."""
-            }
-        ]
-
-        # Make OpenAI API call using the correct chat completions endpoint
-        openai_payload = {
-            "model": "gpt-4o-mini",
-            "messages": messages,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "dmhoa_case_analysis",
-                    "strict": True,
-                    "schema": schema
-                }
-            },
-            "temperature": 0.7
-        }
-
-        logger.info(f"Making OpenAI API call for case analysis: {case_token}")
-
-        try:
-            openai_response = requests.post(
-                'https://api.openai.com/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {OPENAI_API_KEY}',
-                    'Content-Type': 'application/json'
-                },
-                json=openai_payload,
-                timeout=(10, 180)  # 3 minute timeout for complex analysis
-            )
-        except requests.exceptions.Timeout as e:
-            logger.error(f"OpenAI API call timed out for case {case_token}: {str(e)}")
-            return {'success': False, 'error': f'OpenAI API call timed out: {str(e)}'}
-        except requests.exceptions.RequestException as e:
-            logger.error(f"OpenAI API call failed for case {case_token}: {str(e)}")
-            return {'success': False, 'error': f'OpenAI API call failed: {str(e)}'}
-
-        if not openai_response.ok:
-            error_text = openai_response.text
-            logger.error(f'OpenAI API call failed for {case_token}: {error_text}')
-            return {'success': False, 'error': f'OpenAI API failed: {error_text}'}
-
-        openai_json = openai_response.json()
-
-        # Extract the structured result
-        try:
-            message_content = openai_json['choices'][0]['message']['content']
-            structured_result = json.loads(message_content)
-        except (KeyError, json.JSONDecodeError) as e:
-            logger.error(f'Failed to parse OpenAI response for {case_token}: {str(e)}')
-            return {'success': False, 'error': f'Failed to parse AI response: {str(e)}'}
-
-        # Prepare final output
-        outputs_to_store = {
-            **structured_result,
-            'draft_titles': structured_result.get('draft_titles', draft_titles),
-            'doc_fingerprint': doc_fingerprint,
-            'generated_at': datetime.utcnow().isoformat(),
-            'generation_source': 'post_payment_analysis'
-        }
-
-        # Save the full analysis to dmhoa_case_outputs
-        upsert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-        upsert_headers = supabase_headers()
-        upsert_headers['Prefer'] = 'resolution=merge-duplicates'
-
-        success_data = {
-            'case_token': case_token,
-            'status': 'ready',
-            'outputs': outputs_to_store,
-            'error': None,
-            'model': 'gpt-4o-mini',
-            'prompt_version': 'v4_post_payment',
-            'updated_at': datetime.utcnow().isoformat()
-        }
-
-        try:
-            save_response = requests.post(upsert_url, headers=upsert_headers, json=success_data, timeout=TIMEOUT)
-            save_response.raise_for_status()
-            logger.info(f'Successfully saved full case analysis for {case_token}')
-        except Exception as e:
-            logger.error(f'Failed to save case outputs for {case_token}: {str(e)}')
-            return {'success': False, 'error': f'Failed to save analysis: {str(e)}'}
-
-        # Update case timestamp
-        try:
-            case_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            case_update_params = {'token': f'eq.{case_token}'}
-            case_update_data = {'updated_at': datetime.utcnow().isoformat()}
-            case_update_headers = supabase_headers()
-            requests.patch(case_update_url, params=case_update_params,
-                         headers=case_update_headers, json=case_update_data, timeout=TIMEOUT)
-        except Exception:
-            pass  # Best effort
-
-        return {'success': True, 'outputs': outputs_to_store}
+            logger.error(f'Database error reading messages for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Database error reading messages'}), 500
 
     except Exception as e:
-        logger.error(f'Error generating full case analysis for {case_token}: {str(e)}')
-        return {'success': False, 'error': f'Analysis generation failed: {str(e)}'}
+        error_msg = f"Error reading messages: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
