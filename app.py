@@ -2151,3 +2151,181 @@ def read_messages():
         error_msg = f"Error reading messages: {str(e)}"
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
+
+
+@app.route('/api/send-message', methods=['POST', 'OPTIONS'])
+def send_message():
+    """Send chat message endpoint for case discussions."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Parse request body
+        try:
+            body = request.get_json() or {}
+        except Exception:
+            body = {}
+
+        token = str(body.get('token', '')).strip()
+        user_content = body.get('content', '').strip()
+
+        if not token or not user_content:
+            return jsonify({'error': 'token and content are required'}), 400
+
+        # Limit user message length
+        if len(user_content) > 1000:
+            user_content = user_content[:1000]
+
+        logger.info(f"Sending message for token: {token[:8]}..., content length: {len(user_content)}")
+
+        # 1) Ensure case exists and is paid/unlocked
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        case_status = case.get('status', 'preview')
+        if case_status != 'paid':
+            return jsonify({'error': 'Case is not unlocked'}), 402
+
+        # 2) Save user message to database
+        try:
+            user_message_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            user_message_data = {
+                'token': token,
+                'role': 'user',
+                'content': user_content
+            }
+            user_message_headers = supabase_headers()
+            user_message_headers['Prefer'] = 'return=representation'
+
+            user_message_response = requests.post(user_message_url, headers=user_message_headers,
+                                                json=user_message_data, timeout=TIMEOUT)
+            user_message_response.raise_for_status()
+            user_insert = user_message_response.json()
+            user_message = user_insert[0] if user_insert else None
+
+        except Exception as e:
+            logger.error(f'Failed to save user message for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Failed to save user message'}), 500
+
+        # 3) Load recent chat history (last 20 messages)
+        try:
+            history_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            history_params = {
+                'token': f'eq.{token}',
+                'select': 'role,content,created_at',
+                'order': 'created_at.asc',
+                'limit': '20'
+            }
+            history_headers = supabase_headers()
+
+            history_response = requests.get(history_url, params=history_params,
+                                          headers=history_headers, timeout=TIMEOUT)
+            history_response.raise_for_status()
+            history = history_response.json() or []
+
+        except Exception as e:
+            logger.error(f'Failed to load chat history for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Failed to load chat history'}), 500
+
+        # 4) Get case payload for context
+        case_payload = case.get('payload', {})
+
+        # 5) Generate AI response using OpenAI Chat Completions API
+        try:
+            system_prompt = """You are "Dispute My HOA" chat support assistant.
+This is educational drafting assistance, not legal advice.
+
+You help homeowners with:
+- Understanding HOA notices and violations
+- Drafting practical response letters
+- Next steps and timelines
+- Reducing escalation risk
+
+Rules:
+- Be calm, practical, and specific
+- Ask 1-2 clarifying questions only if truly needed
+- If the user asks for a new letter, produce a ready-to-send draft in plain text
+- Do NOT claim to be a lawyer or provide legal advice
+- Focus on practical solutions and proper procedures"""
+
+            # Convert history to OpenAI message format
+            messages = [{'role': 'system', 'content': system_prompt}]
+
+            # Add context about the case
+            context_message = f"Case context: {json.dumps(case_payload, indent=2)}"
+            messages.append({'role': 'system', 'content': context_message})
+
+            # Add recent chat history
+            for msg in history[-10:]:  # Only use last 10 messages for context
+                messages.append({
+                    'role': msg['role'],
+                    'content': msg['content']
+                })
+
+            openai_payload = {
+                'model': 'gpt-4o-mini',
+                'messages': messages,
+                'temperature': 0.7,
+                'max_tokens': 1000
+            }
+
+            openai_response = requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json=openai_payload,
+                timeout=(10, 60)
+            )
+            openai_response.raise_for_status()
+
+            openai_json = openai_response.json()
+            assistant_text = openai_json['choices'][0]['message']['content'].strip()
+
+            # Limit assistant response length
+            if len(assistant_text) > 2000:
+                assistant_text = assistant_text[:2000] + "..."
+
+        except Exception as e:
+            logger.error(f'OpenAI API error for {token[:8]}...: {str(e)}')
+            assistant_text = "I'm having trouble generating a response right now. Please try again in a moment."
+
+        # 6) Save assistant message to database
+        try:
+            assistant_message_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            assistant_message_data = {
+                'token': token,
+                'role': 'assistant',
+                'content': assistant_text
+            }
+            assistant_message_headers = supabase_headers()
+            assistant_message_headers['Prefer'] = 'return=representation'
+
+            assistant_message_response = requests.post(assistant_message_url, headers=assistant_message_headers,
+                                                     json=assistant_message_data, timeout=TIMEOUT)
+            assistant_message_response.raise_for_status()
+            assistant_insert = assistant_message_response.json()
+            assistant_message = assistant_insert[0] if assistant_insert else None
+
+        except Exception as e:
+            logger.error(f'Failed to save assistant message for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Failed to save assistant message'}), 500
+
+        logger.info(f"Successfully processed message for token {token[:8]}...")
+
+        return jsonify({
+            'ok': True,
+            'token': token,
+            'user_message': user_message,
+            'assistant_message': assistant_message
+        }), 200
+
+    except Exception as e:
+        error_msg = f"Error sending message: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
