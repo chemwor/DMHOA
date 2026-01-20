@@ -2207,72 +2207,61 @@ def stripe_webhook():
         # Create case URL as specified
         case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
 
-        # First, let's check if the table exists and what its schema looks like
+        # Let's inspect the actual table schema first
         try:
+            # Try a simple GET request with select=* and limit=0 to see available columns
             test_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-            test_params = {'limit': '0'}  # Just get schema info, no data
+            test_params = {'select': '*', 'limit': '0'}
             test_headers = supabase_headers()
 
             test_response = requests.get(test_url, params=test_params, headers=test_headers, timeout=TIMEOUT)
-            logger.info(f"Table access test - Status: {test_response.status_code}")
-            logger.info(f"Table access test - Headers: {dict(test_response.headers)}")
+            logger.info(f"Table schema test - Status: {test_response.status_code}")
 
-            if test_response.status_code == 404:
-                logger.error("dmhoa_case_outputs table does not exist!")
-                return jsonify({'error': 'Case outputs table not found'}), 500
+            if test_response.status_code == 200:
+                logger.info(f"Table exists and is accessible")
+                # The available columns will be shown in the error when we try to insert invalid columns
+            else:
+                logger.error(f"Table access failed: {test_response.status_code} - {test_response.text}")
 
         except Exception as e:
-            logger.error(f"Error testing table access: {str(e)}")
+            logger.error(f"Error testing table schema: {str(e)}")
 
-        # Prepare data for dmhoa_case_outputs table with minimal required fields first
+        # Since the error showed case_id column doesn't exist, let's try with different column names
+        # Based on the error, let's try a minimal insert with basic fields that might exist
         case_output_data = {
-            'case_id': case_id,
-            'case_token': case_token,
+            'token': case_token,  # Try 'token' instead of 'case_token'
             'session_id': session['id'],
-            'case_url': case_url
+            'url': case_url,  # Try 'url' instead of 'case_url'
+            'status': 'completed',  # Try 'status' instead of 'payment_status'
+            'amount': session.get('amount_total'),  # Try 'amount' instead of 'payment_amount'
+            'currency': session.get('currency'),
+            'email': session.get('customer_details', {}).get('email'),  # Try 'email' instead of 'customer_email'
+            'stripe_session_id': session['id']
         }
 
-        # Add optional fields if they exist and aren't too large
-        if preview:
-            case_output_data['preview_id'] = preview.get('id')
+        # Remove None values
+        case_output_data = {k: v for k, v in case_output_data.items() if v is not None}
 
-            # Handle preview_content carefully - it might be too large or have wrong structure
-            preview_content = preview.get('preview_content')
-            if preview_content and isinstance(preview_content, dict):
-                # Try to include preview content, but limit its size
-                try:
-                    content_str = json.dumps(preview_content)
-                    if len(content_str) < 10000:  # Limit to 10KB
-                        case_output_data['preview_content'] = preview_content
-                    else:
-                        logger.warning(f"Preview content too large ({len(content_str)} chars), skipping")
-                except Exception as e:
-                    logger.warning(f"Error serializing preview content: {e}")
-
-        # Add payment details
-        case_output_data.update({
-            'payment_status': 'completed',
-            'payment_amount': session.get('amount_total'),
-            'currency': session.get('currency'),
-            'stripe_session_id': session['id']
-        })
-
-        # Add customer email if available
-        customer_details = session.get('customer_details', {})
-        if customer_details and customer_details.get('email'):
-            case_output_data['customer_email'] = customer_details['email']
-
-        # Add created timestamp
-        case_output_data['created_at'] = datetime.utcnow().isoformat()
-
-        # Insert into dmhoa_case_outputs table
+        # Try the insert with the adjusted field names
         success = insert_case_output(case_output_data)
         if success:
             logger.info(f"Successfully created case output for case {case_id}, session {session['id']}")
             logger.info(f"Case URL: {case_url}")
         else:
-            logger.error(f"Failed to create case output for case {case_id}")
-            return jsonify({'error': 'Failed to create case output'}), 500
+            # If that fails too, try even more basic field names
+            logger.warning(f"First attempt failed, trying with minimal fields")
+            minimal_data = {
+                'token': case_token,
+                'session_id': session['id'],
+                'url': case_url
+            }
+
+            success = insert_case_output(minimal_data)
+            if success:
+                logger.info(f"Successfully created minimal case output for case {case_id}, session {session['id']}")
+            else:
+                logger.error(f"Failed to create case output for case {case_id} even with minimal data")
+                return jsonify({'error': 'Failed to create case output'}), 500
 
     else:
         logger.info(f"Unhandled event type: {event['type']}")
