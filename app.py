@@ -2148,6 +2148,122 @@ def create_checkout_session():
         return jsonify({'error': error_msg}), 500
 
 
+@app.route('/webhooks/stripe', methods=['POST'])
+def stripe_webhook():
+    """Handle Stripe webhook events, particularly checkout.session.completed."""
+    payload = request.get_data()
+    sig_header = request.headers.get('Stripe-Signature')
+
+    try:
+        # Verify webhook signature
+        if not STRIPE_WEBHOOK_SECRET:
+            logger.error("STRIPE_WEBHOOK_SECRET not configured")
+            return jsonify({'error': 'Webhook secret not configured'}), 500
+
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        logger.error(f"Invalid payload: {e}")
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid signature: {e}")
+        return jsonify({'error': 'Invalid signature'}), 400
+
+    # Handle the event
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        logger.info(f"Payment completed for session: {session['id']}")
+
+        # Extract metadata
+        metadata = session.get('metadata', {})
+        case_id = metadata.get('case_id')
+        case_token = metadata.get('case_token')
+
+        if not case_id:
+            logger.error(f"No case_id in session metadata: {session['id']}")
+            return jsonify({'error': 'No case_id in metadata'}), 400
+
+        # Get case info
+        case = read_case_by_id(case_id)
+        if not case:
+            logger.error(f"Case not found for ID: {case_id}")
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Get the token from case if not in metadata
+        if not case_token:
+            case_token = case.get('token')
+
+        if not case_token:
+            logger.error(f"No token found for case: {case_id}")
+            return jsonify({'error': 'No token found for case'}), 400
+
+        # Get active preview for this case
+        preview = read_active_preview(case_id)
+        if not preview:
+            logger.error(f"No active preview found for case: {case_id}")
+            return jsonify({'error': 'No active preview found'}), 404
+
+        # Create case URL as specified
+        case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
+
+        # Prepare data for dmhoa_case_outputs table
+        case_output_data = {
+            'case_id': case_id,
+            'case_token': case_token,
+            'session_id': session['id'],
+            'case_url': case_url,
+            'preview_id': preview.get('id'),
+            'preview_content': preview.get('preview_content'),
+            'payment_status': 'completed',
+            'payment_amount': session.get('amount_total'),
+            'currency': session.get('currency'),
+            'customer_email': session.get('customer_details', {}).get('email'),
+            'created_at': datetime.utcnow().isoformat(),
+            'stripe_session_id': session['id']
+        }
+
+        # Insert into dmhoa_case_outputs table
+        success = insert_case_output(case_output_data)
+        if success:
+            logger.info(f"Successfully created case output for case {case_id}, session {session['id']}")
+            logger.info(f"Case URL: {case_url}")
+        else:
+            logger.error(f"Failed to create case output for case {case_id}")
+            return jsonify({'error': 'Failed to create case output'}), 500
+
+    else:
+        logger.info(f"Unhandled event type: {event['type']}")
+
+    return jsonify({'status': 'success'}), 200
+
+
+def insert_case_output(output_data: Dict) -> bool:
+    """Insert a new case output record into dmhoa_case_outputs table."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        # Remove None values
+        output_data = {k: v for k, v in output_data.items() if v is not None}
+
+        response = requests.post(url, headers=headers, json=output_data, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        result = response.json()
+        if result:
+            output_id = result[0]['id']
+            logger.info(f"Inserted case output {output_id} for case {output_data['case_id']}")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"Failed to insert case output: {str(e)}")
+        return False
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
