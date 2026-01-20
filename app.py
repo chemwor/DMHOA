@@ -2106,6 +2106,9 @@ def create_checkout_session():
 
         # Create Stripe checkout session
         try:
+            # Use the correct frontend URL for development/staging
+            frontend_url = "https://dmhoadev.netlify.app"  # Use your actual frontend domain
+
             checkout_session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
                 line_items=[{
@@ -2113,8 +2116,8 @@ def create_checkout_session():
                     'quantity': 1,
                 }],
                 mode='payment',
-                success_url=f"{SITE_URL}/success?case_id={case_id}&session_id={{CHECKOUT_SESSION_ID}}",
-                cancel_url=f"{SITE_URL}/case-preview?case={case_id}",
+                success_url=f"{frontend_url}/success?case_id={case_id}&session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{frontend_url}/case-preview?case={case_id}",
                 metadata={
                     'case_id': case_id,
                     'case_token': case.get('token', ''),
