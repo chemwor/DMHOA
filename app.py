@@ -2079,14 +2079,30 @@ def create_checkout_session():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
 
+        # Accept either case_id or case_token for flexibility
         case_id = data.get('case_id')
-        if not case_id:
-            return jsonify({'error': 'case_id is required'}), 400
+        case_token = data.get('case_token') or data.get('token')
 
-        # Validate case exists
-        case = read_case_by_id(case_id)
-        if not case:
-            return jsonify({'error': 'Case not found'}), 404
+        logger.info(f"Checkout request received - case_id: {case_id}, case_token: {case_token}")
+
+        if not case_id and not case_token:
+            return jsonify({'error': 'case_id or case_token is required'}), 400
+
+        # If we have a token but no case_id, look up the case_id by token
+        if case_token and not case_id:
+            case = read_case_by_token(case_token)
+            if not case:
+                return jsonify({'error': 'Case not found for token'}), 404
+            case_id = case.get('id')
+            if not case_id:
+                return jsonify({'error': 'Case ID not found for token'}), 404
+        elif case_id:
+            # Validate case exists by case_id
+            case = read_case_by_id(case_id)
+            if not case:
+                return jsonify({'error': 'Case not found'}), 404
+        else:
+            return jsonify({'error': 'Unable to identify case'}), 400
 
         # Create Stripe checkout session
         try:
