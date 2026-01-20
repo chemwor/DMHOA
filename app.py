@@ -2329,3 +2329,377 @@ Rules:
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
 
+
+def fetch_case_outputs(token: str) -> Optional[Dict]:
+    """Fetch existing case outputs from dmhoa_case_outputs table by token."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        params = {
+            'case_token': f'eq.{token}',
+            'select': '*',
+            'order': 'created_at.desc',
+            'limit': '1'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        outputs = response.json()
+        if outputs:
+            logger.info(f"Found existing case outputs for token {token[:8]}...")
+            return outputs[0]
+
+        logger.info(f"No case outputs found for token {token[:8]}...")
+        return None
+
+    except Exception as e:
+        logger.error(f"Failed to fetch case outputs for token {token[:8]}...: {str(e)}")
+        return None
+
+
+def upsert_active_preview_lock(case_id: str) -> bool:
+    """Check if a preview generation is already in progress or create a lock."""
+    with preview_lock:
+        if case_id in preview_generation_locks:
+            logger.info(f"Preview generation already in progress for case {case_id}")
+            return False
+
+        preview_generation_locks[case_id] = True
+        logger.info(f"Acquired preview generation lock for case {case_id}")
+        return True
+
+
+def release_preview_lock(case_id: str):
+    """Release the preview generation lock for a case."""
+    with preview_lock:
+        preview_generation_locks.pop(case_id, None)
+        logger.info(f"Released preview generation lock for case {case_id}")
+
+
+def send_receipt_email(token: str, to_email: str, case_url: str, amount_total: int = None,
+                      currency: str = "USD", customer_name: str = None,
+                      stripe_session_id: str = None) -> bool:
+    """Send receipt email after successful payment."""
+    try:
+        # Check which SMTP environment variables are missing
+        required = {
+            'SMTP_HOST': SMTP_HOST,
+            'SMTP_PORT': SMTP_PORT,
+            'SMTP_USER': SMTP_USER,
+            'SMTP_PASS': SMTP_PASS,
+        }
+        missing = [name for name, val in required.items() if not val]
+        if missing:
+            logger.error(f"SMTP not configured - missing environment variables: {missing}")
+            return False
+
+        # Personalized greeting
+        greeting = f"Hi {customer_name}," if customer_name else "Hi,"
+
+        # Format payment amount
+        dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+        payment_info = f" for {dollars} {currency.upper()}" if dollars else ""
+
+        # Enhanced email content
+        subject = "Payment Confirmed - Your Dispute My HOA Case is Ready"
+
+        text = f"""{greeting}
+
+Thank you for your payment{payment_info}! Your payment has been successfully processed and your Dispute My HOA case is now unlocked and ready for access.
+
+🔓 ACCESS YOUR CASE:
+{case_url}
+
+📧 IMPORTANT: Please save this email for your records. You can use the link above to access your case anytime in the future.
+
+💡 WHAT'S NEXT:
+• Review your case documents and analysis
+• Use the AI-powered insights to understand your dispute
+• Access legal templates and guidance specific to your situation
+• Get step-by-step instructions for resolving your HOA dispute
+
+📞 NEED HELP?
+If you have any questions or need assistance accessing your case, simply reply to this email and we'll get back to you promptly.
+
+Your case token for reference: {token[:8]}...
+{f'Transaction ID: {stripe_session_id}' if stripe_session_id else ''}
+
+Best regards,
+The Dispute My HOA Team
+https://disputemyhoa.com
+
+---
+This email confirms your payment and provides access to your case. Keep this email safe for future reference."""
+
+        msg = MIMEMultipart()
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(text, "plain"))
+
+        logger.info(f"Connecting to SMTP {SMTP_HOST}:{SMTP_PORT} to send to {to_email}")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+
+        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}...)")
+        return True
+
+    except smtplib.SMTPAuthenticationError as e:
+        error_msg = f"Gmail authentication failed. For Gmail, you need: 1) Enable 2-Step Verification, 2) Create App Password. Error: {str(e)}"
+        logger.error(error_msg)
+        return False
+    except Exception as e:
+        logger.exception("Failed to send receipt email")
+        return False
+
+
+def insert_case_output(output_data: Dict) -> bool:
+    """Insert a new case output record into dmhoa_case_outputs table."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        # Remove None values
+        output_data = {k: v for k, v in output_data.items() if v is not None}
+
+        # Log the data being sent for debugging
+        logger.info(f"Attempting to insert case output with data: {json.dumps(output_data, indent=2, default=str)}")
+
+        response = requests.post(url, headers=headers, json=output_data, timeout=TIMEOUT)
+
+        # Log the full response for debugging
+        logger.info(f"Supabase response status: {response.status_code}")
+        logger.info(f"Supabase response body: {response.text}")
+
+        response.raise_for_status()
+
+        result = response.json()
+        if result:
+            output_id = result[0]['id']
+            case_token = output_data.get('case_token', 'unknown')
+            logger.info(f"Inserted case output {output_id} for case_token {case_token}")
+            return True
+
+        return False
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error inserting case output: {e.response.status_code} - {e.response.text}")
+        return False
+    except Exception as e:
+        logger.error(f"Error inserting case output: {str(e)}")
+        return False
+
+
+@app.route('/webhooks/stripe', methods=['POST'])
+def stripe_webhook():
+    """Handle Stripe webhook events, particularly checkout.session.completed."""
+    payload = request.get_data()
+    sig_header = request.headers.get('Stripe-Signature')
+
+    try:
+        # Verify webhook signature
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        logger.error(f"Invalid payload in Stripe webhook: {e}")
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid signature in Stripe webhook: {e}")
+        return jsonify({'error': 'Invalid signature'}), 400
+
+    # Handle the checkout.session.completed event
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        logger.info(f"Stripe checkout completed for session {session['id']}")
+
+        # Extract session data
+        case_token = session['metadata'].get('case_token')
+        if not case_token:
+            logger.error("No case_token found in Stripe session metadata")
+            return jsonify({'error': 'Missing case_token in metadata'}), 400
+
+        # Get customer details
+        customer_email = session['customer_details'].get('email') if session.get('customer_details') else None
+        customer_name = session['customer_details'].get('name') if session.get('customer_details') else None
+        amount_total = session.get('amount_total')
+        currency = session.get('currency', 'usd')
+
+        logger.info(f"Processing payment for case_token: {case_token[:8]}..., email: {customer_email}")
+
+        # Update case status to 'paid'
+        try:
+            case = read_case_by_token(case_token)
+            if not case:
+                logger.error(f"Case not found for token {case_token[:8]}...")
+                return jsonify({'error': 'Case not found'}), 404
+
+            case_id = case.get('id')
+
+            # Update case status
+            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            update_params = {'id': f'eq.{case_id}'}
+            update_headers = supabase_headers()
+
+            update_data = {
+                'status': 'paid',
+                'stripe_session_id': session['id']
+            }
+
+            # Also update email if we have it from Stripe and it wasn't already set
+            if customer_email and not case.get('email'):
+                update_data['email'] = customer_email
+
+            update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                           json=update_data, timeout=TIMEOUT)
+            update_response.raise_for_status()
+
+            logger.info(f"Updated case status to 'paid' for case {case_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to update case status: {str(e)}")
+            return jsonify({'error': 'Failed to update case status'}), 500
+
+        # Create case output record with preview data
+        try:
+            case_url = f"{SITE_URL}/case/{case_token}"
+
+            # Get the active preview for this case
+            preview = read_active_preview(case_id)
+
+            # Prepare outputs data with preview information
+            outputs_data = {
+                'payment_confirmed': True,
+                'stripe_session_id': session['id'],
+                'customer_email': customer_email,
+                'customer_name': customer_name,
+                'amount_paid': amount_total,
+                'currency': currency.upper(),
+                'case_url': case_url,
+                'payment_date': datetime.utcnow().isoformat(),
+                'preview_content': preview.get('preview_content') if preview else None
+            }
+
+            # Remove None values from outputs
+            outputs_data = {k: v for k, v in outputs_data.items() if v is not None}
+
+            # Prepare data for dmhoa_case_outputs table
+            case_output_data = {
+                'case_token': case_token,
+                'status': 'ready',  # Set to 'ready' since payment is completed
+                'model': 'stripe_payment',  # Indicate this was generated from Stripe payment
+                'prompt_version': 'payment_v1',  # Version for payment processing
+                'outputs': outputs_data  # All the actual data goes into the JSONB outputs column
+            }
+
+            # Insert into dmhoa_case_outputs table
+            success = insert_case_output(case_output_data)
+            if success:
+                logger.info(f"Successfully created case output for case {case_id}, session {session['id']}")
+            else:
+                logger.error(f"Failed to create case output for case {case_id}")
+                # Don't return error here as payment was successful
+
+        except Exception as e:
+            logger.error(f"Error creating case output: {str(e)}")
+            # Don't return error here as payment was successful
+
+        # Send receipt email
+        try:
+            if customer_email:
+                case_url = f"{SITE_URL}/case/{case_token}"
+
+                email_sent = send_receipt_email(
+                    token=case_token,
+                    to_email=customer_email,
+                    case_url=case_url,
+                    amount_total=amount_total,
+                    currency=currency,
+                    customer_name=customer_name,
+                    stripe_session_id=session['id']
+                )
+
+                if email_sent:
+                    logger.info(f"Receipt email sent successfully to {customer_email}")
+                else:
+                    logger.warning(f"Failed to send receipt email to {customer_email}")
+            else:
+                logger.warning("No customer email available for receipt")
+
+        except Exception as e:
+            logger.error(f"Error sending receipt email: {str(e)}")
+            # Don't return error here as payment was successful
+
+        return jsonify({'status': 'success'}), 200
+
+    else:
+        logger.info(f"Unhandled Stripe event type: {event['type']}")
+
+    return jsonify({'status': 'success'}), 200
+
+
+@app.route("/webhooks/send-receipt-email", methods=["POST"])
+def send_receipt_email_webhook():
+    """Webhook endpoint to send receipt email - for backwards compatibility."""
+    secret = request.headers.get("X-Webhook-Secret")
+    logger.info("Received send-receipt-email webhook")
+
+    if not secret or secret != SMTP_SENDER_WEBHOOK_SECRET:
+        logger.warning("Unauthorized send-receipt-email attempt: missing or invalid webhook secret")
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Check which SMTP environment variables are missing so we can diagnose quickly
+    required = {
+        'SMTP_HOST': SMTP_HOST,
+        'SMTP_PORT': SMTP_PORT,
+        'SMTP_USER': SMTP_USER,
+        'SMTP_PASS': SMTP_PASS,
+        'SMTP_SENDER_WEBHOOK_SECRET': SMTP_SENDER_WEBHOOK_SECRET,
+    }
+    missing = [name for name, val in required.items() if not val]
+    if missing:
+        # Log the missing variable names (not their values) for diagnostics
+        logger.error(f"SMTP not configured - missing environment variables: {missing}")
+        return jsonify({"error": "SMTP not configured", "missing": missing}), 500
+
+    data = request.get_json() or {}
+    token = data.get("token")
+    to_email = data.get("email")
+    case_url = data.get("case_url")
+    amount_total = data.get("amount_total")
+    currency = (data.get("currency") or "usd").upper()
+    customer_name = data.get("customer_name")
+    stripe_session_id = data.get("stripe_session_id")
+
+    logger.info(f"send-receipt-email payload: token_present={bool(token)}, to_email={to_email}, case_url_present={bool(case_url)}, customer_name={customer_name}")
+
+    if not token or not to_email or not case_url:
+        logger.warning("send-receipt-email missing required fields")
+        return jsonify({"error": "Missing token/email/case_url"}), 400
+
+    # Send the email
+    email_sent = send_receipt_email(
+        token=token,
+        to_email=to_email,
+        case_url=case_url,
+        amount_total=amount_total,
+        currency=currency,
+        customer_name=customer_name,
+        stripe_session_id=stripe_session_id
+    )
+
+    if email_sent:
+        return jsonify({"ok": True}), 200
+    else:
+        return jsonify({"ok": False, "error": "Failed to send email"}), 500
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
