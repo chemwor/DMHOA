@@ -389,7 +389,7 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
                 logger.info(f"Trying OCR with config: {config}")
                 current_text = pytesseract.image_to_string(image, config=config)
                 current_text = current_text.strip()
-                char_count = len(current_text)
+                char_count = len(current_text);
 
                 # Keep track of the best result (most text that looks reasonable)
                 if char_count > best_char_count:
@@ -2225,64 +2225,75 @@ def stripe_webhook():
                 pass
             return jsonify({'error': 'Failed to update case status'}), 500
 
-        # STEP 2: Generate the actual full case analysis using GPT
-        logger.info(f"Generating full case analysis for paid case {case_token}")
+        # STEP 2: Generate the actual full case analysis using GPT (asynchronously)
+        logger.info(f"Scheduling full case analysis for paid case {case_token}")
 
         try:
-            # Use the same logic as the /api/case-analysis endpoint but internally
-            full_analysis_result = generate_full_case_analysis_internal(case_token)
+            # Schedule the analysis generation in a background thread to avoid webhook timeout
+            def generate_analysis_async():
+                try:
+                    logger.info(f"Starting background analysis generation for {case_token}")
+                    full_analysis_result = generate_full_case_analysis_internal(case_token)
 
-            if not full_analysis_result['success']:
-                logger.error(f"Failed to generate case analysis for {case_token}: {full_analysis_result['error']}")
-                return jsonify({'error': 'Failed to generate case analysis'}), 500
+                    if not full_analysis_result['success']:
+                        logger.error(f"Background analysis failed for {case_token}: {full_analysis_result['error']}")
+                        return
 
-            logger.info(f"Successfully generated full case analysis for {case_token}")
+                    logger.info(f"Successfully generated background analysis for {case_token}")
 
-            # The analysis is already saved to dmhoa_case_outputs by generate_full_case_analysis_internal
-            # Just need to add payment metadata to the existing output
-            case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
+                    # Add payment metadata to the existing output
+                    case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
 
-            # Update the case outputs with payment information
-            try:
-                outputs_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-                outputs_update_params = {'case_token': f'eq.{case_token}'}
+                    # Update the case outputs with payment information
+                    try:
+                        outputs_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+                        outputs_update_params = {'case_token': f'eq.{case_token}'}
 
-                # Get the current outputs to merge with payment info
-                current_outputs = full_analysis_result['outputs']
+                        # Get the current outputs to merge with payment info
+                        current_outputs = full_analysis_result['outputs']
 
-                # Add payment metadata to the outputs
-                enhanced_outputs = {
-                    **current_outputs,
-                    'payment_info': {
-                        'case_url': case_url,
-                        'session_id': session['id'],
-                        'payment_amount': session.get('amount_total'),
-                        'currency': session.get('currency'),
-                        'customer_email': session.get('customer_details', {}).get('email'),
-                        'payment_completed_at': datetime.utcnow().isoformat()
-                    }
-                }
+                        # Add payment metadata to the outputs
+                        enhanced_outputs = {
+                            **current_outputs,
+                            'payment_info': {
+                                'case_url': case_url,
+                                'session_id': session['id'],
+                                'payment_amount': session.get('amount_total'),
+                                'currency': session.get('currency'),
+                                'customer_email': session.get('customer_details', {}).get('email'),
+                                'payment_completed_at': datetime.utcnow().isoformat()
+                            }
+                        }
 
-                outputs_update_data = {
-                    'outputs': enhanced_outputs,
-                    'updated_at': datetime.utcnow().isoformat()
-                }
-                outputs_update_headers = supabase_headers()
+                        outputs_update_data = {
+                            'outputs': enhanced_outputs,
+                            'updated_at': datetime.utcnow().isoformat()
+                        }
+                        outputs_update_headers = supabase_headers()
 
-                outputs_update_response = requests.patch(outputs_update_url, params=outputs_update_params,
-                                                        headers=outputs_update_headers, json=outputs_update_data, timeout=TIMEOUT)
-                outputs_update_response.raise_for_status()
+                        outputs_update_response = requests.patch(outputs_update_url, params=outputs_update_params,
+                                                                headers=outputs_update_headers, json=outputs_update_data, timeout=TIMEOUT)
+                        outputs_update_response.raise_for_status()
 
-                logger.info(f"Successfully enhanced case outputs with payment info for {case_token}")
-                logger.info(f"Case URL: {case_url}")
+                        logger.info(f"Successfully enhanced case outputs with payment info for {case_token}")
+                        logger.info(f"Case URL: {case_url}")
 
-            except Exception as e:
-                logger.error(f"Failed to enhance outputs with payment info: {str(e)}")
-                # Don't fail the whole process if this fails - the analysis is already generated
+                    except Exception as e:
+                        logger.error(f"Failed to enhance outputs with payment info: {str(e)}")
+                        # Don't fail the whole process if this fails - the analysis is already generated
+
+                except Exception as e:
+                    logger.error(f"Error in background analysis generation for {case_token}: {str(e)}")
+
+            # Start the analysis in a background thread
+            analysis_thread = threading.Thread(target=generate_analysis_async, daemon=True)
+            analysis_thread.start()
+
+            logger.info(f"Successfully scheduled background analysis generation for {case_token}")
 
         except Exception as e:
-            logger.error(f"Failed to generate full case analysis for {case_token}: {str(e)}")
-            return jsonify({'error': 'Failed to generate case analysis'}), 500
+            logger.error(f"Failed to schedule analysis generation for {case_token}: {str(e)}")
+            # Don't fail the webhook response - we can retry later
 
     else:
         logger.info(f"Unhandled event type: {event['type']}")
