@@ -2272,7 +2272,8 @@ def insert_case_output(output_data: Dict) -> bool:
         result = response.json()
         if result:
             output_id = result[0]['id']
-            logger.info(f"Inserted case output {output_id} for case {output_data['case_id']}")
+            case_token = output_data.get('case_token', 'unknown')
+            logger.info(f"Inserted case output {output_id} for case_token {case_token}")
             return True
 
         return False
