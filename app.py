@@ -2430,14 +2430,28 @@ OUTPUT RULES (CRITICAL):
 - Include specific facts, dates, amounts, and references from the documents
 - Be professional but firm in tone
 
+TONE AND POSITIONING RULES (VERY IMPORTANT):
+- NEVER admit fault, liability, or acknowledge violations in any draft
+- Use non-admitting language: "responding to your notice" instead of "acknowledging the violation"
+- For compliance drafts, say "addressing the Association's stated concerns" not "acknowledging the violation"
+- For extension requests, provide specific, factual reasons (vendor availability, scheduling constraints) not vague excuses
+- Preserve homeowner's rights while showing cooperation
+- Frame responses as addressing concerns, not admitting wrongdoing
+
 DRAFT REQUIREMENTS:
 Each draft letter must include:
 - Professional subject line
 - Proper greeting and introduction
-- Specific references to HOA rules/violations mentioned
+- Specific references to HOA rules/violations mentioned (without admission)
 - Clear requests with deadlines
 - Professional closing requesting written confirmation
 - Homeowner's rights and procedural protections
+
+SPECIFIC LANGUAGE GUIDANCE:
+- Compliance Draft: "I am responding to the notice regarding [issue] and am taking steps to address the Association's stated concerns"
+- Extension Draft: "Due to vendor availability and inspection scheduling constraints" (not "unforeseen circumstances")
+- Never use phrases like "I acknowledge the violation" or "I admit fault"
+- Always frame as "responding to notice" or "addressing concerns"
 
 Make this comprehensive - worth the $29 the customer paid."""
             },
