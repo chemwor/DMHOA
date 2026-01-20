@@ -2022,6 +2022,72 @@ def get_case_preview_by_token(token):
         return jsonify({'error': error_msg}), 500
 
 
+@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
+def get_case_data():
+    """Get case data by token for frontend display."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Get token from query parameters
+        token = request.args.get('token', '').strip()
+
+        if not token:
+            return jsonify({'error': 'token is required'}), 400
+
+        logger.info(f"Fetching case data for token: {token[:8]}...")
+
+        # Fetch case data from Supabase
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Also fetch the case outputs (full analysis) if available
+        case_outputs = None
+        try:
+            outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            outputs_params = {
+                'case_token': f'eq.{token}',
+                'select': '*'
+            }
+            outputs_headers = supabase_headers()
+
+            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers, timeout=TIMEOUT)
+            outputs_response.raise_for_status()
+            outputs_data = outputs_response.json()
+
+            if outputs_data:
+                case_outputs = outputs_data[0]
+                logger.info(f"Found case outputs for token {token[:8]}...")
+            else:
+                logger.info(f"No case outputs found for token {token[:8]}...")
+
+        except Exception as e:
+            logger.warning(f"Error fetching case outputs for {token[:8]}...: {str(e)}")
+            # Continue without outputs - not critical
+
+        # Build response with case data and outputs if available
+        response_data = {
+            'token': case.get('token'),
+            'status': case.get('status', 'preview'),
+            'created_at': case.get('created_at'),
+            'updated_at': case.get('updated_at'),
+            'payload': case.get('payload', {}),
+            'outputs': case_outputs.get('outputs') if case_outputs else None,
+            'outputs_status': case_outputs.get('status') if case_outputs else None
+        }
+
+        logger.info(f"Successfully retrieved case data for token {token[:8]}...")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching case data: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
 # NEW: Concurrency guard function to prevent duplicate preview generation
 def upsert_active_preview_lock(case_id: str) -> bool:
     """
