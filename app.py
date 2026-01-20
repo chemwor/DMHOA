@@ -389,7 +389,7 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
                 logger.info(f"Trying OCR with config: {config}")
                 current_text = pytesseract.image_to_string(image, config=config)
                 current_text = current_text.strip()
-                char_count = len(current_text)
+                char_count = len(current_text);
 
                 # Keep track of the best result (most text that looks reasonable)
                 if char_count > best_char_count:
@@ -679,6 +679,31 @@ def doc_extract_webhook():
         }), 500
 
 
+def trigger_preview_update_after_document_processing(token: str):
+    """Trigger preview regeneration after a document becomes ready."""
+    try:
+        case = read_case_by_token(token)
+        if not case:
+            logger.warning(f"Cannot trigger preview update - case not found for token {token[:8]}...")
+            return
+
+        case_id = case.get('id')
+        if not case_id:
+            logger.warning(f"Cannot trigger preview update - case ID not found for token {token[:8]}...")
+            return
+
+        # Trigger preview regeneration with force=True since we have new document data
+        success = auto_generate_case_preview(token, case_id, force_regenerate=True)
+
+        if success:
+            logger.info(f"Successfully triggered preview update for case {token[:8]}... after document processing")
+        else:
+            logger.warning(f"Failed to trigger preview update for case {token[:8]}... after document processing")
+
+    except Exception as e:
+        logger.error(f"Error triggering preview update after document processing for {token[:8]}...: {str(e)}")
+
+
 def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
     """Fetch case details from Supabase by token."""
     try:
@@ -703,6 +728,33 @@ def read_case_by_token(token: str) -> Optional[Dict[str, Any]]:
 
     except Exception as e:
         logger.error(f"Failed to fetch case for token {token[:12]}...: {str(e)}")
+        return None
+
+
+def read_case_by_id(case_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch case details from Supabase by case ID."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        params = {
+            'id': f'eq.{case_id}',
+            'select': '*'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        cases = response.json()
+        if not cases:
+            logger.warning(f"No case found for ID: {case_id}")
+            return None
+
+        case = cases[0]
+        logger.info(f"Found case for ID {case_id}: Token {case.get('token', '')[:8]}...")
+        return case
+
+    except Exception as e:
+        logger.error(f"Failed to fetch case for ID {case_id}: {str(e)}")
         return None
 
 
@@ -1113,7 +1165,7 @@ Output ONLY valid JSON with this exact structure:
   "risk_if_wrong": [
     "Missing critical response deadlines",
     "Accepting invalid HOA demands without challenge",
-    "Paying unnecessary fines or fees"
+    "Paying unnecessary fines or agreeing to unreasonable compliance"
   ],
   "what_you_get_when_you_unlock": [
     "Professional response letter once documents are analyzed",
@@ -2002,6 +2054,71 @@ def release_preview_lock(case_id: str):
     """Release the preview generation lock for a case."""
     with preview_lock:
         preview_generation_locks.pop(case_id, None)
+
+
+@app.route('/api/create-checkout-session', methods=['POST', 'OPTIONS'])
+def create_checkout_session():
+    """Create a Stripe checkout session for case purchase."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Validate required environment variables
+        if not STRIPE_SECRET_KEY:
+            logger.error("STRIPE_SECRET_KEY not configured")
+            return jsonify({'error': 'Payment system not configured'}), 500
+
+        if not STRIPE_PRICE_ID:
+            logger.error("STRIPE_PRICE_ID not configured")
+            return jsonify({'error': 'Product pricing not configured'}), 500
+
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        case_id = data.get('case_id')
+        if not case_id:
+            return jsonify({'error': 'case_id is required'}), 400
+
+        # Validate case exists
+        case = read_case_by_id(case_id)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Create Stripe checkout session
+        try:
+            checkout_session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                line_items=[{
+                    'price': STRIPE_PRICE_ID,
+                    'quantity': 1,
+                }],
+                mode='payment',
+                success_url=f"{SITE_URL}/success?case_id={case_id}&session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{SITE_URL}/case-preview?case={case_id}",
+                metadata={
+                    'case_id': case_id,
+                    'case_token': case.get('token', ''),
+                }
+            )
+
+            logger.info(f"Created checkout session {checkout_session.id} for case {case_id}")
+            return jsonify({
+                'checkout_url': checkout_session.url,
+                'session_id': checkout_session.id
+            }), 200
+
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe error creating checkout session: {str(e)}")
+            return jsonify({'error': 'Payment system error'}), 500
+
+    except Exception as e:
+        error_msg = f"Error creating checkout session: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
 
 
 if __name__ == '__main__':
