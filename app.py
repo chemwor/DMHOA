@@ -2477,15 +2477,22 @@ Please provide a thorough analysis with actionable advice, specific draft letter
 
         logger.info(f"Making OpenAI API call for case analysis: {case_token}")
 
-        openai_response = requests.post(
-            'https://api.openai.com/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {OPENAI_API_KEY}',
-                'Content-Type': 'application/json'
-            },
-            json=openai_payload,
-            timeout=(10, 180)  # 3 minute timeout for complex analysis
-        )
+        try:
+            openai_response = requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json=openai_payload,
+                timeout=(10, 180)  # 3 minute timeout for complex analysis
+            )
+        except requests.exceptions.Timeout as e:
+            logger.error(f"OpenAI API call timed out for case {case_token}: {str(e)}")
+            return {'success': False, 'error': f'OpenAI API call timed out: {str(e)}'}
+        except requests.exceptions.RequestException as e:
+            logger.error(f"OpenAI API call failed for case {case_token}: {str(e)}")
+            return {'success': False, 'error': f'OpenAI API call failed: {str(e)}'}
 
         if not openai_response.ok:
             error_text = openai_response.text
