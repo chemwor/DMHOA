@@ -1867,6 +1867,88 @@ def save_case():
         return jsonify({'error': error_msg}), 500
 
 
+@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
+def get_case_data():
+    """Get case data and preview by token - includes preview from dmhoa_case_previews table"""
+
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'ok': True})
+        return response
+
+    try:
+        # Get token from query parameters
+        token = request.args.get('token', '').strip()
+
+        if not token:
+            return jsonify({'error': 'token is required'}), 400
+
+        # Fetch case data from Supabase
+        case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        case_params = {
+            'token': f'eq.{token}',
+            'select': 'id,token,unlocked,status,created_at,payload,amount_total,currency,email'
+        }
+        case_headers = supabase_headers()
+
+        try:
+            case_response = requests.get(case_url, params=case_params, headers=case_headers, timeout=TIMEOUT)
+            case_response.raise_for_status()
+            cases = case_response.json()
+
+            if not cases:
+                return jsonify({'error': 'Case not found'}), 404
+
+            case_data = cases[0]
+            case_id = case_data.get('id')
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f'Database error reading case: {str(e)}')
+            return jsonify({'error': 'Database error'}), 500
+
+        # Fetch active preview for this case
+        preview_data = None
+        if case_id:
+            try:
+                preview_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
+                preview_params = {
+                    'case_id': f'eq.{case_id}',
+                    'is_active': 'eq.true',
+                    'select': '*',
+                    'order': 'created_at.desc',
+                    'limit': '1'
+                }
+
+                preview_response = requests.get(preview_url, params=preview_params, headers=case_headers, timeout=TIMEOUT)
+                preview_response.raise_for_status()
+                previews = preview_response.json()
+
+                if previews:
+                    preview_data = previews[0]
+                    logger.info(f"Found active preview for case {case_id}")
+                else:
+                    logger.info(f"No active preview found for case {case_id}")
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f'Database error reading preview: {str(e)}')
+                # Don't fail the request if preview fetch fails
+                pass
+
+        # Combine case data with preview
+        response_data = case_data.copy()
+        if preview_data:
+            response_data['preview'] = preview_data
+        else:
+            response_data['preview'] = None
+
+        logger.info(f"Returning case data for token {token[:12]}... with preview: {preview_data is not None}")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        logger.error(f'get-case-data error: {str(e)}')
+        return jsonify({'error': str(e) or 'server error'}), 500
+
+
 # NEW: Concurrency guard function to prevent duplicate preview generation
 def upsert_active_preview_lock(case_id: str) -> bool:
     """
