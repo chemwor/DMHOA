@@ -2207,61 +2207,40 @@ def stripe_webhook():
         # Create case URL as specified
         case_url = f"{SITE_URL}/case.html?case={case_token}&session_id={session['id']}"
 
-        # Let's inspect the actual table schema first
-        try:
-            # Try a simple GET request with select=* and limit=0 to see available columns
-            test_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-            test_params = {'select': '*', 'limit': '0'}
-            test_headers = supabase_headers()
-
-            test_response = requests.get(test_url, params=test_params, headers=test_headers, timeout=TIMEOUT)
-            logger.info(f"Table schema test - Status: {test_response.status_code}")
-
-            if test_response.status_code == 200:
-                logger.info(f"Table exists and is accessible")
-                # The available columns will be shown in the error when we try to insert invalid columns
-            else:
-                logger.error(f"Table access failed: {test_response.status_code} - {test_response.text}")
-
-        except Exception as e:
-            logger.error(f"Error testing table schema: {str(e)}")
-
-        # Since the error showed case_id column doesn't exist, let's try with different column names
-        # Based on the error, let's try a minimal insert with basic fields that might exist
-        case_output_data = {
-            'token': case_token,  # Try 'token' instead of 'case_token'
+        # Prepare the outputs JSONB with all the payment and case data
+        outputs_data = {
+            'case_id': case_id,
             'session_id': session['id'],
-            'url': case_url,  # Try 'url' instead of 'case_url'
-            'status': 'completed',  # Try 'status' instead of 'payment_status'
-            'amount': session.get('amount_total'),  # Try 'amount' instead of 'payment_amount'
+            'case_url': case_url,
+            'preview_id': preview.get('id'),
+            'payment_amount': session.get('amount_total'),
             'currency': session.get('currency'),
-            'email': session.get('customer_details', {}).get('email'),  # Try 'email' instead of 'customer_email'
-            'stripe_session_id': session['id']
+            'customer_email': session.get('customer_details', {}).get('email'),
+            'stripe_session_id': session['id'],
+            'payment_completed_at': datetime.utcnow().isoformat(),
+            'preview_content': preview.get('preview_content')
         }
 
-        # Remove None values
-        case_output_data = {k: v for k, v in case_output_data.items() if v is not None}
+        # Remove None values from outputs
+        outputs_data = {k: v for k, v in outputs_data.items() if v is not None}
 
-        # Try the insert with the adjusted field names
+        # Prepare data for dmhoa_case_outputs table using the correct schema
+        case_output_data = {
+            'case_token': case_token,
+            'status': 'ready',  # Set to 'ready' since payment is completed
+            'model': 'stripe_payment',  # Indicate this was generated from Stripe payment
+            'prompt_version': 'payment_v1',  # Version for payment processing
+            'outputs': outputs_data  # All the actual data goes into the JSONB outputs column
+        }
+
+        # Insert into dmhoa_case_outputs table
         success = insert_case_output(case_output_data)
         if success:
             logger.info(f"Successfully created case output for case {case_id}, session {session['id']}")
             logger.info(f"Case URL: {case_url}")
         else:
-            # If that fails too, try even more basic field names
-            logger.warning(f"First attempt failed, trying with minimal fields")
-            minimal_data = {
-                'token': case_token,
-                'session_id': session['id'],
-                'url': case_url
-            }
-
-            success = insert_case_output(minimal_data)
-            if success:
-                logger.info(f"Successfully created minimal case output for case {case_id}, session {session['id']}")
-            else:
-                logger.error(f"Failed to create case output for case {case_id} even with minimal data")
-                return jsonify({'error': 'Failed to create case output'}), 500
+            logger.error(f"Failed to create case output for case {case_id}")
+            return jsonify({'error': 'Failed to create case output'}), 500
 
     else:
         logger.info(f"Unhandled event type: {event['type']}")
