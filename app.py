@@ -2125,10 +2125,18 @@ def create_checkout_session():
             )
 
             logger.info(f"Created checkout session {checkout_session.id} for case {case_id}")
-            return jsonify({
+
+            # Create response with multiple field names for frontend compatibility
+            response_data = {
                 'checkout_url': checkout_session.url,
-                'session_id': checkout_session.id
-            }), 200
+                'url': checkout_session.url,  # Alternative field name
+                'session_id': checkout_session.id,
+                'id': checkout_session.id,  # Alternative field name
+                'success': True
+            }
+
+            logger.info(f"Returning checkout response: {response_data}")
+            return jsonify(response_data), 200
 
         except stripe.error.StripeError as e:
             logger.error(f"Stripe error creating checkout session: {str(e)}")
