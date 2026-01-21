@@ -1475,7 +1475,7 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 if documents:
                     # Documents are ready - generate final preview immediately
                     should_generate = True
-                    logger.info(f"Documents ready - generating FINAL preview for case {token[:12]}...")
+                    logger.info(f"Documents ready - generating FINAL preview immediately for case {token[:12]}...")
                 elif has_processing_documents:
                     # Documents still processing - wait (don't generate preliminary)
                     logger.info(f"Documents processing for case {token[:12]}... - waiting for FINAL preview")
@@ -1532,7 +1532,7 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
             if success:
                 logger.info(f"Successfully generated {preview_type} FINAL preview for case {token[:12]}...")
             else:
-                logger.error(f"Failed to save {preview_type} FINAL preview for case {token[:12]}...")
+                logger.error(f"Failed to save {preview_type} FINAL preview for case {token[:12]}")
 
             return success
 
@@ -2498,7 +2498,7 @@ def insert_case_output(output_data: Dict) -> bool:
 
         response = requests.post(url, headers=headers, json=output_data, timeout=TIMEOUT)
 
-        # Log the full response for debugging
+        # Log response details for debugging
         logger.info(f"Supabase response status: {response.status_code}")
         logger.info(f"Supabase response body: {response.text}")
 
@@ -2566,11 +2566,13 @@ def stripe_webhook():
                 return jsonify({'error': 'Case not found'}), 404
 
             case_id = case.get('id')
+            logger.info(f"Updating case status for case_id: {case_id}, case_token: {case_token[:8]}...")
 
-            # Update case status
+            # Update case status with proper error handling
             update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             update_params = {'id': f'eq.{case_id}'}
             update_headers = supabase_headers()
+            update_headers['Prefer'] = 'return=representation'
 
             update_data = {
                 'status': 'paid',
@@ -2581,12 +2583,26 @@ def stripe_webhook():
             if customer_email and not case.get('email'):
                 update_data['email'] = customer_email
 
+            logger.info(f"Sending update to Supabase: {update_data}")
+
             update_response = requests.patch(update_url, params=update_params, headers=update_headers,
                                            json=update_data, timeout=TIMEOUT)
+
+            # Log response details for debugging
+            logger.info(f"Supabase update response: {update_response.status_code}")
+            logger.info(f"Supabase response body: {update_response.text}")
+
+            if update_response.status_code != 200:
+                logger.error(f"Supabase error details: {update_response.status_code} - {update_response.text}")
+                return jsonify({'error': f'Failed to update case status: {update_response.status_code}'}), 500
+
             update_response.raise_for_status()
 
-            logger.info(f"Updated case status to 'paid' for case {case_id}")
+            logger.info(f"Successfully updated case status to 'paid' for case {case_id}")
 
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP error updating case status: {e.response.status_code} - {e.response.text if hasattr(e, 'response') else str(e)}")
+            return jsonify({'error': f'Failed to update case status: HTTP {e.response.status_code}'}), 500
         except Exception as e:
             logger.error(f"Failed to update case status: {str(e)}")
             return jsonify({'error': 'Failed to update case status'}), 500
@@ -2720,8 +2736,8 @@ def create_checkout_session():
 
         # Create Stripe checkout session
         try:
-            # Use the correct frontend URL for your environment
-            frontend_url = "https://disputemyhoa.com"  # Update this to your actual frontend domain
+            # Use the correct frontend URL with the proper format
+            frontend_url = "https://dmhoadev.netlify.app"  # Updated to match your dev environment
 
             checkout_session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
@@ -2730,8 +2746,8 @@ def create_checkout_session():
                     'quantity': 1,
                 }],
                 mode='payment',
-                success_url=f"{frontend_url}/success?case_id={case_id}&session_id={{CHECKOUT_SESSION_ID}}",
-                cancel_url=f"{frontend_url}/case-preview?case={case_id}",
+                success_url=f"{frontend_url}/case.html?case={case_token}&session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{frontend_url}/case-preview?case={case_token}",
                 metadata={
                     'case_id': case_id,
                     'case_token': case_token or '',
