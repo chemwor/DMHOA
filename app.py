@@ -2669,6 +2669,99 @@ def stripe_webhook():
     return jsonify({'status': 'success'}), 200
 
 
+@app.route('/api/create-checkout-session', methods=['POST', 'OPTIONS'])
+def create_checkout_session():
+    """Create a Stripe checkout session for case purchase."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Validate required environment variables
+        if not STRIPE_SECRET_KEY:
+            logger.error("STRIPE_SECRET_KEY not configured")
+            return jsonify({'error': 'Payment system not configured'}), 500
+
+        if not STRIPE_PRICE_ID:
+            logger.error("STRIPE_PRICE_ID not configured")
+            return jsonify({'error': 'Product pricing not configured'}), 500
+
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        # Accept either case_id or case_token for flexibility
+        case_id = data.get('case_id')
+        case_token = data.get('case_token') or data.get('token')
+
+        logger.info(f"Checkout request received - case_id: {case_id}, case_token: {case_token}")
+
+        if not case_id and not case_token:
+            return jsonify({'error': 'case_id or case_token is required'}), 400
+
+        # If we have a token but no case_id, look up the case_id by token
+        if case_token and not case_id:
+            case = read_case_by_token(case_token)
+            if not case:
+                return jsonify({'error': 'Case not found for token'}), 404
+            case_id = case.get('id')
+            if not case_id:
+                return jsonify({'error': 'Case ID not found for token'}), 404
+        elif case_id:
+            # Validate case exists by case_id
+            case = read_case_by_id(case_id)
+            if not case:
+                return jsonify({'error': 'Case not found'}), 404
+            case_token = case.get('token')
+        else:
+            return jsonify({'error': 'Unable to identify case'}), 400
+
+        # Create Stripe checkout session
+        try:
+            # Use the correct frontend URL for your environment
+            frontend_url = "https://disputemyhoa.com"  # Update this to your actual frontend domain
+
+            checkout_session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                line_items=[{
+                    'price': STRIPE_PRICE_ID,
+                    'quantity': 1,
+                }],
+                mode='payment',
+                success_url=f"{frontend_url}/success?case_id={case_id}&session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{frontend_url}/case-preview?case={case_id}",
+                metadata={
+                    'case_id': case_id,
+                    'case_token': case_token or '',
+                }
+            )
+
+            logger.info(f"Created checkout session {checkout_session.id} for case {case_id}")
+
+            # Create response with multiple field names for frontend compatibility
+            response_data = {
+                'checkout_url': checkout_session.url,
+                'url': checkout_session.url,  # Alternative field name
+                'session_id': checkout_session.id,
+                'id': checkout_session.id,  # Alternative field name
+                'success': True
+            }
+
+            logger.info(f"Returning checkout response: {response_data}")
+            return jsonify(response_data), 200
+
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe error creating checkout session: {str(e)}")
+            return jsonify({'error': 'Payment system error'}), 500
+
+    except Exception as e:
+        error_msg = f"Error creating checkout session: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
 @app.route("/webhooks/send-receipt-email", methods=["POST"])
 def send_receipt_email_webhook():
     """Webhook endpoint to send receipt email - for backwards compatibility."""
