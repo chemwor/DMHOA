@@ -389,7 +389,7 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
                 logger.info(f"Trying OCR with config: {config}")
                 current_text = pytesseract.image_to_string(image, config=config)
                 current_text = current_text.strip()
-                char_count = len(current_text);
+                char_count = len(current_text)
 
                 # Keep track of the best result (most text that looks reasonable)
                 if char_count > best_char_count:
@@ -2209,7 +2209,7 @@ def send_message():
         if not case:
             return jsonify({'error': 'Case not found'}), 404
 
-        case_status = case.get('status', 'preview')
+        case_status = case.get('status', 'paid')
         if case_status != 'paid':
             return jsonify({'error': 'Case is not unlocked'}), 402
 
@@ -2227,8 +2227,8 @@ def send_message():
             user_message_response = requests.post(user_message_url, headers=user_message_headers,
                                                 json=user_message_data, timeout=TIMEOUT)
             user_message_response.raise_for_status()
-            user_insert = user_message_response.json()
-            user_message = user_insert[0] if user_insert else None
+            user_message = user_message_response.json()
+            user_message = user_message[0] if user_message else None
 
         except Exception as e:
             logger.error(f'Failed to save user message for {token[:8]}...: {str(e)}')
@@ -2257,23 +2257,61 @@ def send_message():
         # 4) Get case payload for context
         case_payload = case.get('payload', {})
 
+        # 4.5) Get preview information for additional context
+        case_id = case.get('id')
+        preview_info = None
+        if case_id:
+            preview_info = read_active_preview(case_id)
+
         # 5) Generate AI response using OpenAI Chat Completions API
         try:
-            system_prompt = """You are "Dispute My HOA" chat support assistant.
-This is educational drafting assistance, not legal advice.
+            system_prompt = """You are "Dispute My HOA", an educational HOA response assistant.
+You provide drafting assistance and procedural guidance — not legal advice.
 
-You help homeowners with:
-- Understanding HOA notices and violations
-- Drafting practical response letters
-- Next steps and timelines
-- Reducing escalation risk
+Your role is to help homeowners:
+- Understand HOA violation notices in plain English
+- Identify deadlines, risks, and procedural options
+- Draft safe, escalation-aware written responses
+- Reduce the risk of fines, forced compliance, or loss of rights
 
-Rules:
-- Be calm, practical, and specific
-- Ask 1-2 clarifying questions only if truly needed
-- If the user asks for a new letter, produce a ready-to-send draft in plain text
-- Do NOT claim to be a lawyer or provide legal advice
-- Focus on practical solutions and proper procedures"""
+IMPORTANT SAFETY RULES:
+- Do NOT present yourself as a lawyer or provide legal advice
+- Do NOT guarantee outcomes
+- Do NOT speculate beyond the documents or facts provided
+- Do NOT escalate tone or recommend aggressive language
+
+ESCALATION & LIABILITY RULES (CRITICAL):
+- Default to NON-ADMISSION language
+- Do NOT include phrases like “I admit,” “I acknowledge the violation,” or similar
+- Only include admission language if the user explicitly asks for a compliance/admission letter
+- When uncertain, preserve the homeowner’s rights and leverage
+
+DRAFTING RULES:
+- If the user asks for a letter, produce a ready-to-send plain-text draft
+- Use calm, professional, HOA-appropriate language
+- Avoid emotional, defensive, or argumentative wording
+- Assume the letter may be used as evidence later
+- Prefer clarity, documentation, and procedural correctness over persuasion
+
+GUIDANCE RULES:
+- Explain WHEN to use each type of response (clarification, extension, compliance)
+- Flag irreversible actions or common mistakes before providing drafts
+- Highlight deadlines, hearing rights, and documentation requirements when relevant
+
+QUESTION RULES:
+- Ask at most 1–2 clarifying questions
+- Only ask if the answer materially affects the response strategy
+- If documents are missing, explain what’s needed and why
+
+TONE:
+- Calm
+- Practical
+- Protective of the homeowner
+- Confident but not authoritative
+
+Your goal is to help the homeowner respond correctly the first time, 
+without guessing, escalating, or unintentionally weakening their position.
+"""
 
             # Convert history to OpenAI message format
             messages = [{'role': 'system', 'content': system_prompt}]
@@ -2281,6 +2319,11 @@ Rules:
             # Add context about the case
             context_message = f"Case context: {json.dumps(case_payload, indent=2)}"
             messages.append({'role': 'system', 'content': context_message})
+
+            # Add preview information if available
+            if preview_info:
+                preview_context = f"Case preview analysis: {json.dumps(preview_info, indent=2)}"
+                messages.append({'role': 'system', 'content': preview_context})
 
             # Add recent chat history
             for msg in history[-10:]:  # Only use last 10 messages for context
@@ -2768,7 +2811,6 @@ def create_checkout_session():
                 'url': checkout_session.url,  # Alternative field name
                 'session_id': checkout_session.id,
                 'id': checkout_session.id,  # Alternative field name
-                'success': True
             }
 
             logger.info(f"Returning checkout response: {response_data}")
