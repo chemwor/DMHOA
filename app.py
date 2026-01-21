@@ -1463,7 +1463,7 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
             existing_preview = read_active_preview(case_id)
 
             # NEW: Only generate preview when documents are ready OR no documents exist
-            # Skip preliminary previews when documents are still processing
+            # Skip preliminary previews when documents are still processing (unless force_regenerate=True)
             should_generate = False
             preview_type = "final"
 
@@ -1477,7 +1477,7 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 should_generate = True
                 logger.info(f"No preview exists for case {token[:12]}... - generating final preview")
             elif force_regenerate:
-                # Forced regeneration
+                # Forced regeneration (usually after document processing completion)
                 should_generate = True
                 logger.info(f"Force regenerating preview for case {token[:12]}...")
             else:
@@ -2152,8 +2152,7 @@ def read_messages():
             }
             messages_headers = supabase_headers()
 
-            messages_response = requests.get(messages_url, params=messages_params,
-                                           headers=messages_headers, timeout=TIMEOUT)
+            messages_response = requests.get(messages_url, params=messages_params, headers=messages_headers, timeout=TIMEOUT)
             messages_response.raise_for_status()
             messages = messages_response.json()
 
