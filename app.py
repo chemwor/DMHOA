@@ -1440,9 +1440,9 @@ RULES:
 
 
 def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
-    """Automatically generate case preview - only final version when documents are ready."""
+    """Generate ONLY final preview when documents are ready or after 30-second timeout."""
     try:
-        # NEW: Use improved concurrency guard to prevent duplicate active previews
+        # Use improved concurrency guard to prevent duplicate active previews
         if not force_regenerate and not upsert_active_preview_lock(case_id):
             return True  # Skip generation, already handled or in progress
 
@@ -1462,53 +1462,61 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
             # Check existing preview
             existing_preview = read_active_preview(case_id)
 
-            # NEW: Only generate preview when documents are ready OR no documents exist
-            # Skip preliminary previews when documents are still processing (unless force_regenerate=True)
+            # NEW: Only generate FINAL preview - wait for documents OR timeout
             should_generate = False
             preview_type = "final"
 
-            if has_processing_documents and not force_regenerate:
-                # Documents are still processing - don't generate preliminary preview
-                logger.info(f"Documents still processing for case {token[:12]}... - waiting for final preview")
-                return True  # Return success but don't generate preview yet
-
-            if not existing_preview:
-                # No preview exists - generate based on available data
-                should_generate = True
-                logger.info(f"No preview exists for case {token[:12]}... - generating final preview")
-            elif force_regenerate:
+            if force_regenerate:
                 # Forced regeneration (usually after document processing completion)
                 should_generate = True
-                logger.info(f"Force regenerating preview for case {token[:12]}...")
+                logger.info(f"Force regenerating FINAL preview for case {token[:12]}...")
+            elif not existing_preview:
+                # No preview exists - check if we should generate final preview
+                if documents:
+                    # Documents are ready - generate final preview immediately
+                    should_generate = True
+                    logger.info(f"Documents ready - generating FINAL preview for case {token[:12]}...")
+                elif has_processing_documents:
+                    # Documents still processing - wait (don't generate preliminary)
+                    logger.info(f"Documents processing for case {token[:12]}... - waiting for FINAL preview")
+                    return True  # Return success but don't generate preview yet
+                elif not all_documents:
+                    # No documents at all - generate final basic preview
+                    should_generate = True
+                    logger.info(f"No documents uploaded - generating FINAL basic preview for case {token[:12]}...")
+                else:
+                    # Documents exist but not ready yet - wait
+                    logger.info(f"Waiting for documents to be ready for case {token[:12]}...")
+                    return True
             else:
-                # Check if we can upgrade from basic to full with documents
+                # Preview already exists - check if we need to upgrade
                 existing_content = existing_preview.get('preview_content', {})
                 existing_doc_summary = existing_content.get('doc_summary', {})
                 existing_doc_status = existing_doc_summary.get('doc_status', 'none')
 
                 if documents and existing_doc_status in ['none']:
-                    # We have ready documents but existing preview doesn't - upgrade to full
+                    # We have ready documents but existing preview doesn't - upgrade to final
                     should_generate = True
-                    preview_type = "upgrade"
-                    logger.info(f"Upgrading preview from {existing_doc_status} to full for case {token[:12]}...")
+                    preview_type = "final_upgrade"
+                    logger.info(f"Upgrading to FINAL preview with documents for case {token[:12]}...")
                 else:
-                    logger.info(f"Preview already exists and up-to-date for case {token[:12]}... - skipping generation")
+                    logger.info(f"FINAL preview already exists for case {token[:12]}... - skipping generation")
                     return True
 
             if not should_generate:
                 return True
 
-            # Generate preview based on available data
+            # Generate FINAL preview based on available data
             preview_json = None
             if documents:
-                # Documents are ready - generate full preview with document analysis
-                logger.info(f"Generating final preview with {len(documents)} ready documents for case {token[:12]}...")
+                # Documents are ready - generate final preview with document analysis
+                logger.info(f"Generating FINAL preview with {len(documents)} ready documents for case {token[:12]}...")
                 doc_brief = build_doc_brief(documents)
                 preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_openai(case, doc_brief)
                 preview_type = "final_with_docs"
             else:
-                # No documents at all - generate basic preview (this is still "final" since no docs expected)
-                logger.info(f"No documents found for case {token[:12]}... - generating final basic preview")
+                # No documents - generate final basic preview
+                logger.info(f"Generating FINAL basic preview (no documents) for case {token[:12]}...")
                 doc_brief = {
                     "doc_status": "none",
                     "doc_count": 0,
@@ -1518,24 +1526,24 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
                 preview_type = "final_basic"
 
-            # Save preview (this will deactivate existing ones automatically)
+            # Save final preview (this will deactivate existing ones automatically)
             success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms, preview_json)
 
             if success:
-                logger.info(f"Successfully generated {preview_type} preview for case {token[:12]}...")
+                logger.info(f"Successfully generated {preview_type} FINAL preview for case {token[:12]}...")
             else:
-                logger.error(f"Failed to save {preview_type} preview for case {token[:12]}...")
+                logger.error(f"Failed to save {preview_type} FINAL preview for case {token[:12]}...")
 
             return success
 
         finally:
-            # NEW: Always release the lock when done
+            # Always release the lock when done
             release_preview_lock(case_id)
 
     except Exception as e:
-        # NEW: Release lock on exception
+        # Release lock on exception
         release_preview_lock(case_id)
-        logger.error(f"Error auto-generating preview for case {token[:12]}...: {str(e)}")
+        logger.error(f"Error auto-generating FINAL preview for case {token[:12]}...: {str(e)}")
         return False
 
 
