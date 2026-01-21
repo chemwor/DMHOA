@@ -2371,11 +2371,14 @@ with clear wording, proper procedure, and minimal risk — now that the case is 
 
         # 6) Save assistant message to database
         try:
+            # NEW: Apply markdown formatter to clean the response
+            formatted_response = format_plain_text_response(assistant_text)
+
             assistant_message_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
             assistant_message_data = {
                 'token': token,
                 'role': 'assistant',
-                'content': assistant_text
+                'content': formatted_response
             }
             assistant_message_headers = supabase_headers()
             assistant_message_headers['Prefer'] = 'return=representation'
@@ -2403,6 +2406,32 @@ with clear wording, proper procedure, and minimal risk — now that the case is 
         error_msg = f"Error sending message: {str(e)}"
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
+
+
+def format_plain_text_response(text: str) -> str:
+    """Remove markdown formatting symbols from AI response text."""
+    if not text:
+        return text
+
+    # Remove bold markdown (**text**)
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+
+    # Remove italic markdown (*text*)
+    text = re.sub(r'(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)', r'\1', text)
+
+    # Remove bullet points made with dashes (- item)
+    text = re.sub(r'^[\s]*-[\s]+', '', text, flags=re.MULTILINE)
+
+    # Remove bullet points made with asterisks (* item)
+    text = re.sub(r'^[\s]*\*[\s]+', '', text, flags=re.MULTILINE)
+
+    # Clean up any double spaces that might result from removals
+    text = re.sub(r'  +', ' ', text)
+
+    # Clean up any multiple newlines
+    text = re.sub(r'\n\n\n+', '\n\n', text)
+
+    return text.strip()
 
 
 def fetch_case_outputs(token: str) -> Optional[Dict]:
