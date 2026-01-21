@@ -2609,7 +2609,8 @@ def stripe_webhook():
         # Create case output record with preview data
         case_output_success = False
         try:
-            case_url = f"{SITE_URL}/case/{case_token}"
+            # Use the correct URL format for the case access
+            case_url = f"{SITE_URL}/case.html?case={token}&session_id={{CHECKOUT_SESSION_ID}}"
 
             # Get the active preview for this case (if case update succeeded)
             preview = None
@@ -2656,7 +2657,7 @@ def stripe_webhook():
         email_sent = False
         try:
             if customer_email:
-                case_url = f"{SITE_URL}/case/{case_token}"
+                case_url = f"{SITE_URL}/case.html?case={token}&session_id={{CHECKOUT_SESSION_ID}}"
 
                 email_sent = send_receipt_email(
                     token=case_token,
