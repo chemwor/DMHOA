@@ -1440,7 +1440,7 @@ RULES:
 
 
 def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
-    """Automatically generate case preview - immediate or deferred based on document status."""
+    """Automatically generate case preview - only final version when documents are ready."""
     try:
         # NEW: Use improved concurrency guard to prevent duplicate active previews
         if not force_regenerate and not upsert_active_preview_lock(case_id):
@@ -1462,25 +1462,31 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
             # Check existing preview
             existing_preview = read_active_preview(case_id)
 
-            # Determine if we need to generate/upgrade preview
+            # NEW: Only generate preview when documents are ready OR no documents exist
+            # Skip preliminary previews when documents are still processing
             should_generate = False
-            preview_type = "preliminary"
+            preview_type = "final"
+
+            if has_processing_documents and not force_regenerate:
+                # Documents are still processing - don't generate preliminary preview
+                logger.info(f"Documents still processing for case {token[:12]}... - waiting for final preview")
+                return True  # Return success but don't generate preview yet
 
             if not existing_preview:
-                # No preview exists - always generate
+                # No preview exists - generate based on available data
                 should_generate = True
-                logger.info(f"No preview exists for case {token[:12]}... - generating new preview")
+                logger.info(f"No preview exists for case {token[:12]}... - generating final preview")
             elif force_regenerate:
                 # Forced regeneration
                 should_generate = True
                 logger.info(f"Force regenerating preview for case {token[:12]}...")
             else:
-                # Check if we can upgrade from preliminary to full
+                # Check if we can upgrade from basic to full with documents
                 existing_content = existing_preview.get('preview_content', {})
                 existing_doc_summary = existing_content.get('doc_summary', {})
                 existing_doc_status = existing_doc_summary.get('doc_status', 'none')
 
-                if documents and existing_doc_status in ['none', 'processing']:
+                if documents and existing_doc_status in ['none']:
                     # We have ready documents but existing preview doesn't - upgrade to full
                     should_generate = True
                     preview_type = "upgrade"
@@ -1496,26 +1502,13 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
             preview_json = None
             if documents:
                 # Documents are ready - generate full preview with document analysis
-                logger.info(f"Generating full preview with {len(documents)} ready documents for case {token[:12]}...")
+                logger.info(f"Generating final preview with {len(documents)} ready documents for case {token[:12]}...")
                 doc_brief = build_doc_brief(documents)
                 preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_openai(case, doc_brief)
-                preview_type = "full"
-
-            elif has_processing_documents:
-                # Documents are still processing - generate preliminary preview
-                logger.info(f"Documents still processing for case {token[:12]}... - generating preliminary preview")
-                doc_brief = {
-                    "doc_status": "processing",
-                    "doc_count": len(all_documents),
-                    "sources": [],
-                    "brief_text": "Documents are currently being processed and analyzed."
-                }
-                preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
-                preview_type = "preliminary"
-
+                preview_type = "final_with_docs"
             else:
-                # No documents at all - generate basic preview
-                logger.info(f"No documents found for case {token[:12]}... - generating basic preview")
+                # No documents at all - generate basic preview (this is still "final" since no docs expected)
+                logger.info(f"No documents found for case {token[:12]}... - generating final basic preview")
                 doc_brief = {
                     "doc_status": "none",
                     "doc_count": 0,
@@ -1523,7 +1516,7 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                     "brief_text": "No documents have been uploaded for analysis."
                 }
                 preview_text, token_usage, latency_ms, preview_json = generate_preview_without_documents(case)
-                preview_type = "basic"
+                preview_type = "final_basic"
 
             # Save preview (this will deactivate existing ones automatically)
             success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms, preview_json)
@@ -1934,8 +1927,31 @@ def get_case_preview(case_id):
 
         logger.info(f"Fetching preview for case ID: {case_id}")
 
+        # Get the case to check token for document status
+        case = read_case_by_id(case_id)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        token = case.get('token')
+
+        # Check document processing status
+        all_documents = fetch_any_documents_status_by_token(token)
+        has_processing_documents = any(doc.get('status') in ['pending', 'processing'] for doc in all_documents)
+
         # Get the active preview from database
         preview_data = read_active_preview(case_id)
+
+        # NEW: If documents are processing and no preview exists, return waiting state
+        if has_processing_documents and not preview_data:
+            logger.info(f"Documents still processing for case {case_id}, no preview yet - returning waiting state")
+            return jsonify({
+                'status': 'waiting',
+                'message': 'Your documents are being analyzed. The final preview will be ready shortly.',
+                'case_id': case_id,
+                'doc_status': 'processing',
+                'processing_documents': len([doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]),
+                'estimated_time_remaining': '2-3 minutes'
+            }), 202  # 202 Accepted indicates processing
 
         if not preview_data:
             return jsonify({
@@ -1949,6 +1965,7 @@ def get_case_preview(case_id):
 
         # Build frontend response with all the data the frontend needs
         frontend_response = {
+            'status': 'ready',  # NEW: Indicate preview is ready
             'case_id': case_id,
             'preview_id': preview_data.get('id'),
             'preview_snippet': preview_data.get('preview_snippet'),
