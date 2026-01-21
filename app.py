@@ -2559,60 +2559,62 @@ def stripe_webhook():
         logger.info(f"Processing payment for case_token: {case_token[:8]}..., email: {customer_email}")
 
         # Update case status to 'paid'
+        case_update_success = False
         try:
             case = read_case_by_token(case_token)
             if not case:
                 logger.error(f"Case not found for token {case_token[:8]}...")
-                return jsonify({'error': 'Case not found'}), 404
+                # Don't return error here - continue with other operations
+            else:
+                case_id = case.get('id')
+                logger.info(f"Updating case status for case_id: {case_id}, case_token: {case_token[:8]}...")
 
-            case_id = case.get('id')
-            logger.info(f"Updating case status for case_id: {case_id}, case_token: {case_token[:8]}...")
+                # Update case status with proper error handling
+                update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+                update_params = {'id': f'eq.{case_id}'}
+                update_headers = supabase_headers()
+                update_headers['Prefer'] = 'return=representation'
 
-            # Update case status with proper error handling
-            update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            update_params = {'id': f'eq.{case_id}'}
-            update_headers = supabase_headers()
-            update_headers['Prefer'] = 'return=representation'
+                update_data = {
+                    'status': 'paid'
+                    # Removed stripe_session_id since column doesn't exist in dmhoa_cases table
+                }
 
-            update_data = {
-                'status': 'paid',
-                'stripe_session_id': session['id']
-            }
+                # Also update email if we have it from Stripe and it wasn't already set
+                if customer_email and not case.get('email'):
+                    update_data['email'] = customer_email
 
-            # Also update email if we have it from Stripe and it wasn't already set
-            if customer_email and not case.get('email'):
-                update_data['email'] = customer_email
+                logger.info(f"Sending update to Supabase: {update_data}")
 
-            logger.info(f"Sending update to Supabase: {update_data}")
+                update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                               json=update_data, timeout=TIMEOUT)
 
-            update_response = requests.patch(update_url, params=update_params, headers=update_headers,
-                                           json=update_data, timeout=TIMEOUT)
+                # Log response details for debugging
+                logger.info(f"Supabase update response: {update_response.status_code}")
+                logger.info(f"Supabase response body: {update_response.text}")
 
-            # Log response details for debugging
-            logger.info(f"Supabase update response: {update_response.status_code}")
-            logger.info(f"Supabase response body: {update_response.text}")
-
-            if update_response.status_code != 200:
-                logger.error(f"Supabase error details: {update_response.status_code} - {update_response.text}")
-                return jsonify({'error': f'Failed to update case status: {update_response.status_code}'}), 500
-
-            update_response.raise_for_status()
-
-            logger.info(f"Successfully updated case status to 'paid' for case {case_id}")
+                if update_response.status_code == 200:
+                    update_response.raise_for_status()
+                    logger.info(f"Successfully updated case status to 'paid' for case {case_id}")
+                    case_update_success = True
+                else:
+                    logger.error(f"Supabase error details: {update_response.status_code} - {update_response.text}")
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"HTTP error updating case status: {e.response.status_code} - {e.response.text if hasattr(e, 'response') else str(e)}")
-            return jsonify({'error': f'Failed to update case status: HTTP {e.response.status_code}'}), 500
         except Exception as e:
             logger.error(f"Failed to update case status: {str(e)}")
-            return jsonify({'error': 'Failed to update case status'}), 500
 
+        # Continue with case output generation and email sending even if case update failed
         # Create case output record with preview data
+        case_output_success = False
         try:
             case_url = f"{SITE_URL}/case/{case_token}"
 
-            # Get the active preview for this case
-            preview = read_active_preview(case_id)
+            # Get the active preview for this case (if case update succeeded)
+            preview = None
+            if case_update_success and case_id:
+                preview = read_active_preview(case_id)
 
             # Prepare outputs data with preview information
             outputs_data = {
@@ -2642,16 +2644,16 @@ def stripe_webhook():
             # Insert into dmhoa_case_outputs table
             success = insert_case_output(case_output_data)
             if success:
-                logger.info(f"Successfully created case output for case {case_id}, session {session['id']}")
+                logger.info(f"Successfully created case output for case_token {case_token[:8]}..., session {session['id']}")
+                case_output_success = True
             else:
-                logger.error(f"Failed to create case output for case {case_id}")
-                # Don't return error here as payment was successful
+                logger.error(f"Failed to create case output for case_token {case_token[:8]}...")
 
         except Exception as e:
             logger.error(f"Error creating case output: {str(e)}")
-            # Don't return error here as payment was successful
 
-        # Send receipt email
+        # Send receipt email - always attempt this regardless of other operations
+        email_sent = False
         try:
             if customer_email:
                 case_url = f"{SITE_URL}/case/{case_token}"
@@ -2669,14 +2671,17 @@ def stripe_webhook():
                 if email_sent:
                     logger.info(f"Receipt email sent successfully to {customer_email}")
                 else:
-                    logger.warning(f"Failed to send receipt email to {customer_email}")
+                    logger.warning(f"Failed to send receipt email to {customer_email} - check SMTP configuration")
             else:
                 logger.warning("No customer email available for receipt")
 
         except Exception as e:
             logger.error(f"Error sending receipt email: {str(e)}")
-            # Don't return error here as payment was successful
 
+        # Log summary of all operations
+        logger.info(f"Payment processing summary for {case_token[:8]}... - Case update: {case_update_success}, Case output: {case_output_success}, Email sent: {email_sent}")
+
+        # Always return success for Stripe webhook since payment was processed
         return jsonify({'status': 'success'}), 200
 
     else:
