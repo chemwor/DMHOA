@@ -1548,140 +1548,118 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
 
 
 
-@app.route('/webhooks/generate-preview', methods=['POST'])
-def generate_preview_webhook():
-    """Webhook endpoint to generate case preview - can be called after case creation."""
-    # Validate webhook secret
-    webhook_secret = request.headers.get('X-Webhook-Secret')
-    if not webhook_secret or webhook_secret != DOC_EXTRACT_WEBHOOK_SECRET:
-        logger.warning("Invalid or missing webhook secret for generate-preview")
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    try:
-        # Parse JSON body
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Invalid JSON body'}), 400
-
-        # Validate required fields
-        token = data.get('token')
-        case_id = data.get('case_id')
-
-        if not token:
-            return jsonify({'error': 'Missing required field: token'}), 400
-
-        logger.info(f"Generating preview for case - Token: {token[:8]}..., Case ID: {case_id}")
-
-        # If case_id not provided, look it up by token
-        if not case_id:
-            case = read_case_by_token(token)
-            if not case:
-                return jsonify({'error': 'Case not found for token'}), 404
-            case_id = case.get('id')
-            if not case_id:
-                return jsonify({'error': 'Case ID not found'}), 404
-
-        # Generate preview
-        success = auto_generate_case_preview(token, case_id)
-
-        if success:
-            return jsonify({
-                'message': 'Preview generated successfully',
-                'token': token,
-                'case_id': case_id
-            }), 200
-        else:
-            return jsonify({
-                'error': 'Failed to generate preview',
-                'token': token,
-                'case_id': case_id
-            }), 500
-
-    except Exception as e:
-        error_msg = f"Unexpected error generating preview: {str(e)}"
-        logger.error(error_msg)
-        return jsonify({'error': error_msg}), 500
-
-
-def schedule_delayed_preview_generation(token: str, case_id: str, delay_seconds: int = 30):
-    """Schedule preview generation with a delay to allow documents to be uploaded and processed."""
-    def delayed_preview():
-        time.sleep(delay_seconds)
-        try:
-            logger.info(f"Executing delayed preview generation for case {token[:8]}...")
-            success = auto_generate_case_preview(token, case_id)
-            if success:
-                logger.info(f"Delayed preview generation successful for case {token[:8]}...")
-            else:
-                logger.warning(f"Delayed preview generation failed for case {token[:8]}...")
-        except Exception as e:
-            logger.error(f"Error in delayed preview generation for case {token[:8]}...: {str(e)}")
-
-    # Start the delayed task in a background thread
-    thread = threading.Thread(target=delayed_preview, daemon=True)
-    thread.start()
-    logger.info(f"Scheduled delayed preview generation for case {token[:8]}... in {delay_seconds} seconds")
+# @app.route('/webhooks/generate-preview', methods=['POST'])
+# def generate_preview_webhook():
+#     """Webhook endpoint to generate case preview - can be called after case creation."""
+#     # Validate webhook secret
+#     webhook_secret = request.headers.get('X-Webhook-Secret')
+#     if not webhook_secret or webhook_secret != DOC_EXTRACT_WEBHOOK_SECRET:
+#         logger.warning("Invalid or missing webhook secret for generate-preview")
+#         return jsonify({'error': 'Unauthorized'}), 401
+#
+#     try:
+#         # Parse JSON body
+#         data = request.get_json()
+#         if not data:
+#             return jsonify({'error': 'Invalid JSON body'}), 400
+#
+#         # Validate required fields
+#         token = data.get('token')
+#         case_id = data.get('case_id')
+#
+#         if not token:
+#             return jsonify({'error': 'Missing required field: token'}), 400
+#
+#         logger.info(f"Generating preview for case - Token: {token[:8]}..., Case ID: {case_id}")
+#
+#         # If case_id not provided, look it up by token
+#         if not case_id:
+#             case = read_case_by_token(token)
+#             if not case:
+#                 return jsonify({'error': 'Case not found for token'}), 404
+#             case_id = case.get('id')
+#             if not case_id:
+#                 return jsonify({'error': 'Case ID not found'}), 404
+#
+#         # Generate preview
+#         success = auto_generate_case_preview(token, case_id)
+#
+#         if success:
+#             return jsonify({
+#                 'message': 'Preview generated successfully',
+#                 'token': token,
+#                 'case_id': case_id
+#             }), 200
+#         else:
+#             return jsonify({
+#                 'error': 'Failed to generate preview',
+#                 'token': token,
+#                 'case_id': case_id
+#             }), 500
+#
+#     except Exception as e:
+#         error_msg = f"Unexpected error generating preview: {str(e)}"
+#         logger.error(error_msg)
+#         return jsonify({'error': error_msg}), 500
 
 
-@app.route('/webhooks/case-created', methods=['POST'])
-def case_created_webhook():
-    """Webhook to handle case creation and trigger initial preview generation."""
-    # Validate webhook secret
-    webhook_secret = request.headers.get('X-Webhook-Secret')
-    if not webhook_secret or webhook_secret != DOC_EXTRACT_WEBHOOK_SECRET:
-        logger.warning("Invalid or missing webhook secret for case-created")
-        return jsonify({'error': 'Unauthorized'}), 401
 
-    try:
-        # Parse JSON body
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Invalid JSON body'}), 400
-
-        token = data.get('token')
-        case_id = data.get('case_id')
-
-        if not token:
-            return jsonify({'error': 'Missing required field: token'}), 400
-
-        logger.info(f"Case created - Token: {token[:8]}..., Case ID: {case_id}")
-
-        # If case_id not provided, look it up by token
-        if not case_id:
-            case = read_case_by_token(token)
-            if not case:
-                return jsonify({'error': 'Case not found for token'}), 404
-            case_id = case.get('id')
-
-        # Generate immediate preview
-        immediate_success = auto_generate_case_preview(token, case_id)
-
-        # Check if there are any documents that might need processing
-        all_documents = fetch_any_documents_status_by_token(token)
-        pending_or_processing_docs = [doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]
-
-        # Only schedule delayed jobs if there are documents that might become ready
-        if pending_or_processing_docs:
-            logger.info(f"Found {len(pending_or_processing_docs)} pending/processing documents - scheduling delayed preview generations")
-            # Delayed: Give time for documents to be uploaded and processed, then regenerate
-            schedule_delayed_preview_generation(token, case_id, delay_seconds=60)
-            # Also schedule a longer delay for cases where document processing might take longer
-            schedule_delayed_preview_generation(token, case_id, delay_seconds=300)  # 5 minutes
-        else:
-            logger.info(f"No pending/processing documents found - skipping delayed preview generations")
-
-        return jsonify({
-            'message': 'Case creation handled and preview generation scheduled',
-            'token': token,
-            'case_id': case_id,
-            'immediate_preview': immediate_success,
-            'delayed_jobs_scheduled': len(pending_or_processing_docs) > 0
-        }), 200
-
-    except Exception as e:
-        error_msg = f"Unexpected error handling case creation: {str(e)}"
-        logger.error(error_msg)
-        return jsonify({'error': error_msg}), 500
+# @app.route('/webhooks/case-created', methods=['POST'])
+# def case_created_webhook():
+#     """Webhook to handle case creation and trigger initial preview generation."""
+#     # Validate webhook secret
+#     webhook_secret = request.headers.get('X-Webhook-Secret')
+#     if not webhook_secret or webhook_secret != DOC_EXTRACT_WEBHOOK_SECRET:
+#         logger.warning("Invalid or missing webhook secret for case-created")
+#         return jsonify({'error': 'Unauthorized'}), 401
+#
+#     try:
+#         # Parse JSON body
+#         data = request.get_json()
+#         if not data:
+#             return jsonify({'error': 'Invalid JSON body'}), 400
+#
+#         token = data.get('token')
+#         case_id = data.get('case_id')
+#
+#         if not token:
+#             return jsonify({'error': 'Missing required field: token'}), 400
+#
+#         logger.info(f"Case created - Token: {token[:8]}..., Case ID: {case_id}")
+#
+#         # If case_id not provided, look it up by token
+#         if not case_id:
+#             case = read_case_by_token(token)
+#             if not case:
+#                 return jsonify({'error': 'Case not found for token'}), 404
+#             case_id = case.get('id')
+#
+#         # Generate immediate preview
+#         immediate_success = auto_generate_case_preview(token, case_id)
+#
+#         # Check if there are any documents that might need processing
+#         all_documents = fetch_any_documents_status_by_token(token)
+#         pending_or_processing_docs = [doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]
+#
+#         # Only schedule delayed jobs if there are documents that might become ready
+#         if pending_or_processing_docs:
+#             logger.info(f"Found {len(pending_or_processing_docs)} pending/processing documents - scheduling delayed preview generations")
+#             # Delayed: Give time for documents to be uploaded and processed, then regenerate
+#         else:
+#             logger.info(f"No pending/processing documents found - skipping delayed preview generations")
+#
+#         return jsonify({
+#             'message': 'Case creation handled and preview generation scheduled',
+#             'token': token,
+#             'case_id': case_id,
+#             'immediate_preview': immediate_success,
+#             'delayed_jobs_scheduled': len(pending_or_processing_docs) > 0
+#         }), 200
+#
+#     except Exception as e:
+#         error_msg = f"Unexpected error handling case creation: {str(e)}"
+#         logger.error(error_msg)
+#         return jsonify({'error': error_msg}), 500
 
 
 def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -1880,8 +1858,6 @@ def save_case():
             if case_id:
                 logger.info(f"Triggering direct preview generation for case {token[:8]}...")
 
-                # Call auto_generate_case_preview directly instead of making HTTP request
-                immediate_success = auto_generate_case_preview(token, case_id, force_regenerate=False)
 
                 # Check if there are any documents that might need processing
                 all_documents = fetch_any_documents_status_by_token(token)
@@ -1890,10 +1866,6 @@ def save_case():
                 # Only schedule delayed jobs if there are documents that might become ready
                 if pending_or_processing_docs:
                     logger.info(f"Found {len(pending_or_processing_docs)} pending/processing documents - scheduling delayed preview generations")
-                    # Delayed: Give time for documents to be uploaded and processed, then regenerate
-                    schedule_delayed_preview_generation(token, case_id, delay_seconds=60)
-                    # Also schedule a longer delay for cases where document processing might take longer
-                    schedule_delayed_preview_generation(token, case_id, delay_seconds=300)  # 5 minutes
                 else:
                     logger.info(f"No pending/processing documents found - skipping delayed preview generations")
 
