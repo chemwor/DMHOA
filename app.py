@@ -2206,6 +2206,7 @@ def get_case_preview_by_token(token):
 @app.route('/api/case-analysis', methods=['POST', 'OPTIONS'])
 def case_analysis():
     """Generate HOA case analysis using OpenAI (converted from Deno/TypeScript code)"""
+    print("We are in the case analysis endpoint now")
 
     # Handle CORS preflight
     if request.method == 'OPTIONS':
