@@ -2587,7 +2587,23 @@ Errors: {errors}"""
                 'outputs': existing_out['outputs']
             }
 
-        # 3) Mark outputs as pending (upsert)
+        # 3) Mark outputs as pending (check if exists first, then update or insert)
+        upsert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+
+        # Check if output row already exists
+        existing_output = None
+        try:
+            check_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            check_params = {'case_token': f'eq.{token}', 'select': 'id,status'}
+            check_headers = supabase_headers()
+            check_response = requests.get(check_url, params=check_params, headers=check_headers, timeout=TIMEOUT)
+            check_response.raise_for_status()
+            existing_outputs = check_response.json()
+            existing_output = existing_outputs[0] if existing_outputs else None
+        except Exception as e:
+            logger.warning(f'Error checking existing outputs: {str(e)}')
+            # Continue anyway - will try insert
+
         pending_data = {
             'case_token': token,
             'status': 'pending',
@@ -2597,13 +2613,22 @@ Errors: {errors}"""
             'updated_at': datetime.utcnow().isoformat()
         }
 
-        upsert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-        upsert_headers = supabase_headers()
-        upsert_headers['Prefer'] = 'resolution=merge-duplicates'
-
         try:
-            upsert_response = requests.post(upsert_url, headers=upsert_headers, json=pending_data, timeout=TIMEOUT)
-            upsert_response.raise_for_status()
+            if existing_output:
+                # Update existing row
+                update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+                update_params = {'case_token': f'eq.{token}'}
+                update_headers = supabase_headers()
+                update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                                 json=pending_data, timeout=TIMEOUT)
+                update_response.raise_for_status()
+                logger.info(f"Updated existing outputs row to pending for token: {token[:8]}...")
+            else:
+                # Insert new row
+                insert_headers = supabase_headers()
+                insert_response = requests.post(upsert_url, headers=insert_headers, json=pending_data, timeout=TIMEOUT)
+                insert_response.raise_for_status()
+                logger.info(f"Inserted new outputs row (pending) for token: {token[:8]}...")
         except Exception as e:
             logger.error(f'Failed to mark outputs pending: {str(e)}')
             return {'ok': False, 'error': f'Failed to mark outputs pending: {str(e)}'}
@@ -2760,7 +2785,11 @@ STYLE:
                     'updated_at': datetime.utcnow().isoformat()
                 }
                 try:
-                    requests.post(upsert_url, headers=upsert_headers, json=error_data, timeout=TIMEOUT)
+                    error_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+                    error_params = {'case_token': f'eq.{token}'}
+                    error_headers = supabase_headers()
+                    requests.patch(error_url, params=error_params, headers=error_headers, json=error_data,
+                                   timeout=TIMEOUT)
                 except Exception:
                     pass  # Best effort
 
@@ -2782,7 +2811,7 @@ STYLE:
                     'doc_fingerprint': doc_fingerprint
                 }
 
-            # Save successful outputs
+            # Save successful outputs (update existing row since we created/updated it earlier)
             success_data = {
                 'case_token': token,
                 'status': 'ready',
@@ -2794,7 +2823,12 @@ STYLE:
             }
 
             try:
-                requests.post(upsert_url, headers=upsert_headers, json=success_data, timeout=TIMEOUT)
+                save_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+                save_params = {'case_token': f'eq.{token}'}
+                save_headers = supabase_headers()
+                save_response = requests.patch(save_url, params=save_params, headers=save_headers, json=success_data,
+                                               timeout=TIMEOUT)
+                save_response.raise_for_status()
                 logger.info(f"Successfully saved case outputs for token: {token[:8]}...")
             except Exception as e:
                 logger.error(f'Failed saving outputs: {str(e)}')
