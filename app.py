@@ -2587,56 +2587,10 @@ Errors: {errors}"""
                 'outputs': existing_out['outputs']
             }
 
-        # 3) Mark outputs as pending (check if exists first, then update or insert)
-        upsert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-
-        # Check if output row already exists
-        existing_output = None
-        try:
-            check_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-            check_params = {'case_token': f'eq.{token}', 'select': 'id,status'}
-            check_headers = supabase_headers()
-            check_response = requests.get(check_url, params=check_params, headers=check_headers, timeout=TIMEOUT)
-            check_response.raise_for_status()
-            existing_outputs = check_response.json()
-            existing_output = existing_outputs[0] if existing_outputs else None
-        except Exception as e:
-            logger.warning(f'Error checking existing outputs: {str(e)}')
-            # Continue anyway - will try insert
-
-        pending_data = {
-            'case_token': token,
-            'status': 'pending',
-            'error': None,
-            'model': 'gpt-4o-mini',
-            'prompt_version': 'v3_docs_cache_invalidation',
-            'updated_at': datetime.utcnow().isoformat()
-        }
-
-        try:
-            if existing_output:
-                # Update existing row
-                update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-                update_params = {'case_token': f'eq.{token}'}
-                update_headers = supabase_headers()
-                update_response = requests.patch(update_url, params=update_params, headers=update_headers,
-                                                 json=pending_data, timeout=TIMEOUT)
-                update_response.raise_for_status()
-                logger.info(f"Updated existing outputs row to pending for token: {token[:8]}...")
-            else:
-                # Insert new row
-                insert_headers = supabase_headers()
-                insert_response = requests.post(upsert_url, headers=insert_headers, json=pending_data, timeout=TIMEOUT)
-                insert_response.raise_for_status()
-                logger.info(f"Inserted new outputs row (pending) for token: {token[:8]}...")
-        except Exception as e:
-            logger.error(f'Failed to mark outputs pending: {str(e)}')
-            return {'ok': False, 'error': f'Failed to mark outputs pending: {str(e)}'}
-
         payload = case_row.get('payload') or {}
         draft_titles = get_draft_titles(payload)
 
-        # 4) OpenAI Responses API call (strict JSON schema)
+        # 3) OpenAI Responses API call (strict JSON schema)
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -2831,7 +2785,7 @@ STYLE:
                 save_response.raise_for_status()
                 logger.info(f"Successfully saved case outputs for token: {token[:8]}...")
             except Exception as e:
-                logger.error(f'Failed saving outputs: {str(e)}')
+                logger.error(f'Failed to save outputs: {str(e)}')
                 return {'ok': False, 'error': f'Failed saving outputs: {str(e)}'}
 
             # Update case updated_at timestamp
@@ -3729,7 +3683,7 @@ def create_checkout_session():
         # Create Stripe checkout session
         try:
             # Use the correct frontend URL with the proper format
-            frontend_url = "https://dmhoadev.netlify.app"  # Updated to match your dev environment
+            frontend_url = "https://disputemyhoa.com"  # Updated to match your dev environment
 
             checkout_session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
@@ -3879,3 +3833,4 @@ This email confirms your payment and provides access to your case. Keep this ema
 
 if __name__ == '__main__':
     app.run(debug=True)
+
