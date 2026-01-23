@@ -254,11 +254,24 @@ Make this feel like a $30 deliverable: concrete, specific, complete."""
 
         except Exception as e:
             logger.error(f"Error in post-payment case analysis for token {token[:8]}...: {str(e)}")
+            # Update status to error so it's not stuck at pending
+            try:
+                error_data = {
+                    'case_token': token,
+                    'status': 'error',
+                    'error': str(e)[:500],  # Truncate long errors
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                upsert_url_err = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+                upsert_headers_err = supabase_headers()
+                upsert_headers_err['Prefer'] = 'resolution=merge-duplicates'
+                requests.post(upsert_url_err, headers=upsert_headers_err, json=error_data, timeout=TIMEOUT)
+                logger.info(f"Updated case outputs status to 'error' for token {token[:8]}...")
+            except Exception as db_err:
+                logger.error(f"Failed to update error status in DB: {str(db_err)}")
 
     # Run in background thread
     analysis_thread = threading.Thread(target=run_analysis)
     analysis_thread.daemon = True
     analysis_thread.start()
     logger.info(f"Started background case analysis thread for token {token[:8]}...")
-
-
