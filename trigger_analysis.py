@@ -1,8 +1,3 @@
-"""
-Helper function to trigger case analysis after payment.
-This will be integrated into app.py
-"""
-
 def trigger_case_analysis_after_payment(token: str):
     """
     Trigger case analysis generation in a background thread after payment.
@@ -13,14 +8,14 @@ def trigger_case_analysis_after_payment(token: str):
             logger.info(f"Starting case analysis generation for token {token[:8]}... after payment")
 
             # 1) Ensure case exists and is unlocked/paid
-            case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            case_url_local = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             case_params = {
                 'token': f'eq.{token}',
                 'select': 'token,unlocked,status,payload'
             }
             case_headers_local = supabase_headers()
 
-            case_response = requests.get(case_url, params=case_params, headers=case_headers_local, timeout=TIMEOUT)
+            case_response = requests.get(case_url_local, params=case_params, headers=case_headers_local, timeout=TIMEOUT)
             case_response.raise_for_status()
             cases = case_response.json()
             case_row = cases[0] if cases else None
@@ -49,7 +44,6 @@ def trigger_case_analysis_after_payment(token: str):
 
             docs_newest = newest_updated_at(docs)
 
-            # Consider usable if it has text
             usable_docs = [
                 d for d in docs
                 if isinstance(d.get('extracted_text'), str) and d['extracted_text'].strip()
@@ -66,10 +60,7 @@ def trigger_case_analysis_after_payment(token: str):
             else:
                 statuses = ', '.join([d.get('status', 'unknown') for d in docs]) or 'none'
                 errors = ' | '.join([d.get('error', '') for d in docs if d.get('error')])[:100] or 'none'
-                docs_block = f"""No document text available yet.
-Docs found: {len(docs)}
-Statuses: {statuses}
-Errors: {errors}"""
+                docs_block = f"No document text available yet.\nDocs found: {len(docs)}\nStatuses: {statuses}\nErrors: {errors}"
 
             # 3) Check if outputs already exist
             outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
@@ -90,10 +81,9 @@ Errors: {errors}"""
                 datetime.fromisoformat(docs_newest) > datetime.fromisoformat(out_updated)
             )
 
-            # If we already have ready outputs and docs haven't changed, skip
             if (existing_out and existing_out.get('status') == 'ready' and
                 existing_out.get('outputs') and not docs_are_newer):
-                logger.info(f"Case outputs already exist and are current for token {token[:8]}..., skipping generation")
+                logger.info(f"Case outputs already exist for token {token[:8]}..., skipping generation")
                 return
 
             # 4) Mark outputs as pending (upsert)
@@ -102,7 +92,7 @@ Errors: {errors}"""
                 'status': 'pending',
                 'error': None,
                 'model': 'gpt-4o-mini',
-                'prompt_version': 'v3_docs_cache_invalidation',
+                'prompt_version': 'v3_post_payment_auto',
                 'updated_at': datetime.utcnow().isoformat()
             }
 
@@ -116,7 +106,7 @@ Errors: {errors}"""
             payload = case_row.get('payload') or {}
             draft_titles = get_draft_titles(payload)
 
-            # 5) OpenAI Responses API call (strict JSON schema)
+            # 5) OpenAI API call
             schema = {
                 "type": "object",
                 "additionalProperties": False,
@@ -171,60 +161,31 @@ Errors: {errors}"""
                 'charCounts': [d.get('char_count') for d in docs]
             }
 
+            system_content = """You generate HOA dispute assistance for a homeowner. This is educational drafting help, not legal advice.
+OUTPUT RULES: ONLY summary_html may contain HTML using <div>, <strong>, <ul>, <li>. ALL drafts MUST be PLAIN TEXT ONLY with newlines.
+DRAFT QUALITY: Each draft must be complete, ready-to-send. Include Subject line, opening, 3-6 bullet requests, timeline, closing.
+DEPTH: action_plan >= 6 steps, risks >= 3, questions_to_ask >= 6, lowest_cost_path >= 4.
+STYLE: Calm, professional, firm, factual."""
+
+            user_content = f"""Case payload JSON:
+{json.dumps(payload)}
+
+Document fingerprint:
+{json.dumps(doc_fingerprint)}
+
+Extracted documents:
+{docs_block}
+
+Draft types:
+- drafts.clarification: "{draft_titles['clarification']}"
+- drafts.extension: "{draft_titles['extension']}"
+- drafts.compliance: "{draft_titles['compliance']}"
+
+Make this feel like a $30 deliverable: concrete, specific, complete."""
+
             messages = [
-                {
-                    "role": "system",
-                    "content": """
-You generate HOA dispute assistance for a homeowner.
-This is educational drafting help, not legal advice.
-
-OUTPUT RULES (CRITICAL):
-- ONLY "summary_html" may contain HTML.
-- summary_html must be valid HTML using ONLY: <div>, <strong>, <ul>, <li>.
-- ALL drafts (clarification/extension/compliance) MUST be PLAIN TEXT ONLY:
-  - NO HTML tags
-  - Use newlines with \\n
-  - Bullets: use "- item" lines
-- Return STRICT JSON that matches the schema exactly.
-
-DRAFT QUALITY REQUIREMENTS:
-- Each draft must be a complete, ready-to-send letter.
-- MUST directly quote or reference concrete facts from the extracted documents when available
-  (deadlines, email addresses, paragraph citations, dollar amounts, dates, etc.).
-- Each must include:
-  - Subject line
-  - Short opening
-  - 3-6 bullet-point requests (specific asks)
-  - Proposed timeline (e.g., "Please respond within 10 business days" if no deadline is provided)
-  - Request fines/penalties be paused/waived while pending (when relevant)
-  - Closing requesting confirmation in writing
-
-DEPTH REQUIREMENTS:
-- action_plan >= 6 steps with timing hints (Today / 48 hours / Before deadline).
-- risks >= 3 concrete risks tied to HOA enforcement.
-- questions_to_ask >= 6 questions.
-- lowest_cost_path >= 4 items.
-
-STYLE:
-- Calm, professional, firm, factual.
-"""
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Case payload JSON:\n{json.dumps(payload)}\n\n"
-                        f"Document fingerprint (debug):\n{json.dumps(doc_fingerprint)}\n\n"
-                        f"Extracted documents:\n{docs_block}\n\n"
-                        f"Draft types for this case (MUST follow exactly):\n"
-                        f"- drafts.clarification MUST be: \"{draft_titles['clarification']}\"\n"
-                        f"- drafts.extension MUST be: \"{draft_titles['extension']}\"\n"
-                        f"- drafts.compliance MUST be: \"{draft_titles['compliance']}\"\n\n"
-                        f"Also include draft_titles using these exact same strings.\n\n"
-                        f"summary_html must be valid HTML using ONLY: <div>, <strong>, <ul>, <li>.\n"
-                        f"Drafts must be PLAIN TEXT ONLY with \\n, and must NOT include any HTML tags.\n\n"
-                        f"Make this feel like a $30 deliverable: concrete, specific, complete.\n"
-                    )
-                }
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}
             ]
 
             openai_payload = {
@@ -240,7 +201,6 @@ STYLE:
                 }
             }
 
-            # Make OpenAI API call
             openai_response = requests.post(
                 'https://api.openai.com/v1/responses',
                 headers={
@@ -253,9 +213,7 @@ STYLE:
 
             if not openai_response.ok:
                 error_text = openai_response.text
-                logger.error(f'OpenAI call failed during post-payment analysis: {openai_response.status_code}, {error_text}')
-
-                # Update outputs table with error
+                logger.error(f'OpenAI call failed: {openai_response.status_code}, {error_text}')
                 error_data = {
                     'case_token': token,
                     'status': 'error',
@@ -281,38 +239,26 @@ STYLE:
                     'doc_fingerprint': doc_fingerprint
                 }
 
-            # Save successful outputs
             success_data = {
                 'case_token': token,
                 'status': 'ready',
                 'outputs': outputs_to_store,
                 'error': None,
                 'model': 'gpt-4o-mini',
-                'prompt_version': 'v3_docs_cache_invalidation',
+                'prompt_version': 'v3_post_payment_auto',
                 'updated_at': datetime.utcnow().isoformat()
             }
 
             requests.post(upsert_url, headers=upsert_headers_local, json=success_data, timeout=TIMEOUT)
-
-            # Update case updated_at timestamp
-            try:
-                case_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-                case_update_params = {'token': f'eq.{token}'}
-                case_update_data = {'updated_at': datetime.utcnow().isoformat()}
-                case_update_headers_local = supabase_headers()
-                requests.patch(case_update_url, params=case_update_params,
-                             headers=case_update_headers_local, json=case_update_data, timeout=TIMEOUT)
-            except Exception:
-                pass  # Best effort
-
             logger.info(f"Successfully generated case analysis for token {token[:8]}... after payment")
 
         except Exception as e:
             logger.error(f"Error in post-payment case analysis for token {token[:8]}...: {str(e)}")
 
-    # Run in background thread so we don't block the webhook response
+    # Run in background thread
     analysis_thread = threading.Thread(target=run_analysis)
     analysis_thread.daemon = True
     analysis_thread.start()
     logger.info(f"Started background case analysis thread for token {token[:8]}...")
+
 

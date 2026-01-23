@@ -2501,74 +2501,1038 @@ STYLE:
         }
 
         # Make OpenAI API call
-        openai_response = requests.post(
-            'https://api.openai.com/v1/responses',
-            headers={
-                'Authorization': f'Bearer {OPENAI_API_KEY}',
-                'Content-Type': 'application/json'
-            },
-            json=openai_payload,
-            timeout=(10, 120)  # 10s connect, 120s read
-        )
+        try:
+            openai_response = requests.post(
+                'https://api.openai.com/v1/responses',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json=openai_payload,
+                timeout=(10, 120)  # 10s connect, 120s read
+            )
 
-        if not openai_response.ok:
-            error_text = openai_response.text
-            logger.error(f"OpenAI call failed during post-payment analysis: {openai_response.status_code}, {error_text}")
+            if not openai_response.ok:
+                error_text = openai_response.text
+                logger.error('OpenAI call failed', extra={'status': openai_response.status_code, 'error': error_text})
 
-            # Update outputs table with error
-            error_data = {
+                # Update outputs table with error
+                error_data = {
+                    'case_token': token,
+                    'status': 'error',
+                    'error': error_text or 'OpenAI call failed',
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                try:
+                    requests.post(upsert_url, headers=upsert_headers, json=error_data, timeout=TIMEOUT)
+                except Exception:
+                    pass  # Best effort
+
+                response = jsonify({'error': 'OpenAI call failed', 'details': error_text})
+                return add_cors_headers(response), 500
+
+            openai_json = openai_response.json()
+            structured = extract_structured_result(openai_json)
+
+            if structured:
+                outputs_to_store = {
+                    **structured,
+                    'draft_titles': structured.get('draft_titles', draft_titles),
+                    'doc_fingerprint': doc_fingerprint  # helpful for debugging what it saw
+                }
+            else:
+                outputs_to_store = {
+                    'raw': openai_json,
+                    'draft_titles': draft_titles,
+                    'doc_fingerprint': doc_fingerprint
+                }
+
+            # Save successful outputs
+            success_data = {
                 'case_token': token,
-                'status': 'error',
-                'error': error_text or 'OpenAI call failed',
+                'status': 'ready',
+                'outputs': outputs_to_store,
+                'error': None,
+                'model': 'gpt-4o-mini',
+                'prompt_version': 'v3_docs_cache_invalidation',
                 'updated_at': datetime.utcnow().isoformat()
             }
-            requests.post(upsert_url, headers=upsert_headers_local, json=error_data, timeout=TIMEOUT)
-            return
 
-        openai_json = openai_response.json()
-        structured = extract_structured_result(openai_json)
+            try:
+                requests.post(upsert_url, headers=upsert_headers, json=success_data, timeout=TIMEOUT)
+            except Exception as e:
+                logger.error('Failed saving outputs', extra={'error': str(e)})
+                response = jsonify({'error': 'Failed saving outputs', 'details': str(e)})
+                return add_cors_headers(response), 500
 
-        if structured:
-            outputs_to_store = {
-                **structured,
-                'draft_titles': structured.get('draft_titles', draft_titles),
-                'doc_fingerprint': doc_fingerprint
-            }
-        else:
-            outputs_to_store = {
-                'raw': openai_json,
-                'draft_titles': draft_titles,
-                'doc_fingerprint': doc_fingerprint
-            }
+            # Update case updated_at timestamp
+            try:
+                case_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+                case_update_params = {'token': f'eq.{token}'}
+                case_update_data = {'updated_at': datetime.utcnow().isoformat()}
+                case_update_headers = supabase_headers()
+                requests.patch(case_update_url, params=case_update_params,
+                             headers=case_update_headers, json=case_update_data, timeout=TIMEOUT)
+            except Exception:
+                pass  # Best effort
 
-        # Save successful outputs
-        success_data = {
-            'case_token': token,
-            'status': 'ready',
-            'outputs': outputs_to_store,
-            'error': None,
-            'model': 'gpt-4o-mini',
-            'prompt_version': 'v3_docs_cache_invalidation',
-            'updated_at': datetime.utcnow().isoformat()
-        }
+            response = jsonify({
+                'ok': True,
+                'status': 'ready',
+                'cached': False,
+                'outputs': outputs_to_store
+            })
+            return add_cors_headers(response), 200
 
-        requests.post(upsert_url, headers=upsert_headers_local, json=success_data, timeout=TIMEOUT)
-
-        # Update case updated_at timestamp
-        try:
-            case_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-            case_update_params = {'token': f'eq.{token}'}
-            case_update_data = {'updated_at': datetime.utcnow().isoformat()}
-            case_update_headers_local = supabase_headers()
-            requests.patch(case_update_url, params=case_update_params,
-                         headers=case_update_headers_local, json=case_update_data, timeout=TIMEOUT)
-        except Exception:
-            pass  # Best effort
-
-        logger.info(f"Successfully generated case analysis for token {token[:8]}... after payment")
+        except Exception as e:
+            logger.error('OpenAI API error', extra={'error': str(e)})
+            response = jsonify({'error': 'OpenAI API error', 'details': str(e)})
+            return add_cors_headers(response), 500
 
     except Exception as e:
-        logger.error(f"Error in post-payment case analysis for token {token[:8]}...: {str(e)}")
+        logger.error('case-analysis error', extra={'error': str(e)})
+        response = jsonify({'error': str(e) or 'server error'})
+        return add_cors_headers(response), 500
+
+def get_draft_titles(payload: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Keeps DB keys stable (drafts.clarification/extension/compliance),
+    but changes what those "slots" mean based on the user's selection.
+    """
+    outcome = str(payload.get('outcome', '')).lower()
+
+    titles = {
+        'clarification': 'Request Clarification / Rule Citation',
+        'extension': 'Request Extension / Pause Enforcement',
+        'compliance': 'Confirm Compliance Plan'
+    }
+
+    if outcome == 'clarification':
+        titles = {
+            'clarification': 'Request Clarification / Rule Citation',
+            'extension': 'Request Extension While Clarifying',
+            'compliance': 'Confirm Compliance Plan (If Needed)'
+        }
+    elif outcome == 'extension':
+        titles = {
+            'clarification': 'Request Clarification + Confirm Requirements',
+            'extension': 'Request Extension / New Deadline',
+            'compliance': 'Confirm Compliance Plan + Timeline'
+        }
+    elif outcome == 'alternative':
+        titles = {
+            'clarification': 'Request Approved Options / Standards',
+            'extension': 'Request Temporary Variance / Extra Time',
+            'compliance': 'Propose Alternative Remedy Plan'
+        }
+    elif outcome == 'comply':
+        titles = {
+            'clarification': 'Confirm Requirements Before Starting Work',
+            'extension': 'Request Extra Time to Complete Work',
+            'compliance': 'Confirm Compliance Completion'
+        }
+    elif outcome == 'dispute':
+        titles = {
+            'clarification': 'Formal Dispute / Appeal Letter',
+            'extension': 'Request Hearing Extension / Reschedule',
+            'compliance': 'Evidence Submission Cover Letter'
+        }
+    elif outcome == 'not-sure':
+        titles = {
+            'clarification': 'Request Clarification / Rule Citation',
+            'extension': 'Request Extension to Evaluate Options',
+            'compliance': 'Provisional Compliance Plan (If Required)'
+        }
+
+    return titles
+
+def newest_updated_at(docs: List[Dict[str, Any]]) -> Optional[str]:
+    """Find the newest updated_at timestamp from documents"""
+    newest = None
+    for d in docs:
+        iso = safe_iso(d.get('updated_at'))
+        if not iso:
+            continue
+        if not newest or datetime.fromisoformat(iso) > datetime.fromisoformat(newest):
+            newest = iso
+    return newest
+
+
+def safe_iso(s: Any) -> Optional[str]:
+    """Convert value to ISO string safely"""
+    v = str(s or '').strip()
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(v.replace('Z', '+00:00'))
+        return d.isoformat()
+    except Exception:
+        try:
+            d = datetime.strptime(v, '%Y-%m-%d %H:%M:%S')
+            return d.isoformat()
+        except Exception:
+            return None
+
+@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
+def get_case_data():
+    """Get case data by token for frontend display."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Get token from query parameters
+        token = request.args.get('token', '').strip()
+
+        if not token:
+            return jsonify({'error': 'token is required'}), 400
+
+        logger.info(f"Fetching case data for token: {token[:8]}...")
+
+        # Fetch case data from Supabase
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Also fetch the case outputs (full analysis) if available
+        case_outputs = None
+        try:
+            outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            outputs_params = {
+                'case_token': f'eq.{token}',
+                'select': '*'
+            }
+            outputs_headers = supabase_headers()
+
+            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers, timeout=TIMEOUT)
+            outputs_response.raise_for_status()
+            outputs_data = outputs_response.json()
+
+            if outputs_data:
+                case_outputs = outputs_data[0]
+                logger.info(f"Found case outputs for token {token[:8]}...")
+            else:
+                logger.info(f"No case outputs found for token {token[:8]}...")
+
+        except Exception as e:
+            logger.warning(f"Error fetching case outputs for {token[:8]}...: {str(e)}")
+            # Continue without outputs - not critical
+
+        # Build response with case data and outputs if available
+        response_data = {
+            'token': case.get('token'),
+            'status': case.get('status', 'preview'),
+            'created_at': case.get('created_at'),
+            'updated_at': case.get('updated_at'),
+            'payload': case.get('payload', {}),
+            'outputs': case_outputs.get('outputs') if case_outputs else None,
+            'outputs_status': case_outputs.get('status') if case_outputs else None
+        }
+
+        logger.info(f"Successfully retrieved case data for token {token[:8]}...")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching case data: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+def extract_structured_result(responses_json: Any) -> Optional[Dict[str, Any]]:
+    """Safer JSON extraction from OpenAI Responses API payload"""
+    output = responses_json.get('output') if responses_json else None
+
+    if isinstance(output, list) and len(output) > 0:
+        for item in output:
+            content = item.get('content') if item else None
+
+            if isinstance(content, list):
+                # Look for output_json type first
+                cj = next((c for c in content
+                          if c and c.get('type') == 'output_json' and c.get('json')), None)
+                if not cj:
+                    # Fallback to any content with json
+                    cj = next((c for c in content
+                              if c and c.get('json') and isinstance(c['json'], dict)), None)
+
+                if cj and cj.get('json') and isinstance(cj['json'], dict):
+                    return cj['json']
+
+                # Look for text content to parse as JSON
+                ct = next((c for c in content
+                          if c and c.get('type') == 'output_text' and isinstance(c.get('text'), str)), None)
+                if not ct:
+                    ct = next((c for c in content
+                              if c and isinstance(c.get('text'), str)), None)
+
+                if ct and ct.get('text'):
+                    try:
+                        parsed = json.loads(ct['text'])
+                        if parsed and isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        pass  # ignore parse errors
+
+    return None
+
+@app.route('/api/read-messages', methods=['GET', 'OPTIONS'])
+def read_messages():
+    """Read chat messages for a case."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Get parameters from query string
+        token = request.args.get('token', '').strip()
+        limit_param = request.args.get('limit', '50')
+
+        # Parse and validate limit (min 1, max 200, default 50)
+        try:
+            limit = max(1, min(int(limit_param) or 50, 200))
+        except (ValueError, TypeError):
+            limit = 50
+
+        if not token:
+            return jsonify({'error': 'token is required'}), 400
+
+        logger.info(f"Reading messages for token: {token[:8]}..., limit: {limit}")
+
+        # Check if case exists
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Check if case is paid/unlocked - only return messages if case is paid
+        case_status = case.get('status', 'paid')
+        if case_status != 'paid':
+            # Return empty messages array if case is not paid/unlocked
+            logger.info(f"Case {token[:8]}... not paid, returning empty messages")
+            return jsonify({'ok': True, 'messages': []}), 200
+
+        # Fetch messages for the case from dmhoa_messages table
+        try:
+            messages_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            messages_params = {
+                'token': f'eq.{token}',
+                'select': 'id,token,role,content,created_at',
+                'order': 'created_at.asc',
+                'limit': str(limit)
+            }
+            messages_headers = supabase_headers()
+
+            messages_response = requests.get(messages_url, params=messages_params, headers=messages_headers, timeout=TIMEOUT)
+            messages_response.raise_for_status()
+            messages = messages_response.json()
+
+            logger.info(f"Found {len(messages)} messages for token {token[:8]}...")
+            return jsonify({'ok': True, 'messages': messages or []}), 200
+
+        except Exception as e:
+            logger.error(f'Database error reading messages for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Database error reading messages'}), 500
+
+    except Exception as e:
+        error_msg = f"Error reading messages: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+@app.route('/api/send-message', methods=['POST', 'OPTIONS'])
+def send_message():
+    """Send chat message endpoint for case discussions."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Parse request body
+        try:
+            body = request.get_json() or {}
+        except Exception:
+            body = {}
+
+        token = str(body.get('token', '')).strip()
+        user_content = body.get('content', '').strip()
+
+        if not token or not user_content:
+            return jsonify({'error': 'token and content are required'}), 400
+
+        # Limit user message length
+        if len(user_content) > 1000:
+            user_content = user_content[:1000]
+
+        logger.info(f"Sending message for token: {token[:8]}..., content length: {len(user_content)}")
+
+        # 1) Ensure case exists and is paid/unlocked
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        case_status = case.get('status', 'paid')
+        if case_status != 'paid':
+            return jsonify({'error': 'Case is not unlocked'}), 402
+
+        # 2) Save user message to database
+        try:
+            user_message_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            user_message_data = {
+                'token': token,
+                'role': 'user',
+                'content': user_content
+            }
+            user_message_headers = supabase_headers()
+            user_message_headers['Prefer'] = 'return=representation'
+
+            user_message_response = requests.post(user_message_url, headers=user_message_headers,
+                                                json=user_message_data, timeout=TIMEOUT)
+            user_message_response.raise_for_status()
+            user_message = user_message_response.json()
+            user_message = user_message[0] if user_message else None
+
+        except Exception as e:
+            logger.error(f'Failed to save user message for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Failed to save user message'}), 500
+
+        # 3) Load recent chat history (last 20 messages)
+        try:
+            history_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            history_params = {
+                'token': f'eq.{token}',
+                'select': 'role,content,created_at',
+                'order': 'created_at.asc',
+                'limit': '20'
+            }
+            history_headers = supabase_headers()
+
+            history_response = requests.get(history_url, params=history_params,
+                                          headers=history_headers, timeout=TIMEOUT)
+            history_response.raise_for_status()
+            history = history_response.json() or []
+
+        except Exception as e:
+            logger.error(f'Failed to load chat history for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Failed to load chat history'}), 500
+
+        # 4) Get case payload for context
+        case_payload = case.get('payload', {})
+
+        # 4.5) Get preview information for additional context
+        case_id = case.get('id')
+        preview_info = None
+        if case_id:
+            preview_info = read_active_preview(case_id)
+
+        # 5) Generate AI response using OpenAI Chat Completions API
+        try:
+            system_prompt = """You are “Dispute My HOA,” an educational HOA response assistant.
+This is a paid, unlocked case. The user expects complete guidance and ready-to-use drafts.
+You provide drafting assistance and procedural guidance — not legal advice.
+
+Your role is to help homeowners:
+- Fully understand their HOA violation notice in plain English
+- Identify exact deadlines, risks, and procedural options
+- Draft complete, ready-to-send written responses
+- Choose the lowest-risk path to resolve the issue without escalation
+
+IMPORTANT SAFETY RULES:
+- Do NOT present yourself as a lawyer or provide legal advice
+- Do NOT guarantee outcomes
+- Base guidance strictly on the documents and facts provided
+- If uncertainty exists, explain it clearly and conservatively
+
+ESCALATION & LIABILITY RULES (CRITICAL):
+- Default to NON-ADMISSION language unless the user explicitly requests a compliance or admission letter
+- Avoid phrases such as “I admit,” “I acknowledge the violation,” or similar
+- Preserve the homeowner’s procedural rights whenever possible
+- Flag language or actions that could weaken the homeowner’s position before drafting
+
+DRAFTING RULES:
+- When a letter is requested, produce a complete, ready-to-send plain-text draft
+- Use calm, professional, HOA-appropriate language
+- Avoid emotional, defensive, or aggressive wording
+- Assume all written responses may be reviewed, logged, or used later
+- Clearly label each draft by purpose (clarification, extension, compliance, hearing request)
+
+GUIDANCE RULES:
+- Explain WHEN and WHY to use each response option
+- Recommend the safest sequence of actions when multiple paths exist
+- Highlight deadlines, hearing rights, documentation standards, and delivery methods (email, certified mail, portal)
+- Identify irreversible actions before suggesting them
+
+QUESTION RULES:
+- Ask at most 1–2 clarifying questions
+- Only ask if the answer materially changes the recommended response or wording
+- If documents are incomplete, explain what is missing and proceed using safe assumptions
+
+TONE:
+- Calm
+- Practical
+- Protective of the homeowner
+- Clear and confident, but not authoritative
+
+FORMATTING:
+- Use clean paragraphs and numbered lists
+- Do NOT use markdown symbols (no **, *, or bullets made of dashes)
+- Output should read like a human-prepared compliance draft, not AI-generated content
+
+Your goal is to help the homeowner resolve the issue correctly the first time,
+with clear wording, proper procedure, and minimal risk — now that the case is unlocked.
+
+"""
+
+            # Convert history to OpenAI message format
+            messages = [{'role': 'system', 'content': system_prompt}]
+
+            # Add context about the case
+            context_message = f"Case context: {json.dumps(case_payload, indent=2)}"
+            messages.append({'role': 'system', 'content': context_message})
+
+            # Add preview information if available
+            if preview_info:
+                preview_context = f"Case preview analysis: {json.dumps(preview_info, indent=2)}"
+                messages.append({'role': 'system', 'content': preview_context})
+
+            # Add recent chat history
+            for msg in history[-10:]:  # Only use last 10 messages for context
+                messages.append({
+                    'role': msg['role'],
+                    'content': msg['content']
+                })
+
+            openai_payload = {
+                'model': 'gpt-4o-mini',
+                'messages': messages,
+                'temperature': 0.7,
+                'max_tokens': 1000
+            }
+
+            openai_response = requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json=openai_payload,
+                timeout=(10, 60)
+            )
+            openai_response.raise_for_status()
+
+            openai_json = openai_response.json()
+            assistant_text = openai_json['choices'][0]['message']['content'].strip()
+
+            # Limit assistant response length
+            if len(assistant_text) > 2000:
+                assistant_text = assistant_text[:2000] + "..."
+
+        except Exception as e:
+            logger.error(f'OpenAI API error for {token[:8]}...: {str(e)}')
+            assistant_text = "I'm having trouble generating a response right now. Please try again in a moment."
+
+        # 6) Save assistant message to database
+        try:
+            # NEW: Apply markdown formatter to clean the response
+            formatted_response = format_plain_text_response(assistant_text)
+
+            assistant_message_url = f"{SUPABASE_URL}/rest/v1/dmhoa_messages"
+            assistant_message_data = {
+                'token': token,
+                'role': 'assistant',
+                'content': formatted_response
+            }
+            assistant_message_headers = supabase_headers()
+            assistant_message_headers['Prefer'] = 'return=representation'
+
+            assistant_message_response = requests.post(assistant_message_url, headers=assistant_message_headers,
+                                                     json=assistant_message_data, timeout=TIMEOUT)
+            assistant_message_response.raise_for_status()
+            assistant_insert = assistant_message_response.json()
+            assistant_message = assistant_insert[0] if assistant_insert else None
+
+        except Exception as e:
+            logger.error(f'Failed to save assistant message for {token[:8]}...: {str(e)}')
+            return jsonify({'error': 'Failed to save assistant message'}), 500
+
+        logger.info(f"Successfully processed message for token {token[:8]}...")
+
+        return jsonify({
+            'ok': True,
+            'token': token,
+            'user_message': user_message,
+            'assistant_message': assistant_message
+        }), 200
+
+    except Exception as e:
+        error_msg = f"Error sending message: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+def format_plain_text_response(text: str) -> str:
+    """Remove markdown formatting symbols from AI response text."""
+    if not text:
+        return text
+
+    # Remove bold markdown (**text**)
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+
+    # Remove italic markdown (*text*)
+    text = re.sub(r'(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)', r'\1', text)
+
+    # Remove bullet points made with dashes (- item)
+    text = re.sub(r'^[\s]*-[\s]+', '', text, flags=re.MULTILINE)
+
+    # Remove bullet points made with asterisks (* item)
+    text = re.sub(r'^[\s]*\*[\s]+', '', text, flags=re.MULTILINE)
+
+    # Clean up any double spaces that might result from removals
+    text = re.sub(r'  +', ' ', text)
+
+    # Clean up any multiple newlines
+    text = re.sub(r'\n\n\n+', '\n\n', text)
+
+    return text.strip()
+
+
+def fetch_case_outputs(token: str) -> Optional[Dict]:
+    """Fetch existing case outputs from dmhoa_case_outputs table by token."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        params = {
+            'case_token': f'eq.{token}',
+            'select': '*',
+            'order': 'created_at.desc',
+            'limit': '1'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        outputs = response.json()
+        if outputs:
+            logger.info(f"Found existing case outputs for token {token[:8]}...")
+            return outputs[0]
+
+        logger.info(f"No case outputs found for token {token[:8]}...")
+        return None
+
+    except Exception as e:
+        logger.error(f"Failed to fetch case outputs for token {token[:8]}...: {str(e)}")
+        return None
+
+
+def upsert_active_preview_lock(case_id: str) -> bool:
+    """Check if a preview generation is already in progress or create a lock."""
+    with preview_lock:
+        if case_id in preview_generation_locks:
+            logger.info(f"Preview generation already in progress for case {case_id}")
+            return False
+
+        preview_generation_locks[case_id] = True
+        logger.info(f"Acquired preview generation lock for case {case_id}")
+        return True
+
+
+def release_preview_lock(case_id: str):
+    """Release the preview generation lock for a case."""
+    with preview_lock:
+        preview_generation_locks.pop(case_id, None)
+        logger.info(f"Released preview generation lock for case {case_id}")
+
+
+def send_receipt_email(token: str, to_email: str, case_url: str, amount_total: int = None,
+                      currency: str = "USD", customer_name: str = None,
+                      stripe_session_id: str = None) -> bool:
+    """Send receipt email after successful payment."""
+    try:
+        # Check which SMTP environment variables are missing
+        required = {
+            'SMTP_HOST': SMTP_HOST,
+            'SMTP_PORT': SMTP_PORT,
+            'SMTP_USER': SMTP_USER,
+            'SMTP_PASS': SMTP_PASS,
+        }
+        missing = [name for name, val in required.items() if not val]
+        if missing:
+            logger.error(f"SMTP not configured - missing environment variables: {missing}")
+            return False
+
+        # Personalized greeting
+        greeting = f"Hi {customer_name}," if customer_name else "Hi,"
+
+        # Format payment amount
+        dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+        payment_info = f" for {dollars} {currency.upper()}" if dollars else ""
+
+        # Enhanced email content
+        subject = "Payment Confirmed - Your Dispute My HOA Case is Ready"
+
+        text = f"""{greeting}
+
+Thank you for your payment{payment_info}! Your payment has been successfully processed and your Dispute My HOA case is now unlocked and ready for access.
+
+🔓 ACCESS YOUR CASE:
+{case_url}
+
+📧 IMPORTANT: Please save this email for your records. You can use the link above to access your case anytime in the future.
+
+💡 WHAT'S NEXT:
+• Review your case documents and analysis
+• Use the AI-powered insights to understand your dispute
+• Access legal templates and guidance specific to your situation
+• Get step-by-step instructions for resolving your HOA dispute
+
+📞 NEED HELP?
+If you have any questions or need assistance accessing your case, simply reply to this email and we'll get back to you promptly.
+
+Your case token for reference: {token[:8]}...
+{f'Transaction ID: {stripe_session_id}' if stripe_session_id else ''}
+
+Best regards,
+The Dispute My HOA Team
+https://disputemyhoa.com
+
+---
+This email confirms your payment and provides access to your case. Keep this email safe for future reference."""
+
+        msg = MIMEMultipart()
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(text, "plain"))
+
+        logger.info(f"Connecting to SMTP {SMTP_HOST}:{SMTP_PORT} to send to {to_email}")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+
+        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}...)")
+        return True
+
+    except smtplib.SMTPAuthenticationError as e:
+        error_msg = f"Gmail authentication failed. For Gmail, you need: 1) Enable 2-Step Verification, 2) Create App Password. Error: {str(e)}"
+        logger.error(error_msg)
+        return False
+    except Exception as e:
+        logger.exception("Failed to send receipt email")
+        return False
+
+
+def insert_case_output(output_data: Dict) -> bool:
+    """Insert a new case output record into dmhoa_case_outputs table."""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        headers = supabase_headers()
+        headers['Prefer'] = 'return=representation'
+
+        # Remove None values
+        output_data = {k: v for k, v in output_data.items() if v is not None}
+
+        # Log the data being sent for debugging
+        logger.info(f"Attempting to insert case output with data: {json.dumps(output_data, indent=2, default=str)}")
+
+        response = requests.post(url, headers=headers, json=output_data, timeout=TIMEOUT)
+
+        # Log the full response for debugging
+        logger.info(f"Supabase response status: {response.status_code}")
+        logger.info(f"Supabase response body: {response.text}")
+
+        response.raise_for_status()
+
+        result = response.json()
+        if result:
+            output_id = result[0]['id']
+            case_token = output_data.get('case_token', 'unknown')
+            logger.info(f"Inserted case output {output_id} for case_token {case_token}")
+            return True
+
+        return False
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error inserting case output: {e}")
+        logger.error(f"Response status: {e.response.status_code}")
+        logger.error(f"Response body: {e.response.text}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to insert case output: {str(e)}")
+        return False
+
+
+
+
+def trigger_case_analysis_after_payment(token: str):
+    """
+    Trigger case analysis generation in a background thread after payment.
+    This creates a record in dmhoa_case_outputs with the full analysis.
+    """
+    def run_analysis():
+        try:
+            logger.info(f"Starting case analysis generation for token {token[:8]}... after payment")
+
+            # 1) Ensure case exists and is unlocked/paid
+            case_url_local = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+            case_params = {
+                'token': f'eq.{token}',
+                'select': 'token,unlocked,status,payload'
+            }
+            case_headers_local = supabase_headers()
+
+            case_response = requests.get(case_url_local, params=case_params, headers=case_headers_local, timeout=TIMEOUT)
+            case_response.raise_for_status()
+            cases = case_response.json()
+            case_row = cases[0] if cases else None
+
+            if not case_row:
+                logger.error(f"Case not found for token {token[:8]}... during post-payment analysis")
+                return
+
+            if not case_row.get('unlocked'):
+                logger.warning(f"Case {token[:8]}... not unlocked yet during post-payment analysis, skipping")
+                return
+
+            # 2) Load extracted documents for this case
+            docs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_documents"
+            docs_params = {
+                'token': f'eq.{token}',
+                'select': 'id,filename,path,status,extracted_text,page_count,char_count,updated_at,error',
+                'order': 'updated_at.desc',
+                'limit': '10'
+            }
+            docs_headers_local = supabase_headers()
+
+            docs_response = requests.get(docs_url, params=docs_params, headers=docs_headers_local, timeout=TIMEOUT)
+            docs_response.raise_for_status()
+            docs = docs_response.json()
+
+            docs_newest = newest_updated_at(docs)
+
+            usable_docs = [
+                d for d in docs
+                if isinstance(d.get('extracted_text'), str) and d['extracted_text'].strip()
+            ]
+
+            logger.info(f"Post-payment analysis: {len(docs)} docs found, {len(usable_docs)} usable for token {token[:8]}...")
+
+            if usable_docs:
+                docs_block = '\n'.join([
+                    f"DOCUMENT {i + 1}: {d.get('filename') or d.get('path') or d['id']}\n"
+                    f"---\n{(d.get('extracted_text', '') or '')[:12000]}\n---\n"
+                    for i, d in enumerate(usable_docs[:5])
+                ])
+            else:
+                statuses = ', '.join([d.get('status', 'unknown') for d in docs]) or 'none'
+                errors = ' | '.join([d.get('error', '') for d in docs if d.get('error')])[:100] or 'none'
+                docs_block = f"No document text available yet.\nDocs found: {len(docs)}\nStatuses: {statuses}\nErrors: {errors}"
+
+            # 3) Check if outputs already exist
+            outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            outputs_params = {
+                'case_token': f'eq.{token}',
+                'select': 'case_token,status,outputs,error,updated_at'
+            }
+            outputs_headers_local = supabase_headers()
+
+            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers_local, timeout=TIMEOUT)
+            outputs_response.raise_for_status()
+            existing_outputs = outputs_response.json()
+            existing_out = existing_outputs[0] if existing_outputs else None
+
+            out_updated = safe_iso(existing_out.get('updated_at') if existing_out else None)
+            docs_are_newer = (
+                docs_newest and out_updated and
+                datetime.fromisoformat(docs_newest) > datetime.fromisoformat(out_updated)
+            )
+
+            if (existing_out and existing_out.get('status') == 'ready' and
+                existing_out.get('outputs') and not docs_are_newer):
+                logger.info(f"Case outputs already exist for token {token[:8]}..., skipping generation")
+                return
+
+            # 4) Mark outputs as pending (upsert)
+            pending_data = {
+                'case_token': token,
+                'status': 'pending',
+                'error': None,
+                'model': 'gpt-4o-mini',
+                'prompt_version': 'v3_post_payment_auto',
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            upsert_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            upsert_headers_local = supabase_headers()
+            upsert_headers_local['Prefer'] = 'resolution=merge-duplicates'
+
+            upsert_response = requests.post(upsert_url, headers=upsert_headers_local, json=pending_data, timeout=TIMEOUT)
+            upsert_response.raise_for_status()
+
+            payload = case_row.get('payload') or {}
+            draft_titles = get_draft_titles(payload)
+
+            # 5) OpenAI API call
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "summary_html": {"type": "string"},
+                    "letter_summary": {"type": "string"},
+                    "draft_titles": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "clarification": {"type": "string"},
+                            "extension": {"type": "string"},
+                            "compliance": {"type": "string"}
+                        },
+                        "required": ["clarification", "extension", "compliance"]
+                    },
+                    "risks_and_deadlines": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "deadlines": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                            "risks": {"type": "array", "items": {"type": "string"}, "minItems": 3}
+                        },
+                        "required": ["deadlines", "risks"]
+                    },
+                    "action_plan": {"type": "array", "items": {"type": "string"}, "minItems": 6},
+                    "drafts": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "clarification": {"type": "string"},
+                            "extension": {"type": "string"},
+                            "compliance": {"type": "string"}
+                        },
+                        "required": ["clarification", "extension", "compliance"]
+                    },
+                    "questions_to_ask": {"type": "array", "items": {"type": "string"}, "minItems": 6},
+                    "lowest_cost_path": {"type": "array", "items": {"type": "string"}, "minItems": 4}
+                },
+                "required": [
+                    "summary_html", "letter_summary", "draft_titles", "risks_and_deadlines",
+                    "action_plan", "drafts", "questions_to_ask", "lowest_cost_path"
+                ]
+            }
+
+            doc_fingerprint = {
+                'count': len(docs),
+                'usableCount': len(usable_docs),
+                'newestUpdatedAt': docs_newest,
+                'ids': [d['id'] for d in docs],
+                'statuses': [d.get('status') for d in docs],
+                'charCounts': [d.get('char_count') for d in docs]
+            }
+
+            system_content = """You generate HOA dispute assistance for a homeowner. This is educational drafting help, not legal advice.
+OUTPUT RULES: ONLY summary_html may contain HTML using <div>, <strong>, <ul>, <li>. ALL drafts MUST be PLAIN TEXT ONLY with newlines.
+DRAFT QUALITY: Each draft must be complete, ready-to-send. Include Subject line, opening, 3-6 bullet requests, timeline, closing.
+DEPTH: action_plan >= 6 steps, risks >= 3, questions_to_ask >= 6, lowest_cost_path >= 4.
+STYLE: Calm, professional, firm, factual."""
+
+            user_content = f"""Case payload JSON:
+{json.dumps(payload)}
+
+Document fingerprint:
+{json.dumps(doc_fingerprint)}
+
+Extracted documents:
+{docs_block}
+
+Draft types:
+- drafts.clarification: "{draft_titles['clarification']}"
+- drafts.extension: "{draft_titles['extension']}"
+- drafts.compliance: "{draft_titles['compliance']}"
+
+Make this feel like a $30 deliverable: concrete, specific, complete."""
+
+            messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}
+            ]
+
+            openai_payload = {
+                "model": "gpt-4o-mini",
+                "input": messages,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "dmhoa_case_outputs",
+                        "strict": True,
+                        "schema": schema
+                    }
+                }
+            }
+
+            openai_response = requests.post(
+                'https://api.openai.com/v1/responses',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json=openai_payload,
+                timeout=(10, 120)
+            )
+
+            if not openai_response.ok:
+                error_text = openai_response.text
+                logger.error(f'OpenAI call failed: {openai_response.status_code}, {error_text}')
+                error_data = {
+                    'case_token': token,
+                    'status': 'error',
+                    'error': error_text or 'OpenAI call failed',
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                requests.post(upsert_url, headers=upsert_headers_local, json=error_data, timeout=TIMEOUT)
+                return
+
+            openai_json = openai_response.json()
+            structured = extract_structured_result(openai_json)
+
+            if structured:
+                outputs_to_store = {
+                    **structured,
+                    'draft_titles': structured.get('draft_titles', draft_titles),
+                    'doc_fingerprint': doc_fingerprint
+                }
+            else:
+                outputs_to_store = {
+                    'raw': openai_json,
+                    'draft_titles': draft_titles,
+                    'doc_fingerprint': doc_fingerprint
+                }
+
+            success_data = {
+                'case_token': token,
+                'status': 'ready',
+                'outputs': outputs_to_store,
+                'error': None,
+                'model': 'gpt-4o-mini',
+                'prompt_version': 'v3_post_payment_auto',
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            requests.post(upsert_url, headers=upsert_headers_local, json=success_data, timeout=TIMEOUT)
+            logger.info(f"Successfully generated case analysis for token {token[:8]}... after payment")
+
+        except Exception as e:
+            logger.error(f"Error in post-payment case analysis for token {token[:8]}...: {str(e)}")
+
+    # Run in background thread
+    analysis_thread = threading.Thread(target=run_analysis)
+    analysis_thread.daemon = True
+    analysis_thread.start()
+    logger.info(f"Started background case analysis thread for token {token[:8]}...")
+
+
+
 
 @app.route('/webhooks/stripe', methods=['POST'])
 def stripe_webhook():
@@ -2765,6 +3729,7 @@ def stripe_webhook():
                 logger.warning(f"Failed to log payment_completed event (non-fatal): {str(e)}")
 
             logger.info(f"Payment completion processed successfully for token: {token}")
+
             # Trigger case analysis generation in background thread
             try:
                 trigger_case_analysis_after_payment(token)
