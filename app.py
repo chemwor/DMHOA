@@ -23,7 +23,6 @@ from email.mime.multipart import MIMEMultipart
 from PIL import Image
 import pytesseract
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,7 +31,8 @@ app = Flask(__name__)
 # NEW: Updated CORS configuration with comprehensive headers and methods
 CORS(app, resources={r"/*": {"origins": "*"}},
      supports_credentials=False,
-     allow_headers=["Content-Type", "Authorization", "apikey", "x-client-info", "x-supabase-api-version", "X-Webhook-Secret"],
+     allow_headers=["Content-Type", "Authorization", "apikey", "x-client-info", "x-supabase-api-version",
+                    "X-Webhook-Secret"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # Configuration
@@ -71,6 +71,7 @@ TIMEOUT = (5, 60)  # (connect, read)
 preview_generation_locks = {}
 preview_lock = threading.Lock()
 
+
 def supabase_headers() -> Dict[str, str]:
     """Return headers for Supabase API requests."""
     return {
@@ -78,6 +79,7 @@ def supabase_headers() -> Dict[str, str]:
         'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
         'Content-Type': 'application/json'
     }
+
 
 def fetch_ready_documents_by_token(token: str, limit: int = 3) -> List[Dict]:
     """Query Supabase for ready documents by case token."""
@@ -103,6 +105,7 @@ def fetch_ready_documents_by_token(token: str, limit: int = 3) -> List[Dict]:
         logger.error(f"Failed to fetch ready documents for token {token[:12]}...: {str(e)}")
         return []
 
+
 def fetch_any_documents_status_by_token(token: str) -> List[Dict]:
     """Check for any documents (including processing/pending) by token."""
     try:
@@ -122,6 +125,7 @@ def fetch_any_documents_status_by_token(token: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Failed to fetch document status for token {token[:12]}...: {str(e)}")
         return []
+
 
 def summarize_doc_text_with_openai(token: str, raw_text: str) -> str:
     """Summarize document text using OpenAI gpt-4o-mini."""
@@ -177,6 +181,7 @@ def summarize_doc_text_with_openai(token: str, raw_text: str) -> str:
         logger.error(f"Failed to summarize document text for token {token[:12]}...: {str(e)}")
         # Fallback to clipped excerpt
         return raw_text[:1200] + "..." if len(raw_text) > 1200 else raw_text
+
 
 def build_doc_brief(docs: List[Dict]) -> Dict:
     """Build document brief from ready documents."""
@@ -250,6 +255,7 @@ def fetch_document_status(document_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Failed to fetch document status for {document_id}: {str(e)}")
         return None
 
+
 def update_document(document_id: str, token: str, updates: Dict[str, Any]) -> bool:
     """Update document in Supabase database."""
     try:
@@ -262,7 +268,7 @@ def update_document(document_id: str, token: str, updates: Dict[str, Any]) -> bo
         headers['Prefer'] = 'return=representation'
 
         response = requests.patch(url, params=params, headers=headers,
-                                json=updates, timeout=TIMEOUT)
+                                  json=updates, timeout=TIMEOUT)
         response.raise_for_status()
 
         logger.info(f"Updated document {document_id} with: {updates}")
@@ -271,6 +277,7 @@ def update_document(document_id: str, token: str, updates: Dict[str, Any]) -> bo
     except Exception as e:
         logger.error(f"Failed to update document {document_id}: {str(e)}")
         return False
+
 
 def download_storage_object(bucket: str, path: str) -> Optional[bytes]:
     """Download file from Supabase Storage."""
@@ -295,6 +302,7 @@ def download_storage_object(bucket: str, path: str) -> Optional[bytes]:
     except Exception as e:
         logger.error(f"Failed to download {bucket}/{path}: {str(e)}")
         return None
+
 
 def extract_pdf_text(pdf_bytes: bytes) -> Tuple[str, int, int, Optional[str]]:
     """
@@ -367,16 +375,16 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
 
         # Try multiple OCR configurations for better compatibility
         configs_to_try = [
-            r'--oem 1 --psm 1 -l eng',   # Automatic page segmentation with OSD
-            r'--oem 1 --psm 3 -l eng',   # Fully automatic page segmentation, but no OSD
-            r'--oem 1 --psm 4 -l eng',   # Assume a single column of text of variable sizes
-            r'--oem 1 --psm 6 -l eng',   # Assume a single uniform block of text
-            r'--oem 3 --psm 1 -l eng',   # LSTM with automatic page segmentation
-            r'--oem 3 --psm 3 -l eng',   # LSTM with fully automatic page segmentation
-            r'--oem 3 --psm 6 -l eng',   # LSTM standard config
+            r'--oem 1 --psm 1 -l eng',  # Automatic page segmentation with OSD
+            r'--oem 1 --psm 3 -l eng',  # Fully automatic page segmentation, but no OSD
+            r'--oem 1 --psm 4 -l eng',  # Assume a single column of text of variable sizes
+            r'--oem 1 --psm 6 -l eng',  # Assume a single uniform block of text
+            r'--oem 3 --psm 1 -l eng',  # LSTM with automatic page segmentation
+            r'--oem 3 --psm 3 -l eng',  # LSTM with fully automatic page segmentation
+            r'--oem 3 --psm 6 -l eng',  # LSTM standard config
             r'--oem 3 --psm 11 -l eng',  # Sparse text - find as much text as possible
             r'--oem 3 --psm 12 -l eng',  # Sparse text with OSD
-            r'--psm 6',                  # No language specified fallback
+            r'--psm 6',  # No language specified fallback
         ]
 
         extracted_text = ""
@@ -394,7 +402,8 @@ def extract_image_text(image_bytes: bytes, filename: str = "") -> Tuple[str, int
                 # Keep track of the best result (most text that looks reasonable)
                 if char_count > best_char_count:
                     # Basic heuristic: prefer results with more alphanumeric content
-                    alphanumeric_ratio = sum(c.isalnum() or c.isspace() for c in current_text) / max(len(current_text), 1)
+                    alphanumeric_ratio = sum(c.isalnum() or c.isspace() for c in current_text) / max(len(current_text),
+                                                                                                     1)
                     if alphanumeric_ratio > 0.3:  # At least 30% should be readable characters
                         best_text = current_text
                         best_char_count = char_count
@@ -486,6 +495,7 @@ def debug_env():
     presence = {k: bool(os.environ.get(k)) for k in keys}
     logger.info(f"/debug/env requested; presence: { {k: presence[k] for k in presence} }")
     return jsonify({'env_presence': presence}), 200
+
 
 @app.route('/webhooks/doc-extract', methods=['POST'])
 def doc_extract_webhook():
@@ -602,7 +612,8 @@ def doc_extract_webhook():
                     mime_type = 'image/png'
                     logger.info("Detected PNG from file magic bytes")
 
-        logger.info(f"Final file detection - filename: '{filename}', mime_type: '{mime_type}', detected_type: {detected_type}")
+        logger.info(
+            f"Final file detection - filename: '{filename}', mime_type: '{mime_type}', detected_type: {detected_type}")
 
         # Process based on detected file type
         if is_pdf_file(filename, mime_type) or detected_type == 'pdf':
@@ -797,7 +808,7 @@ def deactivate_previews(case_id: str) -> bool:
         update_data = {'is_active': False}
 
         response = requests.patch(url, params=params, headers=headers,
-                                json=update_data, timeout=TIMEOUT)
+                                  json=update_data, timeout=TIMEOUT)
         response.raise_for_status()
 
         logger.info(f"Deactivated existing previews for case {case_id}")
@@ -809,9 +820,9 @@ def deactivate_previews(case_id: str) -> bool:
 
 
 def insert_preview(case_id: str, preview_content: Dict, preview_snippet: str = None,
-                  prompt_version: str = None, model: str = "gpt-4o-mini",
-                  token_input: int = None, token_output: int = None,
-                  cost_usd: float = None, latency_ms: int = None) -> Optional[str]:
+                   prompt_version: str = None, model: str = "gpt-4o-mini",
+                   token_input: int = None, token_output: int = None,
+                   cost_usd: float = None, latency_ms: int = None) -> Optional[str]:
     """Insert a new preview into dmhoa_case_previews table."""
     try:
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews"
@@ -851,7 +862,8 @@ def insert_preview(case_id: str, preview_content: Dict, preview_snippet: str = N
 
 
 def save_case_preview_to_new_table(case_id: str, preview_text: str, doc_brief: Dict,
-                                  token_usage: Dict = None, latency_ms: int = None, preview_json: Optional[Dict] = None) -> bool:
+                                   token_usage: Dict = None, latency_ms: int = None,
+                                   preview_json: Optional[Dict] = None) -> bool:
     """Save generated case preview to the new dmhoa_case_previews table."""
     try:
         # Deactivate existing previews first
@@ -1022,6 +1034,7 @@ def clean_rules_cited(rules_cited_list):
 
     return cleaned
 
+
 def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple[str, Dict, int, Optional[Dict]]:
     """Generate case preview using OpenAI and return preview, token usage, latency, and preview_json."""
     start_time = time.time()
@@ -1041,36 +1054,36 @@ def generate_case_preview_with_openai(case_data: Dict, doc_brief: Dict) -> Tuple
 
         # Try payload first, then case_data directly
         hoa_name = (payload.get('hoaName') or
-                   payload.get('hoa_name') or
-                   case_data.get('hoa_name') or
-                   case_data.get('hoaName') or
-                   'Unknown HOA')
+                    payload.get('hoa_name') or
+                    case_data.get('hoa_name') or
+                    case_data.get('hoaName') or
+                    'Unknown HOA')
 
         violation_type = (payload.get('violationType') or
-                         payload.get('violation_type') or
-                         payload.get('noticeType') or
-                         case_data.get('case_description') or
-                         case_data.get('violationType') or
-                         'Unknown violation')
+                          payload.get('violation_type') or
+                          payload.get('noticeType') or
+                          case_data.get('case_description') or
+                          case_data.get('violationType') or
+                          'Unknown violation')
 
         case_description = (payload.get('caseDescription') or
-                           payload.get('case_description') or
-                           payload.get('description') or
-                           case_data.get('case_description') or
-                           case_data.get('caseDescription') or
-                           'No description provided')
+                            payload.get('case_description') or
+                            payload.get('description') or
+                            case_data.get('case_description') or
+                            case_data.get('caseDescription') or
+                            'No description provided')
 
         property_address = (payload.get('propertyAddress') or
-                           payload.get('property_address') or
-                           case_data.get('property_address') or
-                           case_data.get('propertyAddress') or
-                           '')
+                            payload.get('property_address') or
+                            case_data.get('property_address') or
+                            case_data.get('propertyAddress') or
+                            '')
 
         owner_name = (payload.get('ownerName') or
-                     payload.get('owner_name') or
-                     case_data.get('owner_name') or
-                     case_data.get('ownerName') or
-                     '')
+                      payload.get('owner_name') or
+                      case_data.get('owner_name') or
+                      case_data.get('ownerName') or
+                      '')
 
         # Get document brief
         doc_text = doc_brief.get('brief_text', '')
@@ -1249,8 +1262,10 @@ RULES:
                 preview_json = json.loads(clean_json)
 
                 # NEW: Post-processing to clean up rules_cited narrative
-                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json['your_situation']:
-                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(preview_json['your_situation']['rules_cited'])
+                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json[
+                    'your_situation']:
+                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(
+                        preview_json['your_situation']['rules_cited'])
 
                 # Create markdown from JSON
                 markdown_preview = render_preview_markdown(preview_json)
@@ -1412,8 +1427,10 @@ RULES:
                 preview_json = json.loads(clean_json)
 
                 # NEW: Post-processing to clean up rules_cited narrative
-                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json['your_situation']:
-                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(preview_json['your_situation']['rules_cited'])
+                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json[
+                    'your_situation']:
+                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(
+                        preview_json['your_situation']['rules_cited'])
 
                 # Create markdown from JSON
                 markdown_preview = render_preview_markdown(preview_json)
@@ -1527,7 +1544,8 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 preview_type = "final_basic"
 
             # Save final preview (this will deactivate existing ones automatically)
-            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms, preview_json)
+            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms,
+                                                     preview_json)
 
             if success:
                 logger.info(f"Successfully generated {preview_type} FINAL preview for case {token[:12]}...")
@@ -1545,7 +1563,6 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
         release_preview_lock(case_id)
         logger.error(f"Error auto-generating FINAL preview for case {token[:12]}...: {str(e)}")
         return False
-
 
 
 # @app.route('/webhooks/generate-preview', methods=['POST'])
@@ -1601,7 +1618,6 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
 #         error_msg = f"Unexpected error generating preview: {str(e)}"
 #         logger.error(error_msg)
 #         return jsonify({'error': error_msg}), 500
-
 
 
 # @app.route('/webhooks/case-created', methods=['POST'])
@@ -1681,10 +1697,10 @@ def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optio
 
         # Get email from the case data (check multiple possible field names)
         email = (case_data.get('email') or
-                case_data.get('ownerEmail') or
-                case_data.get('owner_email') or
-                case_data.get('userEmail') or
-                case_data.get('user_email'))
+                 case_data.get('ownerEmail') or
+                 case_data.get('owner_email') or
+                 case_data.get('userEmail') or
+                 case_data.get('user_email'))
 
         # Prepare case data according to the actual table structure
         case_payload = {
@@ -1717,7 +1733,8 @@ def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optio
             }
             update_payload = {k: v for k, v in update_payload.items() if v is not None}
 
-            update_response = requests.patch(update_url, params=update_params, headers=update_headers, json=update_payload, timeout=TIMEOUT)
+            update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                             json=update_payload, timeout=TIMEOUT)
             update_response.raise_for_status()
 
             result = update_response.json()
@@ -1840,7 +1857,8 @@ def save_case():
             update_headers['Prefer'] = 'return=representation'
 
             try:
-                update_response = requests.patch(update_url, params=update_params, headers=update_headers, json=update_data, timeout=TIMEOUT)
+                update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                                 json=update_data, timeout=TIMEOUT)
                 update_response.raise_for_status()
                 result = update_response.json()
                 logger.info(f"Case updated: {token}")
@@ -1865,7 +1883,7 @@ def save_case():
 
             try:
                 insert_response = requests.post(insert_url, headers=insert_headers,
-                                              json=insert_data, timeout=TIMEOUT)
+                                                json=insert_data, timeout=TIMEOUT)
                 insert_response.raise_for_status()
                 result = insert_response.json()
                 logger.info(f"Case created: {token}")
@@ -1909,6 +1927,7 @@ def save_case():
         response = jsonify({'error': str(e) or 'Internal server error'})
         return add_cors_headers(response), 500
 
+
 def trigger_document_extraction_async(token: str, payload: dict):
     """
     Async function to trigger document extraction without blocking the save operation
@@ -1918,8 +1937,9 @@ def trigger_document_extraction_async(token: str, payload: dict):
 
         # Check if there are uploaded documents that need processing
         needs_extraction = (
-            (payload.get('pastedText') or (payload.get('additional_docs') and len(payload.get('additional_docs', [])) > 0)) and
-            payload.get('extract_status') == 'pending'
+                (payload.get('pastedText') or (
+                            payload.get('additional_docs') and len(payload.get('additional_docs', [])) > 0)) and
+                payload.get('extract_status') == 'pending'
         )
 
         if not needs_extraction:
@@ -1945,7 +1965,7 @@ def trigger_document_extraction_async(token: str, payload: dict):
                 }
 
                 requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
+                               json={'payload': updated_payload}, timeout=TIMEOUT)
             except Exception as e:
                 logger.error(f"Failed to update case with config error: {str(e)}")
             return
@@ -2008,7 +2028,7 @@ def trigger_document_extraction_async(token: str, payload: dict):
                 }
 
                 requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
+                               json={'payload': updated_payload}, timeout=TIMEOUT)
             except Exception as e:
                 logger.error(f"Failed to update case status after triggering: {str(e)}")
             return
@@ -2027,7 +2047,7 @@ def trigger_document_extraction_async(token: str, payload: dict):
                 }
 
                 requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
+                               json={'payload': updated_payload}, timeout=TIMEOUT)
             except Exception as e:
                 logger.error(f"Failed to update case with not deployed error: {str(e)}")
             return
@@ -2048,7 +2068,7 @@ def trigger_document_extraction_async(token: str, payload: dict):
                 }
 
                 requests.patch(url, params=params, headers=headers,
-                             json={'payload': updated_payload}, timeout=TIMEOUT)
+                               json={'payload': updated_payload}, timeout=TIMEOUT)
             except Exception as e:
                 logger.error(f"Failed to update case with auth error: {str(e)}")
             return
@@ -2069,12 +2089,13 @@ def trigger_document_extraction_async(token: str, payload: dict):
             }
 
             requests.patch(url, params=params, headers=headers,
-                         json={'payload': updated_payload}, timeout=TIMEOUT)
+                           json={'payload': updated_payload}, timeout=TIMEOUT)
         except Exception as e:
             logger.error(f"Failed to update case with failure: {str(e)}")
 
     except Exception as error:
         logger.error(f"Error in trigger_document_extraction_async: {str(error)}")
+
 
 @app.route('/api/case-preview/<case_id>', methods=['GET', 'OPTIONS'])
 def get_case_preview(case_id):
@@ -2113,7 +2134,8 @@ def get_case_preview(case_id):
                 'message': 'Your documents are being analyzed. The final preview will be ready shortly.',
                 'case_id': case_id,
                 'doc_status': 'processing',
-                'processing_documents': len([doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]),
+                'processing_documents': len(
+                    [doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]),
                 'estimated_time_remaining': '2-3 minutes'
             }), 202  # 202 Accepted indicates processing
 
@@ -2202,10 +2224,11 @@ def get_case_preview_by_token(token):
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
 
+
 @app.route('/api/case-analysis', methods=['POST', 'OPTIONS'])
 def case_analysis():
-    """Generate HOA case analysis using OpenAI (converted from Deno/TypeScript code)"""
-    print("We are in the case analysis endpoint now")
+    """Generate HOA case analysis using OpenAI - delegates to run_case_analysis function"""
+    logger.info("Case analysis API endpoint called")
 
     # Handle CORS preflight
     if request.method == 'OPTIONS':
@@ -2223,11 +2246,6 @@ def case_analysis():
         return response
 
     try:
-        # Validate required environment variables
-        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not OPENAI_API_KEY:
-            response = jsonify({'error': 'Missing env vars'})
-            return add_cors_headers(response), 500
-
         # Parse request body
         try:
             body = request.get_json() or {}
@@ -2239,6 +2257,234 @@ def case_analysis():
         if not token:
             response = jsonify({'error': 'token is required'})
             return add_cors_headers(response), 400
+
+        # Call the core case analysis function
+        result = run_case_analysis(token)
+
+        if result.get('ok'):
+            response = jsonify(result)
+            return add_cors_headers(response), 200
+        else:
+            error = result.get('error', 'Unknown error')
+            # Determine appropriate status code
+            if 'not found' in error.lower():
+                status_code = 404
+            elif 'not unlocked' in error.lower():
+                status_code = 402
+            elif 'env vars' in error.lower():
+                status_code = 500
+            else:
+                status_code = 500
+
+            response = jsonify({'error': error})
+            return add_cors_headers(response), status_code
+
+    except Exception as e:
+        logger.error(f'case-analysis error: {str(e)}')
+        response = jsonify({'error': str(e) or 'server error'})
+        return add_cors_headers(response), 500
+
+
+def get_draft_titles(payload: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Keeps DB keys stable (drafts.clarification/extension/compliance),
+    but changes what those "slots" mean based on the user's selection.
+    """
+    outcome = str(payload.get('outcome', '')).lower()
+
+    titles = {
+        'clarification': 'Request Clarification / Rule Citation',
+        'extension': 'Request Extension / Pause Enforcement',
+        'compliance': 'Confirm Compliance Plan'
+    }
+
+    if outcome == 'clarification':
+        titles = {
+            'clarification': 'Request Clarification / Rule Citation',
+            'extension': 'Request Extension While Clarifying',
+            'compliance': 'Confirm Compliance Plan (If Needed)'
+        }
+    elif outcome == 'extension':
+        titles = {
+            'clarification': 'Request Clarification + Confirm Requirements',
+            'extension': 'Request Extension / New Deadline',
+            'compliance': 'Confirm Compliance Plan + Timeline'
+        }
+    elif outcome == 'alternative':
+        titles = {
+            'clarification': 'Request Approved Options / Standards',
+            'extension': 'Request Temporary Variance / Extra Time',
+            'compliance': 'Propose Alternative Remedy Plan'
+        }
+    elif outcome == 'comply':
+        titles = {
+            'clarification': 'Confirm Requirements Before Starting Work',
+            'extension': 'Request Extra Time to Complete Work',
+            'compliance': 'Confirm Compliance Completion'
+        }
+    elif outcome == 'dispute':
+        titles = {
+            'clarification': 'Formal Dispute / Appeal Letter',
+            'extension': 'Request Hearing Extension / Reschedule',
+            'compliance': 'Evidence Submission Cover Letter'
+        }
+    elif outcome == 'not-sure':
+        titles = {
+            'clarification': 'Request Clarification / Rule Citation',
+            'extension': 'Request Extension to Evaluate Options',
+            'compliance': 'Provisional Compliance Plan (If Required)'
+        }
+
+    return titles
+
+
+def newest_updated_at(docs: List[Dict[str, Any]]) -> Optional[str]:
+    """Find the newest updated_at timestamp from documents"""
+    newest = None
+    for d in docs:
+        iso = safe_iso(d.get('updated_at'))
+        if not iso:
+            continue
+        if not newest or datetime.fromisoformat(iso) > datetime.fromisoformat(newest):
+            newest = iso
+    return newest
+
+
+def safe_iso(s: Any) -> Optional[str]:
+    """Convert value to ISO string safely"""
+    v = str(s or '').strip()
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(v.replace('Z', '+00:00'))
+        return d.isoformat()
+    except Exception:
+        try:
+            d = datetime.strptime(v, '%Y-%m-%d %H:%M:%S')
+            return d.isoformat()
+        except Exception:
+            return None
+
+
+@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
+def get_case_data():
+    """Get case data by token for frontend display."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Get token from query parameters
+        token = request.args.get('token', '').strip()
+
+        if not token:
+            return jsonify({'error': 'token is required'}), 400
+
+        logger.info(f"Fetching case data for token: {token[:8]}...")
+
+        # Fetch case data from Supabase
+        case = read_case_by_token(token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Also fetch the case outputs (full analysis) if available
+        case_outputs = None
+        try:
+            outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+            outputs_params = {
+                'case_token': f'eq.{token}',
+                'select': '*'
+            }
+            outputs_headers = supabase_headers()
+
+            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers,
+                                            timeout=TIMEOUT)
+            outputs_response.raise_for_status()
+            outputs_data = outputs_response.json()
+
+            if outputs_data:
+                case_outputs = outputs_data[0]
+                logger.info(f"Found case outputs for token {token[:8]}...")
+            else:
+                logger.info(f"No case outputs found for token {token[:8]}...")
+
+        except Exception as e:
+            logger.warning(f"Error fetching case outputs for {token[:8]}...: {str(e)}")
+            # Continue without outputs - not critical
+
+        # Build response with case data and outputs if available
+        response_data = {
+            'token': case.get('token'),
+            'status': case.get('status', 'preview'),
+            'created_at': case.get('created_at'),
+            'updated_at': case.get('updated_at'),
+            'payload': case.get('payload', {}),
+            'outputs': case_outputs.get('outputs') if case_outputs else None,
+            'outputs_status': case_outputs.get('status') if case_outputs else None
+        }
+
+        logger.info(f"Successfully retrieved case data for token {token[:8]}...")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching case data: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+def extract_structured_result(responses_json: Any) -> Optional[Dict[str, Any]]:
+    """Safer JSON extraction from OpenAI Responses API payload"""
+    output = responses_json.get('output') if responses_json else None
+
+    if isinstance(output, list) and len(output) > 0:
+        for item in output:
+            content = item.get('content') if item else None
+
+            if isinstance(content, list):
+                # Look for output_json type first
+                cj = next((c for c in content
+                           if c and c.get('type') == 'output_json' and c.get('json')), None)
+                if not cj:
+                    # Fallback to any content with json
+                    cj = next((c for c in content
+                               if c and c.get('json') and isinstance(c['json'], dict)), None)
+
+                if cj and cj.get('json') and isinstance(cj['json'], dict):
+                    return cj['json']
+
+                # Look for text content to parse as JSON
+                ct = next((c for c in content
+                           if c and c.get('type') == 'output_text' and isinstance(c.get('text'), str)), None)
+                if not ct:
+                    ct = next((c for c in content
+                               if c and isinstance(c.get('text'), str)), None)
+
+                if ct and ct.get('text'):
+                    try:
+                        parsed = json.loads(ct['text'])
+                        if parsed and isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        pass  # ignore parse errors
+
+    return None
+
+
+def run_case_analysis(token: str) -> Dict[str, Any]:
+    """
+    Run case analysis for a given token. This is the core logic extracted from the API endpoint
+    so it can be called directly from the Stripe webhook after payment.
+
+    Returns a dict with keys: ok, status, cached, outputs, error (if any)
+    """
+    logger.info(f"Running case analysis for token: {token[:8]}...")
+
+    try:
+        # Validate required environment variables
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not OPENAI_API_KEY:
+            logger.error("Missing env vars for case analysis")
+            return {'ok': False, 'error': 'Missing env vars'}
 
         # 1) Ensure case exists + is unlocked/paid
         case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
@@ -2254,17 +2500,16 @@ def case_analysis():
             cases = case_response.json()
             case_row = cases[0] if cases else None
         except Exception as e:
-            logger.error('Database error reading case', extra={'error': str(e)})
-            response = jsonify({'error': 'Database error reading case', 'details': str(e)})
-            return add_cors_headers(response), 500
+            logger.error(f'Database error reading case: {str(e)}')
+            return {'ok': False, 'error': f'Database error reading case: {str(e)}'}
 
         if not case_row:
-            response = jsonify({'error': 'Case not found'})
-            return add_cors_headers(response), 404
+            logger.error(f"Case not found for token: {token[:8]}...")
+            return {'ok': False, 'error': 'Case not found'}
 
         if not case_row.get('unlocked'):
-            response = jsonify({'error': 'Case is not unlocked'})
-            return add_cors_headers(response), 402
+            logger.error(f"Case is not unlocked for token: {token[:8]}...")
+            return {'ok': False, 'error': 'Case is not unlocked'}
 
         # 1b) Load extracted documents for this case
         docs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_documents"
@@ -2281,7 +2526,7 @@ def case_analysis():
             docs_response.raise_for_status()
             docs = docs_response.json()
         except Exception as e:
-            logger.error('Docs lookup error', extra={'error': str(e)})
+            logger.error(f'Docs lookup error: {str(e)}')
             docs = []
 
         docs_newest = newest_updated_at(docs)
@@ -2292,14 +2537,7 @@ def case_analysis():
             if isinstance(d.get('extracted_text'), str) and d['extracted_text'].strip()
         ]
 
-        logger.info('DOCS DEBUG', extra={
-            'count': len(docs),
-            'docs_newest': docs_newest,
-            'statuses': [{'id': d['id'], 'status': d['status'], 'hasText': bool(d.get('extracted_text', '').strip()),
-                         'charCount': d.get('char_count'), 'updated_at': d.get('updated_at'), 'err': d.get('error')}
-                        for d in docs],
-            'usable_count': len(usable_docs)
-        })
+        logger.info(f'DOCS DEBUG for {token[:8]}...: count={len(docs)}, usable={len(usable_docs)}')
 
         if usable_docs:
             docs_block = '\n'.join([
@@ -2315,9 +2553,7 @@ Docs found: {len(docs)}
 Statuses: {statuses}
 Errors: {errors}"""
 
-        logger.info('DOCS BLOCK LENGTH', extra={'length': len(docs_block)})
-
-        # 2) If outputs already exist and are ready, return cached ONLY if docs haven't changed since outputs updated_at
+        # 2) Check if outputs already exist and are ready
         outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
         outputs_params = {
             'case_token': f'eq.{token}',
@@ -2326,30 +2562,30 @@ Errors: {errors}"""
         outputs_headers = supabase_headers()
 
         try:
-            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers, timeout=TIMEOUT)
+            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers,
+                                            timeout=TIMEOUT)
             outputs_response.raise_for_status()
             existing_outputs = outputs_response.json()
             existing_out = existing_outputs[0] if existing_outputs else None
         except Exception as e:
-            logger.error('Database error reading outputs', extra={'error': str(e)})
-            response = jsonify({'error': 'Database error reading outputs', 'details': str(e)})
-            return add_cors_headers(response), 500
+            logger.error(f'Database error reading outputs: {str(e)}')
+            return {'ok': False, 'error': f'Database error reading outputs: {str(e)}'}
 
         out_updated = safe_iso(existing_out.get('updated_at') if existing_out else None)
         docs_are_newer = (
-            docs_newest and out_updated and
-            datetime.fromisoformat(docs_newest) > datetime.fromisoformat(out_updated)
+                docs_newest and out_updated and
+                datetime.fromisoformat(docs_newest) > datetime.fromisoformat(out_updated)
         )
 
         if (existing_out and existing_out.get('status') == 'ready' and
-            existing_out.get('outputs') and not docs_are_newer):
-            response = jsonify({
+                existing_out.get('outputs') and not docs_are_newer):
+            logger.info(f"Returning cached outputs for token: {token[:8]}...")
+            return {
                 'ok': True,
                 'status': 'ready',
                 'cached': True,
                 'outputs': existing_out['outputs']
-            })
-            return add_cors_headers(response), 200
+            }
 
         # 3) Mark outputs as pending (upsert)
         pending_data = {
@@ -2369,9 +2605,8 @@ Errors: {errors}"""
             upsert_response = requests.post(upsert_url, headers=upsert_headers, json=pending_data, timeout=TIMEOUT)
             upsert_response.raise_for_status()
         except Exception as e:
-            logger.error('Failed to mark outputs pending', extra={'error': str(e)})
-            response = jsonify({'error': 'Failed to mark outputs pending', 'details': str(e)})
-            return add_cors_headers(response), 500
+            logger.error(f'Failed to mark outputs pending: {str(e)}')
+            return {'ok': False, 'error': f'Failed to mark outputs pending: {str(e)}'}
 
         payload = case_row.get('payload') or {}
         draft_titles = get_draft_titles(payload)
@@ -2502,6 +2737,7 @@ STYLE:
 
         # Make OpenAI API call
         try:
+            logger.info(f"Calling OpenAI for case analysis for token: {token[:8]}...")
             openai_response = requests.post(
                 'https://api.openai.com/v1/responses',
                 headers={
@@ -2514,7 +2750,7 @@ STYLE:
 
             if not openai_response.ok:
                 error_text = openai_response.text
-                logger.error('OpenAI call failed', extra={'status': openai_response.status_code, 'error': error_text})
+                logger.error(f'OpenAI call failed: {openai_response.status_code}, {error_text}')
 
                 # Update outputs table with error
                 error_data = {
@@ -2528,8 +2764,7 @@ STYLE:
                 except Exception:
                     pass  # Best effort
 
-                response = jsonify({'error': 'OpenAI call failed', 'details': error_text})
-                return add_cors_headers(response), 500
+                return {'ok': False, 'error': f'OpenAI call failed: {error_text}'}
 
             openai_json = openai_response.json()
             structured = extract_structured_result(openai_json)
@@ -2538,7 +2773,7 @@ STYLE:
                 outputs_to_store = {
                     **structured,
                     'draft_titles': structured.get('draft_titles', draft_titles),
-                    'doc_fingerprint': doc_fingerprint  # helpful for debugging what it saw
+                    'doc_fingerprint': doc_fingerprint
                 }
             else:
                 outputs_to_store = {
@@ -2560,10 +2795,10 @@ STYLE:
 
             try:
                 requests.post(upsert_url, headers=upsert_headers, json=success_data, timeout=TIMEOUT)
+                logger.info(f"Successfully saved case outputs for token: {token[:8]}...")
             except Exception as e:
-                logger.error('Failed saving outputs', extra={'error': str(e)})
-                response = jsonify({'error': 'Failed saving outputs', 'details': str(e)})
-                return add_cors_headers(response), 500
+                logger.error(f'Failed saving outputs: {str(e)}')
+                return {'ok': False, 'error': f'Failed saving outputs: {str(e)}'}
 
             # Update case updated_at timestamp
             try:
@@ -2572,209 +2807,106 @@ STYLE:
                 case_update_data = {'updated_at': datetime.utcnow().isoformat()}
                 case_update_headers = supabase_headers()
                 requests.patch(case_update_url, params=case_update_params,
-                             headers=case_update_headers, json=case_update_data, timeout=TIMEOUT)
+                               headers=case_update_headers, json=case_update_data, timeout=TIMEOUT)
             except Exception:
                 pass  # Best effort
 
-            response = jsonify({
+            logger.info(f"Case analysis completed successfully for token: {token[:8]}...")
+            return {
                 'ok': True,
                 'status': 'ready',
                 'cached': False,
                 'outputs': outputs_to_store
-            })
-            return add_cors_headers(response), 200
-
-        except Exception as e:
-            logger.error('OpenAI API error', extra={'error': str(e)})
-            response = jsonify({'error': 'OpenAI API error', 'details': str(e)})
-            return add_cors_headers(response), 500
-
-    except Exception as e:
-        logger.error('case-analysis error', extra={'error': str(e)})
-        response = jsonify({'error': str(e) or 'server error'})
-        return add_cors_headers(response), 500
-
-def get_draft_titles(payload: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Keeps DB keys stable (drafts.clarification/extension/compliance),
-    but changes what those "slots" mean based on the user's selection.
-    """
-    outcome = str(payload.get('outcome', '')).lower()
-
-    titles = {
-        'clarification': 'Request Clarification / Rule Citation',
-        'extension': 'Request Extension / Pause Enforcement',
-        'compliance': 'Confirm Compliance Plan'
-    }
-
-    if outcome == 'clarification':
-        titles = {
-            'clarification': 'Request Clarification / Rule Citation',
-            'extension': 'Request Extension While Clarifying',
-            'compliance': 'Confirm Compliance Plan (If Needed)'
-        }
-    elif outcome == 'extension':
-        titles = {
-            'clarification': 'Request Clarification + Confirm Requirements',
-            'extension': 'Request Extension / New Deadline',
-            'compliance': 'Confirm Compliance Plan + Timeline'
-        }
-    elif outcome == 'alternative':
-        titles = {
-            'clarification': 'Request Approved Options / Standards',
-            'extension': 'Request Temporary Variance / Extra Time',
-            'compliance': 'Propose Alternative Remedy Plan'
-        }
-    elif outcome == 'comply':
-        titles = {
-            'clarification': 'Confirm Requirements Before Starting Work',
-            'extension': 'Request Extra Time to Complete Work',
-            'compliance': 'Confirm Compliance Completion'
-        }
-    elif outcome == 'dispute':
-        titles = {
-            'clarification': 'Formal Dispute / Appeal Letter',
-            'extension': 'Request Hearing Extension / Reschedule',
-            'compliance': 'Evidence Submission Cover Letter'
-        }
-    elif outcome == 'not-sure':
-        titles = {
-            'clarification': 'Request Clarification / Rule Citation',
-            'extension': 'Request Extension to Evaluate Options',
-            'compliance': 'Provisional Compliance Plan (If Required)'
-        }
-
-    return titles
-
-def newest_updated_at(docs: List[Dict[str, Any]]) -> Optional[str]:
-    """Find the newest updated_at timestamp from documents"""
-    newest = None
-    for d in docs:
-        iso = safe_iso(d.get('updated_at'))
-        if not iso:
-            continue
-        if not newest or datetime.fromisoformat(iso) > datetime.fromisoformat(newest):
-            newest = iso
-    return newest
-
-
-def safe_iso(s: Any) -> Optional[str]:
-    """Convert value to ISO string safely"""
-    v = str(s or '').strip()
-    if not v:
-        return None
-    try:
-        d = datetime.fromisoformat(v.replace('Z', '+00:00'))
-        return d.isoformat()
-    except Exception:
-        try:
-            d = datetime.strptime(v, '%Y-%m-%d %H:%M:%S')
-            return d.isoformat()
-        except Exception:
-            return None
-
-@app.route('/api/case-data', methods=['GET', 'OPTIONS'])
-def get_case_data():
-    """Get case data by token for frontend display."""
-    # Handle CORS preflight
-    if request.method == 'OPTIONS':
-        response = jsonify({'message': 'OK'})
-        return response
-
-    try:
-        # Get token from query parameters
-        token = request.args.get('token', '').strip()
-
-        if not token:
-            return jsonify({'error': 'token is required'}), 400
-
-        logger.info(f"Fetching case data for token: {token[:8]}...")
-
-        # Fetch case data from Supabase
-        case = read_case_by_token(token)
-        if not case:
-            return jsonify({'error': 'Case not found'}), 404
-
-        # Also fetch the case outputs (full analysis) if available
-        case_outputs = None
-        try:
-            outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-            outputs_params = {
-                'case_token': f'eq.{token}',
-                'select': '*'
             }
-            outputs_headers = supabase_headers()
-
-            outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers, timeout=TIMEOUT)
-            outputs_response.raise_for_status()
-            outputs_data = outputs_response.json()
-
-            if outputs_data:
-                case_outputs = outputs_data[0]
-                logger.info(f"Found case outputs for token {token[:8]}...")
-            else:
-                logger.info(f"No case outputs found for token {token[:8]}...")
 
         except Exception as e:
-            logger.warning(f"Error fetching case outputs for {token[:8]}...: {str(e)}")
-            # Continue without outputs - not critical
-
-        # Build response with case data and outputs if available
-        response_data = {
-            'token': case.get('token'),
-            'status': case.get('status', 'preview'),
-            'created_at': case.get('created_at'),
-            'updated_at': case.get('updated_at'),
-            'payload': case.get('payload', {}),
-            'outputs': case_outputs.get('outputs') if case_outputs else None,
-            'outputs_status': case_outputs.get('status') if case_outputs else None
-        }
-
-        logger.info(f"Successfully retrieved case data for token {token[:8]}...")
-        return jsonify(response_data), 200
+            logger.error(f'OpenAI API error: {str(e)}')
+            return {'ok': False, 'error': f'OpenAI API error: {str(e)}'}
 
     except Exception as e:
-        error_msg = f"Error fetching case data: {str(e)}"
-        logger.error(error_msg)
-        return jsonify({'error': error_msg}), 500
+        logger.error(f'Case analysis error: {str(e)}')
+        return {'ok': False, 'error': str(e)}
 
 
-def extract_structured_result(responses_json: Any) -> Optional[Dict[str, Any]]:
-    """Safer JSON extraction from OpenAI Responses API payload"""
-    output = responses_json.get('output') if responses_json else None
+def send_receipt_email_direct(token: str, to_email: str, case_url: str,
+                              amount_total: int = None, currency: str = "USD",
+                              customer_name: str = None, stripe_session_id: str = None) -> bool:
+    """
+    Send receipt email directly via SMTP. This is used by the Stripe webhook
+    to send emails without needing to call an external webhook.
 
-    if isinstance(output, list) and len(output) > 0:
-        for item in output:
-            content = item.get('content') if item else None
+    Returns True if email was sent successfully, False otherwise.
+    """
+    try:
+        # Check which SMTP environment variables are available
+        if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
+            logger.warning(f"SMTP not configured - missing SMTP_HOST, SMTP_USER, or SMTP_PASS")
+            return False
 
-            if isinstance(content, list):
-                # Look for output_json type first
-                cj = next((c for c in content
-                          if c and c.get('type') == 'output_json' and c.get('json')), None)
-                if not cj:
-                    # Fallback to any content with json
-                    cj = next((c for c in content
-                              if c and c.get('json') and isinstance(c['json'], dict)), None)
+        # Personalized greeting
+        greeting = f"Hi {customer_name}," if customer_name else "Hi,"
 
-                if cj and cj.get('json') and isinstance(cj['json'], dict):
-                    return cj['json']
+        # Format payment amount
+        dollars = f"${(amount_total or 0) / 100:.2f}" if isinstance(amount_total, int) else ""
+        currency_str = (currency or "USD").upper()
+        payment_info = f" for {dollars} {currency_str}" if dollars else ""
 
-                # Look for text content to parse as JSON
-                ct = next((c for c in content
-                          if c and c.get('type') == 'output_text' and isinstance(c.get('text'), str)), None)
-                if not ct:
-                    ct = next((c for c in content
-                              if c and isinstance(c.get('text'), str)), None)
+        # Enhanced email content
+        subject = "Payment Confirmed - Your Dispute My HOA Case is Ready"
 
-                if ct and ct.get('text'):
-                    try:
-                        parsed = json.loads(ct['text'])
-                        if parsed and isinstance(parsed, dict):
-                            return parsed
-                    except Exception:
-                        pass  # ignore parse errors
+        text = f"""{greeting}
 
-    return None
+Thank you for your payment{payment_info}! Your payment has been successfully processed and your Dispute My HOA case is now unlocked and ready for access.
+
+🔓 ACCESS YOUR CASE:
+{case_url}
+
+📧 IMPORTANT: Please save this email for your records. You can use the link above to access your case anytime in the future.
+
+💡 WHAT'S NEXT:
+• Review your case documents and analysis
+• Use the AI-powered insights to understand your dispute
+• Access legal templates and guidance specific to your situation
+• Get step-by-step instructions for resolving your HOA dispute
+
+📞 NEED HELP?
+If you have any questions or need assistance accessing your case, simply reply to this email and we'll get back to you promptly.
+
+Your case token for reference: {token[:8]}...
+{f'Transaction ID: {stripe_session_id}' if stripe_session_id else ''}
+
+Best regards,
+The Dispute My HOA Team
+https://disputemyhoa.com
+
+---
+This email confirms your payment and provides access to your case. Keep this email safe for future reference."""
+
+        msg = MIMEMultipart()
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(text, "plain"))
+
+        logger.info(f"Sending receipt email directly to {to_email} for token {token[:8]}...")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+
+        logger.info(f"Receipt email sent successfully to {to_email} (token={token[:8]}...)")
+        return True
+
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"Gmail authentication failed: {str(e)}")
+        return False
+    except Exception as e:
+        logger.exception(f"Failed to send receipt email to {to_email}")
+        return False
+
 
 @app.route('/api/read-messages', methods=['GET', 'OPTIONS'])
 def read_messages():
@@ -2823,7 +2955,8 @@ def read_messages():
             }
             messages_headers = supabase_headers()
 
-            messages_response = requests.get(messages_url, params=messages_params, headers=messages_headers, timeout=TIMEOUT)
+            messages_response = requests.get(messages_url, params=messages_params, headers=messages_headers,
+                                             timeout=TIMEOUT)
             messages_response.raise_for_status()
             messages = messages_response.json()
 
@@ -2888,7 +3021,7 @@ def send_message():
             user_message_headers['Prefer'] = 'return=representation'
 
             user_message_response = requests.post(user_message_url, headers=user_message_headers,
-                                                json=user_message_data, timeout=TIMEOUT)
+                                                  json=user_message_data, timeout=TIMEOUT)
             user_message_response.raise_for_status()
             user_message = user_message_response.json()
             user_message = user_message[0] if user_message else None
@@ -2909,7 +3042,7 @@ def send_message():
             history_headers = supabase_headers()
 
             history_response = requests.get(history_url, params=history_params,
-                                          headers=history_headers, timeout=TIMEOUT)
+                                            headers=history_headers, timeout=TIMEOUT)
             history_response.raise_for_status()
             history = history_response.json() or []
 
@@ -3047,7 +3180,7 @@ with clear wording, proper procedure, and minimal risk — now that the case is 
             assistant_message_headers['Prefer'] = 'return=representation'
 
             assistant_message_response = requests.post(assistant_message_url, headers=assistant_message_headers,
-                                                     json=assistant_message_data, timeout=TIMEOUT)
+                                                       json=assistant_message_data, timeout=TIMEOUT)
             assistant_message_response.raise_for_status()
             assistant_insert = assistant_message_response.json()
             assistant_message = assistant_insert[0] if assistant_insert else None
@@ -3145,8 +3278,8 @@ def release_preview_lock(case_id: str):
 
 
 def send_receipt_email(token: str, to_email: str, case_url: str, amount_total: int = None,
-                      currency: str = "USD", customer_name: str = None,
-                      stripe_session_id: str = None) -> bool:
+                       currency: str = "USD", customer_name: str = None,
+                       stripe_session_id: str = None) -> bool:
     """Send receipt email after successful payment."""
     try:
         # Check which SMTP environment variables are missing
@@ -3165,7 +3298,7 @@ def send_receipt_email(token: str, to_email: str, case_url: str, amount_total: i
         greeting = f"Hi {customer_name}," if customer_name else "Hi,"
 
         # Format payment amount
-        dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+        dollars = f"${(amount_total or 0) / 100:.2f}" if isinstance(amount_total, int) else ""
         payment_info = f" for {dollars} {currency.upper()}" if dollars else ""
 
         # Enhanced email content
@@ -3266,7 +3399,6 @@ def insert_case_output(output_data: Dict) -> bool:
         return False
 
 
-
 @app.route('/webhooks/stripe', methods=['POST'])
 def stripe_webhook():
     """Stripe webhook handler for processing payment events (converted from Deno/TypeScript)"""
@@ -3307,9 +3439,9 @@ def stripe_webhook():
 
             # Get token from client_reference_id or metadata (check both token and case_token)
             token = (
-                session.get('client_reference_id') or
-                session.get('metadata', {}).get('token') or
-                session.get('metadata', {}).get('case_token')
+                    session.get('client_reference_id') or
+                    session.get('metadata', {}).get('token') or
+                    session.get('metadata', {}).get('case_token')
             )
             if not token:
                 logger.error(f"No token found in session. Session data: {session.get('metadata', {})}")
@@ -3317,9 +3449,9 @@ def stripe_webhook():
 
             # Get email (prefer customer_details.email)
             email = (
-                session.get('customer_details', {}).get('email') or
-                session.get('customer_email') or
-                None
+                    session.get('customer_details', {}).get('email') or
+                    session.get('customer_email') or
+                    None
             )
 
             logger.info(f"Processing payment completion for token: {token}")
@@ -3341,7 +3473,7 @@ def stripe_webhook():
 
             try:
                 case_response = requests.patch(case_url, params=case_params, headers=case_headers,
-                                             json=case_data, timeout=TIMEOUT)
+                                               json=case_data, timeout=TIMEOUT)
                 case_response.raise_for_status()
                 updated_cases = case_response.json()
 
@@ -3360,54 +3492,79 @@ def stripe_webhook():
                 logger.error(f"Failed to update case: {str(e)}")
                 return jsonify({'error': 'Database update failed'}), 500
 
-            # --- Send receipt email (non-fatal) ---
+            # --- Run case analysis immediately after payment (non-fatal) ---
+            logger.info(f"Running case analysis after payment for token: {token}")
+            try:
+                analysis_result = run_case_analysis(token)
+                if analysis_result.get('ok'):
+                    logger.info(
+                        f"Case analysis completed successfully for token: {token}, cached={analysis_result.get('cached', False)}")
+                    # Log case analysis success event
+                    try:
+                        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                        event_data = {
+                            'token': token,
+                            'type': 'case_analysis_completed',
+                            'data': {
+                                'cached': analysis_result.get('cached', False),
+                                'status': analysis_result.get('status', 'unknown')
+                            }
+                        }
+                        event_headers = supabase_headers()
+                        requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                    except Exception:
+                        pass  # Best effort
+                else:
+                    logger.error(
+                        f"Case analysis failed for token: {token}, error: {analysis_result.get('error', 'unknown')}")
+                    # Log case analysis failure event
+                    try:
+                        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                        event_data = {
+                            'token': token,
+                            'type': 'case_analysis_failed',
+                            'data': {
+                                'error': analysis_result.get('error', 'unknown')[:1000]
+                            }
+                        }
+                        event_headers = supabase_headers()
+                        requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                    except Exception:
+                        pass  # Best effort
+            except Exception as e:
+                logger.error(f"Exception running case analysis for token {token}: {str(e)}")
+                # Log case analysis exception event
+                try:
+                    event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                    event_data = {
+                        'token': token,
+                        'type': 'case_analysis_failed',
+                        'data': {
+                            'error': str(e)[:1000]
+                        }
+                    }
+                    event_headers = supabase_headers()
+                    requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                except Exception:
+                    pass  # Best effort
+
+            # --- Send receipt email directly (non-fatal) ---
+            case_url_link = f"{SITE_URL}/case.html?case={token}"
             if not email:
                 logger.warning("No email available (Stripe + DB). Skipping receipt email send.")
-            elif not SMTP_SENDER_WEBHOOK_URL or not SMTP_SENDER_WEBHOOK_SECRET:
-                logger.warning("SMTP sender webhook env vars missing; skipping email send")
             else:
-                case_url_link = f"{SITE_URL}/case.html?case={token}"
-                email_payload = {
-                    'token': token,
-                    'email': email,
-                    'case_url': case_url_link,
-                    'amount_total': session.get('amount_total'),
-                    'currency': session.get('currency'),
-                    'customer_name': session.get('customer_details', {}).get('name'),
-                    'stripe_session_id': session['id']
-                }
-
                 try:
-                    email_response = requests.post(
-                        SMTP_SENDER_WEBHOOK_URL,
-                        headers={
-                            'Content-Type': 'application/json',
-                            'X-Webhook-Secret': SMTP_SENDER_WEBHOOK_SECRET
-                        },
-                        json=email_payload,
-                        timeout=TIMEOUT
+                    email_sent = send_receipt_email_direct(
+                        token=token,
+                        to_email=email,
+                        case_url=case_url_link,
+                        amount_total=session.get('amount_total'),
+                        currency=session.get('currency'),
+                        customer_name=session.get('customer_details', {}).get('name'),
+                        stripe_session_id=session['id']
                     )
 
-                    if not email_response.ok:
-                        error_text = email_response.text
-                        logger.warning(f"Receipt email send failed (non-fatal): {email_response.status_code}, {error_text}")
-
-                        # Log failed email event
-                        try:
-                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                            event_data = {
-                                'token': token,
-                                'type': 'receipt_email_failed',
-                                'data': {
-                                    'status': email_response.status_code,
-                                    'body': error_text[:1000]
-                                }
-                            }
-                            event_headers = supabase_headers()
-                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                        except Exception:
-                            pass  # Best effort
-                    else:
+                    if email_sent:
                         # Log successful email event
                         try:
                             event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
@@ -3417,6 +3574,22 @@ def stripe_webhook():
                                 'data': {
                                     'to': email,
                                     'case_url': case_url_link
+                                }
+                            }
+                            event_headers = supabase_headers()
+                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                        except Exception:
+                            pass  # Best effort
+                    else:
+                        logger.warning(f"Receipt email send failed (non-fatal) for token: {token}")
+                        # Log failed email event
+                        try:
+                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                            event_data = {
+                                'token': token,
+                                'type': 'receipt_email_failed',
+                                'data': {
+                                    'error': 'send_receipt_email_direct returned False'
                                 }
                             }
                             event_headers = supabase_headers()
@@ -3594,7 +3767,8 @@ def send_receipt_email():
     customer_name = data.get("customer_name")
     stripe_session_id = data.get("stripe_session_id")
 
-    logger.info(f"send-receipt-email payload: token_present={bool(token)}, to_email={to_email}, case_url_present={bool(case_url)}, customer_name={customer_name}")
+    logger.info(
+        f"send-receipt-email payload: token_present={bool(token)}, to_email={to_email}, case_url_present={bool(case_url)}, customer_name={customer_name}")
 
     if not token or not to_email or not case_url:
         logger.warning("send-receipt-email missing required fields")
@@ -3604,7 +3778,7 @@ def send_receipt_email():
     greeting = f"Hi {customer_name}," if customer_name else "Hi,"
 
     # Format payment amount
-    dollars = f"${(amount_total or 0)/100:.2f}" if isinstance(amount_total, int) else ""
+    dollars = f"${(amount_total or 0) / 100:.2f}" if isinstance(amount_total, int) else ""
     payment_info = f" for {dollars} {currency}" if dollars else ""
 
     # Enhanced email content
@@ -3656,7 +3830,7 @@ This email confirms your payment and provides access to your case. Keep this ema
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [to_email], msg.as_string())
 
-        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}..." )
+        logger.info(f"Receipt email sent to {to_email} (token={token[:8]}...")
         return jsonify({"ok": True}), 200
 
     except smtplib.SMTPAuthenticationError as e:
