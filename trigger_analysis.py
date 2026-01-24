@@ -269,9 +269,3 @@ Make this feel like a $30 deliverable: concrete, specific, complete."""
                 logger.info(f"Updated case outputs status to 'error' for token {token[:8]}...")
             except Exception as db_err:
                 logger.error(f"Failed to update error status in DB: {str(db_err)}")
-
-    # Run in background thread
-    analysis_thread = threading.Thread(target=run_analysis)
-    analysis_thread.daemon = True
-    analysis_thread.start()
-    logger.info(f"Started background case analysis thread for token {token[:8]}...")

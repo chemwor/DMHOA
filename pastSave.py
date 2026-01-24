@@ -1457,13 +1457,7 @@ RULES:
 
 
 def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool = False) -> bool:
-    """Generate ONLY final preview when documents are ready or after 30-second timeout.
-
-    This function handles THREE scenarios:
-    1. Case has uploaded documents (in dmhoa_documents table) → use document text
-    2. Case has pasted text (in payload.pastedText) → use pasted text
-    3. Case has neither → generate basic preview without document content
-    """
+    """Generate ONLY final preview when documents are ready or after 30-second timeout."""
     try:
         # Use improved concurrency guard to prevent duplicate active previews
         if not force_regenerate and not upsert_active_preview_lock(case_id):
@@ -1476,17 +1470,6 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 logger.error(f"Case not found for token {token[:12]}...")
                 return False
 
-            # Check for pasted text in payload
-            payload = case.get('payload', {})
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except:
-                    payload = {}
-
-            pasted_text = payload.get('pastedText', '')
-            has_pasted_text = bool(pasted_text and pasted_text.strip())
-
             # Check document status
             documents = fetch_ready_documents_by_token(token, limit=5)
             all_documents = fetch_any_documents_status_by_token(token)
@@ -1495,18 +1478,6 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
 
             # Check existing preview
             existing_preview = read_active_preview(case_id)
-
-            # Determine what content source we have
-            # Priority: 1) Ready documents, 2) Pasted text, 3) None
-            content_source = "none"
-            if documents:
-                content_source = "documents"
-            elif has_pasted_text:
-                content_source = "pasted_text"
-
-            logger.info(f"Preview generation for {token[:12]}...: content_source={content_source}, "
-                        f"docs={len(documents)}, has_pasted_text={has_pasted_text}, "
-                        f"has_processing_docs={has_processing_documents}")
 
             # NEW: Only generate FINAL preview - wait for documents OR timeout
             should_generate = False
@@ -1522,19 +1493,14 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                     # Documents are ready - generate final preview immediately
                     should_generate = True
                     logger.info(f"Documents ready - generating FINAL preview immediately for case {token[:12]}...")
-                elif has_pasted_text:
-                    # Has pasted text - generate preview using pasted text
-                    should_generate = True
-                    logger.info(f"Pasted text available - generating FINAL preview for case {token[:12]}...")
                 elif has_processing_documents:
                     # Documents still processing - wait (don't generate preliminary)
                     logger.info(f"Documents processing for case {token[:12]}... - waiting for FINAL preview")
                     return True  # Return success but don't generate preview yet
                 elif not all_documents:
-                    # No documents at all and no pasted text - generate final basic preview
+                    # No documents at all - generate final basic preview
                     should_generate = True
-                    logger.info(
-                        f"No documents or pasted text - generating FINAL basic preview for case {token[:12]}...")
+                    logger.info(f"No documents uploaded - generating FINAL basic preview for case {token[:12]}...")
                 else:
                     # Documents exist but not ready yet - wait
                     logger.info(f"Waiting for documents to be ready for case {token[:12]}...")
@@ -1545,16 +1511,11 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 existing_doc_summary = existing_content.get('doc_summary', {})
                 existing_doc_status = existing_doc_summary.get('doc_status', 'none')
 
-                if documents and existing_doc_status in ['none', 'pasted_text']:
+                if documents and existing_doc_status in ['none']:
                     # We have ready documents but existing preview doesn't - upgrade to final
                     should_generate = True
                     preview_type = "final_upgrade"
                     logger.info(f"Upgrading to FINAL preview with documents for case {token[:12]}...")
-                elif has_pasted_text and existing_doc_status == 'none':
-                    # We have pasted text but existing preview has none - upgrade
-                    should_generate = True
-                    preview_type = "final_upgrade_pasted"
-                    logger.info(f"Upgrading to FINAL preview with pasted text for case {token[:12]}...")
                 else:
                     logger.info(f"FINAL preview already exists for case {token[:12]}... - skipping generation")
                     return True
@@ -1570,22 +1531,9 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
                 doc_brief = build_doc_brief(documents)
                 preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_openai(case, doc_brief)
                 preview_type = "final_with_docs"
-            elif has_pasted_text:
-                # Pasted text available - generate preview using pasted text
-                logger.info(f"Generating FINAL preview with pasted text for case {token[:12]}...")
-                doc_brief = {
-                    "doc_status": "pasted_text",
-                    "doc_count": 1,
-                    "sources": [{"filename": "Pasted Text", "page_count": 1, "char_count": len(pasted_text)}],
-                    "brief_text": pasted_text[:3000] if pasted_text else ""
-                }
-                preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_pasted_text(case,
-                                                                                                             pasted_text,
-                                                                                                             doc_brief)
-                preview_type = "final_with_pasted_text"
             else:
-                # No documents or pasted text - generate final basic preview
-                logger.info(f"Generating FINAL basic preview (no documents or pasted text) for case {token[:12]}...")
+                # No documents - generate final basic preview
+                logger.info(f"Generating FINAL basic preview (no documents) for case {token[:12]}...")
                 doc_brief = {
                     "doc_status": "none",
                     "doc_count": 0,
@@ -1980,256 +1928,6 @@ def save_case():
         return add_cors_headers(response), 500
 
 
-def generate_preview_for_pasted_text(case_id: str, token: str, pasted_text: str, payload: Dict) -> bool:
-    """Generate a preview specifically for cases where text was pasted instead of documents uploaded."""
-    try:
-        logger.info(f"Generating pasted text preview for case {token[:12]}...")
-
-        # Use concurrency guard to prevent duplicate previews
-        if not upsert_active_preview_lock(case_id):
-            logger.info(f"Preview already being generated for case {case_id}")
-            return True
-
-        try:
-            # Fetch case data
-            case = read_case_by_token(token)
-            if not case:
-                logger.error(f"Case not found for token {token[:12]}...")
-                return False
-
-            # Build doc_brief for pasted text
-            doc_brief = {
-                "doc_status": "pasted_text",
-                "doc_count": 1,
-                "sources": [{"filename": "Pasted Text", "page_count": 1, "char_count": len(pasted_text)}],
-                "brief_text": pasted_text[:3000] if pasted_text else ""
-            }
-
-            # Generate the preview using the pasted text
-            preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_pasted_text(case,
-                                                                                                         pasted_text,
-                                                                                                         doc_brief)
-
-            # Save the preview
-            success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms,
-                                                     preview_json)
-
-            if success:
-                logger.info(f"Successfully generated pasted text preview for case {token[:12]}...")
-                return True
-            else:
-                logger.error(f"Failed to save pasted text preview for case {token[:12]}...")
-                return False
-
-        finally:
-            # Always release the lock
-            release_preview_lock(case_id)
-
-    except Exception as e:
-        logger.error(f"Error generating pasted text preview for case {token[:12]}...: {str(e)}")
-        release_preview_lock(case_id)
-        return False
-
-
-def generate_case_preview_with_pasted_text(case_data: Dict, pasted_text: str, doc_brief: Dict) -> Tuple[
-    str, Dict, int, Optional[Dict]]:
-    """Generate case preview using OpenAI with pasted text content."""
-    start_time = time.time()
-
-    try:
-        if not OPENAI_API_KEY:
-            logger.warning("OpenAI API key not configured")
-            return "Preview generation unavailable - OpenAI not configured", {}, 0, None
-
-        # Extract case information from payload first, then fallback to top level
-        payload = case_data.get('payload', {})
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except:
-                payload = {}
-
-        # Try payload first, then case_data directly
-        hoa_name = (payload.get('hoaName') or
-                    payload.get('hoa_name') or
-                    case_data.get('hoa_name') or
-                    case_data.get('hoaName') or
-                    'Unknown HOA')
-
-        violation_type = (payload.get('violationType') or
-                          payload.get('violation_type') or
-                          payload.get('noticeType') or
-                          case_data.get('case_description') or
-                          case_data.get('violationType') or
-                          'Unknown violation')
-
-        case_description = (payload.get('caseDescription') or
-                            payload.get('case_description') or
-                            payload.get('description') or
-                            case_data.get('case_description') or
-                            case_data.get('caseDescription') or
-                            'No description provided')
-
-        property_address = (payload.get('propertyAddress') or
-                            payload.get('property_address') or
-                            case_data.get('property_address') or
-                            case_data.get('propertyAddress') or
-                            '')
-
-        owner_name = (payload.get('ownerName') or
-                      payload.get('owner_name') or
-                      case_data.get('owner_name') or
-                      case_data.get('ownerName') or
-                      '')
-
-        # Clip pasted text to avoid token limits
-        clipped_text = pasted_text[:8000] if pasted_text else ""
-
-        # Prompt specifically for pasted text
-        user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. The user has pasted text from their HOA notice. Extract specific facts from the pasted text and output ONLY valid JSON.
-
-Case Details:
-- HOA: {hoa_name}
-- Violation Type: {violation_type}
-- Property Address: {property_address}
-- Owner: {owner_name}
-- Case Description: {case_description}
-
-PASTED TEXT FROM HOA NOTICE:
-{clipped_text}
-
-Output ONLY valid JSON with this exact structure:
-{{
-  "version": "preview_v2_sales",
-  "headline": "string (8-14 words, specific to this case. If a deadline is present, headline must include it as 'X-Day Deadline' or the exact date)",
-  "why_now": "string (1-2 sentences, tie urgency to the required action and any deadline found in the pasted text)",
-  "your_situation": {{
-    "alleged_violation": "string (extracted from pasted text)",
-    "hoa_demands": ["string", "string", "..."],
-    "deadline": "string (use exact date if present in pasted text; else 'Not stated')",
-    "rules_cited": ["string (each entry must be either 'Paragraph <...>' / 'Section <...>' / 'Article <...>' if present in pasted text, otherwise 'Not stated')", "..."]
-  }},
-  "critical_detail_locked": {{
-    "title": "Critical Response Wording (Locked)",
-    "body": "The exact clause/paragraph language to cite, proof checklist (what the HOA will accept), and extension request wording (preserves rights without admitting fault) are locked. Our analysis shows specific language that could weaken your position if worded incorrectly. This critical phrasing is included in the unlock package."
-  }},
-  "risk_if_wrong": [
-    "string (specific consequence based on pasted text)",
-    "string",
-    "string"
-  ],
-  "what_you_get_when_you_unlock": [
-    "Professional response letter tailored to your specific violation",
-    "Certified mail template with proper legal language",
-    "Evidence checklist to document your defense",
-    "Extension request template if deadline is tight",
-    "Negotiation strategies for your specific situation"
-  ],
-  "hard_stop": "string (1-2 lines that create unfinished business - must mention 2-3 concrete items such as: exact paragraph language to quote, proof checklist, extension request template)",
-  "cta": {{
-    "primary": "Unlock full response package",
-    "secondary": "See exactly what proof the HOA will accept"
-  }}
-}}
-
-RULES:
-- Extract specific facts from the pasted text for your_situation fields
-- Use "you" voice throughout
-- Be concrete and specific to this case
-- Include at least 5 concrete deliverables in what_you_get_when_you_unlock
-- Make hard_stop create genuine unfinished business with concrete locked items
-- For critical_detail_locked body, reference exact clause language, proof checklist, extension request wording
-- Avoid 'admit liability' language unless phrased as 'without admitting fault' or 'without admitting liability'"""
-
-        headers = {
-            'Authorization': f'Bearer {OPENAI_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-
-        data = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object."
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ],
-            "temperature": 0.3,
-            "max_tokens": 1200
-        }
-
-        response = requests.post(
-            'https://api.openai.com/v1/chat/completions',
-            headers=headers,
-            json=data,
-            timeout=30
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        json_response = result['choices'][0]['message']['content'].strip()
-
-        # Calculate latency
-        latency_ms = int((time.time() - start_time) * 1000)
-
-        # Extract token usage
-        token_usage = {}
-        if 'usage' in result:
-            usage = result['usage']
-            token_usage = {
-                'prompt_tokens': usage.get('prompt_tokens', 0),
-                'completion_tokens': usage.get('completion_tokens', 0),
-                'total_tokens': usage.get('total_tokens', 0)
-            }
-
-            # Estimate cost (approximate rates for gpt-4o-mini)
-            input_cost = (token_usage['prompt_tokens'] / 1000) * 0.00015
-            output_cost = (token_usage['completion_tokens'] / 1000) * 0.0006
-            token_usage['cost_usd'] = round(input_cost + output_cost, 6)
-
-        # Parse JSON safely and create markdown
-        preview_json = None
-        try:
-            json_start = json_response.find('{')
-            json_end = json_response.rfind('}') + 1
-            if json_start >= 0 and json_end > json_start:
-                clean_json = json_response[json_start:json_end]
-                preview_json = json.loads(clean_json)
-
-                # Post-processing to clean up rules_cited narrative
-                if preview_json and 'your_situation' in preview_json and 'rules_cited' in preview_json[
-                    'your_situation']:
-                    preview_json['your_situation']['rules_cited'] = clean_rules_cited(
-                        preview_json['your_situation']['rules_cited'])
-
-                # Create markdown from JSON
-                markdown_preview = render_preview_markdown(preview_json)
-
-                logger.info(f"Generated pasted text preview: {len(markdown_preview)} characters, {latency_ms}ms")
-                return markdown_preview, token_usage, latency_ms, preview_json
-
-            else:
-                raise json.JSONDecodeError("No valid JSON found", json_response, 0)
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {str(e)}")
-            logger.warning(f"Raw response: {json_response}")
-
-            # Fallback to original response as markdown but no preview_json
-            markdown_preview = f"# HOA Case Analysis\n\n{json_response}"
-            logger.info(f"Generated fallback pasted text preview: {len(markdown_preview)} characters, {latency_ms}ms")
-            return markdown_preview, token_usage, latency_ms, None
-
-    except Exception as e:
-        latency_ms = int((time.time() - start_time) * 1000)
-        logger.error(f"Failed to generate pasted text preview: {str(e)}")
-        return f"Error generating preview: {str(e)}", {}, latency_ms, None
-
-
 def trigger_document_extraction_async(token: str, payload: dict):
     """
     Async function to trigger document extraction without blocking the save operation
@@ -2240,7 +1938,7 @@ def trigger_document_extraction_async(token: str, payload: dict):
         # Check if there are uploaded documents that need processing
         needs_extraction = (
                 (payload.get('pastedText') or (
-                        payload.get('additional_docs') and len(payload.get('additional_docs', [])) > 0)) and
+                            payload.get('additional_docs') and len(payload.get('additional_docs', [])) > 0)) and
                 payload.get('extract_status') == 'pending'
         )
 
@@ -2249,31 +1947,6 @@ def trigger_document_extraction_async(token: str, payload: dict):
             return
 
         logger.info("Document extraction needed, preparing to trigger...")
-
-        # NEW: Handle pasted text cases - generate preview immediately
-        if payload.get('pastedText') and not payload.get('additional_docs'):
-            logger.info("Processing pasted text case - generating specific preview")
-
-            # Get the case ID for preview generation
-            case = read_case_by_token(token)
-            if case:
-                case_id = case.get('id')
-                pasted_text = payload.get('pastedText')
-
-                # Generate preview for pasted text in background thread
-                def generate_pasted_preview():
-                    time.sleep(1)  # Brief delay to ensure case is saved
-                    success = generate_preview_for_pasted_text(case_id, token, pasted_text, payload)
-                    if success:
-                        logger.info(f"Successfully generated preview for pasted text case: {token[:8]}...")
-                    else:
-                        logger.error(f"Failed to generate preview for pasted text case: {token[:8]}...")
-
-                preview_thread = threading.Thread(target=generate_pasted_preview)
-                preview_thread.daemon = True
-                preview_thread.start()
-            else:
-                logger.warning(f"Could not find case for token {token[:8]}... to generate pasted text preview")
 
         # Get environment variables for doc-extract-start
         if not DOC_EXTRACT_WEBHOOK_SECRET:
@@ -4160,3 +3833,4 @@ This email confirms your payment and provides access to your case. Keep this ema
 
 if __name__ == '__main__':
     app.run(debug=True)
+
