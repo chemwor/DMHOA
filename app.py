@@ -64,6 +64,12 @@ SMTP_FROM = os.environ.get("SMTP_FROM", "support@disputemyhoa.com")
 SMTP_SENDER_WEBHOOK_SECRET = os.environ.get("SMTP_SENDER_WEBHOOK_SECRET")
 SMTP_SENDER_WEBHOOK_URL = os.environ.get("SMTP_SENDER_WEBHOOK_URL")
 
+# Klaviyo Configuration
+KLAVIYO_API_KEY = os.environ.get("KLAVIYO_API_KEY")
+KLAVIYO_QUICK_PREVIEW_LIST_ID = os.environ.get("KLAVIYO_QUICK_PREVIEW_LIST_ID")
+KLAVIYO_FULL_PREVIEW_LIST_ID = os.environ.get("KLAVIYO_FULL_PREVIEW_LIST_ID")
+KLAVIYO_POST_PURCHASE_LIST_ID = os.environ.get("KLAVIYO_POST_PURCHASE_LIST_ID")
+
 # Request timeouts
 TIMEOUT = (5, 60)  # (connect, read)
 
@@ -79,6 +85,153 @@ def supabase_headers() -> Dict[str, str]:
         'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
         'Content-Type': 'application/json'
     }
+
+
+def klaviyo_headers() -> Dict[str, str]:
+    """Return headers for Klaviyo API requests."""
+    return {
+        'Authorization': f'Klaviyo-API-Key {KLAVIYO_API_KEY}',
+        'Content-Type': 'application/json',
+        'revision': '2024-02-15'
+    }
+
+
+def klaviyo_add_profile_to_list(email: str, list_id: str) -> bool:
+    """Add a profile to a Klaviyo list. Creates the profile if it doesn't exist."""
+    if not KLAVIYO_API_KEY or not list_id:
+        logger.warning("Klaviyo API key or list ID not configured")
+        return False
+
+    try:
+        url = f"https://a.klaviyo.com/api/lists/{list_id}/relationships/profiles/"
+        payload = {
+            "data": [
+                {
+                    "type": "profile",
+                    "attributes": {
+                        "email": email
+                    }
+                }
+            ]
+        }
+        response = requests.post(url, headers=klaviyo_headers(), json=payload, timeout=TIMEOUT)
+
+        if response.status_code in [200, 201, 202, 204]:
+            logger.info(f"Successfully added {email} to Klaviyo list {list_id}")
+            return True
+        else:
+            logger.warning(f"Klaviyo add to list failed: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Klaviyo add to list error: {str(e)}")
+        return False
+
+
+def klaviyo_remove_profile_from_list(email: str, list_id: str) -> bool:
+    """Remove a profile from a Klaviyo list by email."""
+    if not KLAVIYO_API_KEY or not list_id:
+        return False
+
+    try:
+        # First, get the profile ID by email
+        profile_id = klaviyo_get_profile_id_by_email(email)
+        if not profile_id:
+            logger.info(f"No Klaviyo profile found for {email}, nothing to remove")
+            return True  # Nothing to remove is still a success
+
+        url = f"https://a.klaviyo.com/api/lists/{list_id}/relationships/profiles/"
+        payload = {
+            "data": [
+                {
+                    "type": "profile",
+                    "id": profile_id
+                }
+            ]
+        }
+        response = requests.delete(url, headers=klaviyo_headers(), json=payload, timeout=TIMEOUT)
+
+        if response.status_code in [200, 204]:
+            logger.info(f"Successfully removed {email} from Klaviyo list {list_id}")
+            return True
+        else:
+            logger.warning(f"Klaviyo remove from list failed: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Klaviyo remove from list error: {str(e)}")
+        return False
+
+
+def klaviyo_get_profile_id_by_email(email: str) -> Optional[str]:
+    """Get a Klaviyo profile ID by email address."""
+    if not KLAVIYO_API_KEY:
+        return None
+
+    try:
+        url = "https://a.klaviyo.com/api/profiles/"
+        params = {
+            'filter': f'equals(email,"{email}")'
+        }
+        response = requests.get(url, headers=klaviyo_headers(), params=params, timeout=TIMEOUT)
+
+        if response.status_code == 200:
+            data = response.json()
+            profiles = data.get('data', [])
+            if profiles:
+                return profiles[0].get('id')
+        return None
+
+    except Exception as e:
+        logger.error(f"Klaviyo get profile error: {str(e)}")
+        return None
+
+
+def klaviyo_sync_profile_to_list(email: str, target_list_id: str) -> bool:
+    """
+    Add email to target list and remove from other DMHOA lists.
+    Ensures an email is only in one list at a time.
+    """
+    if not KLAVIYO_API_KEY:
+        logger.warning("Klaviyo API key not configured, skipping list sync")
+        return False
+
+    all_list_ids = [
+        KLAVIYO_QUICK_PREVIEW_LIST_ID,
+        KLAVIYO_FULL_PREVIEW_LIST_ID,
+        KLAVIYO_POST_PURCHASE_LIST_ID
+    ]
+
+    # Remove from all other lists first
+    for list_id in all_list_ids:
+        if list_id and list_id != target_list_id:
+            klaviyo_remove_profile_from_list(email, list_id)
+
+    # Add to target list
+    return klaviyo_add_profile_to_list(email, target_list_id)
+
+
+def determine_klaviyo_abandonment_list(payload: Dict) -> Optional[str]:
+    """
+    Determine which abandonment list an email should be added to based on payload.
+
+    Quick Preview: Has basic info but no document_id or webhook_response
+    Full Preview: Has document_id and/or webhook_response indicating document processing
+
+    Returns the appropriate list ID or None if unable to determine.
+    """
+    if not payload:
+        return None
+
+    # Check for full preview indicators
+    has_document_id = payload.get('document_id') is not None
+    has_webhook_response = payload.get('webhook_response') is not None
+    has_notice_storage_path = payload.get('notice_storage_path') is not None
+
+    if has_document_id or has_webhook_response or has_notice_storage_path:
+        return KLAVIYO_FULL_PREVIEW_LIST_ID
+    else:
+        return KLAVIYO_QUICK_PREVIEW_LIST_ID
 
 
 def fetch_ready_documents_by_token(token: str, limit: int = 3) -> List[Dict]:
@@ -1961,6 +2114,24 @@ def save_case():
         except Exception as e:
             logger.warning(f"Failed to log event (non-critical): {str(e)}")
 
+        # Sync email to appropriate Klaviyo abandonment list (non-critical)
+        try:
+            email_for_klaviyo = payload.get('email')
+            if email_for_klaviyo:
+                target_list_id = determine_klaviyo_abandonment_list(payload)
+                if target_list_id:
+                    # Run in background to not block the response
+                    def sync_klaviyo():
+                        klaviyo_sync_profile_to_list(email_for_klaviyo, target_list_id)
+                        list_type = "full_preview" if target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID else "quick_preview"
+                        logger.info(f"Synced {email_for_klaviyo} to Klaviyo {list_type} abandonment list")
+
+                    klaviyo_thread = threading.Thread(target=sync_klaviyo)
+                    klaviyo_thread.daemon = True
+                    klaviyo_thread.start()
+        except Exception as e:
+            logger.warning(f"Failed to sync Klaviyo list (non-critical): {str(e)}")
+
         # Start document extraction in background thread with delay
         def delayed_extraction():
             time.sleep(2)  # 2 second delay to ensure commit propagation
@@ -3802,10 +3973,33 @@ def stripe_webhook():
                 # Fallback email from DB if Stripe didn't provide it
                 if not email:
                     email = updated_case.get('email')
+                    # Also check inside payload if top-level email is not set
+                    if not email:
+                        case_payload = updated_case.get('payload') or {}
+                        if isinstance(case_payload, str):
+                            try:
+                                case_payload = json.loads(case_payload)
+                            except:
+                                case_payload = {}
+                        email = case_payload.get('email')
 
             except Exception as e:
                 logger.error(f"Failed to update case: {str(e)}")
                 return jsonify({'error': 'Database update failed'}), 500
+
+            # --- Move email to Klaviyo post-purchase list (non-fatal) ---
+            if email and KLAVIYO_POST_PURCHASE_LIST_ID:
+                try:
+                    # Run in background to not block the webhook response
+                    def sync_klaviyo_post_purchase():
+                        klaviyo_sync_profile_to_list(email, KLAVIYO_POST_PURCHASE_LIST_ID)
+                        logger.info(f"Moved {email} to Klaviyo post-purchase list")
+
+                    klaviyo_thread = threading.Thread(target=sync_klaviyo_post_purchase)
+                    klaviyo_thread.daemon = True
+                    klaviyo_thread.start()
+                except Exception as e:
+                    logger.warning(f"Failed to sync Klaviyo post-purchase list (non-fatal): {str(e)}")
 
             # --- Run case analysis immediately after payment (non-fatal) ---
             logger.info(f"Running case analysis after payment for token: {token}")
