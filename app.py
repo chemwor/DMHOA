@@ -2215,14 +2215,47 @@ def save_case():
             email_for_klaviyo = payload.get('email')
             if email_for_klaviyo:
                 target_list_id = determine_klaviyo_abandonment_list(payload)
-                # Get the reroute_link - for quick preview, use fullCaseFormLink
-                reroute_link = payload.get('fullCaseFormLink')
+                case_token_for_klaviyo = token
+                form_link = payload.get('fullCaseFormLink')
+
                 if target_list_id:
                     # Run in background to not block the response
                     def sync_klaviyo():
                         klaviyo_sync_profile_to_list(email_for_klaviyo, target_list_id)
-                        list_type = "full_preview" if target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID else "quick_preview"
+                        is_full_preview = target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID
+                        list_type = "full_preview" if is_full_preview else "quick_preview"
                         logger.info(f"Synced {email_for_klaviyo} to Klaviyo {list_type} abandonment list")
+
+                        # Determine reroute_link based on list type
+                        reroute_link = None
+                        if is_full_preview:
+                            # For full preview, generate Stripe checkout URL
+                            try:
+                                if STRIPE_SECRET_KEY and STRIPE_PRICE_ID:
+                                    frontend_url = "https://disputemyhoa.com"
+                                    # Set expiration to 17 days from now
+                                    expires_at = int(time.time()) + (17 * 24 * 60 * 60)
+                                    checkout_session = stripe.checkout.Session.create(
+                                        payment_method_types=['card'],
+                                        line_items=[{
+                                            'price': STRIPE_PRICE_ID,
+                                            'quantity': 1,
+                                        }],
+                                        mode='payment',
+                                        expires_at=expires_at,
+                                        success_url=f"{frontend_url}/case.html?case={case_token_for_klaviyo}&session_id={{CHECKOUT_SESSION_ID}}",
+                                        cancel_url=f"{frontend_url}/case-preview?case={case_token_for_klaviyo}",
+                                        metadata={
+                                            'case_token': case_token_for_klaviyo,
+                                        }
+                                    )
+                                    reroute_link = checkout_session.url
+                                    logger.info(f"Generated Stripe checkout URL for Klaviyo reroute_link: {email_for_klaviyo}")
+                            except Exception as e:
+                                logger.warning(f"Failed to create Stripe checkout for Klaviyo reroute_link: {str(e)}")
+                        else:
+                            # For quick preview, use the full case form link
+                            reroute_link = form_link
 
                         # Update reroute_link property on profile
                         if reroute_link:
