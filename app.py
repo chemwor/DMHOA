@@ -2226,8 +2226,13 @@ def save_case():
                         list_type = "full_preview" if is_full_preview else "quick_preview"
                         logger.info(f"Synced {email_for_klaviyo} to Klaviyo {list_type} abandonment list")
 
-                        # Determine reroute_link based on list type
-                        reroute_link = None
+                        # Update profile properties based on list type
+                        profile_properties = {}
+
+                        # Always set quick_preview_link if we have a form link
+                        if form_link:
+                            profile_properties['quick_preview_link'] = form_link
+
                         if is_full_preview:
                             # For full preview, generate Stripe checkout URL
                             try:
@@ -2249,19 +2254,14 @@ def save_case():
                                             'case_token': case_token_for_klaviyo,
                                         }
                                     )
-                                    reroute_link = checkout_session.url
-                                    logger.info(f"Generated Stripe checkout URL for Klaviyo reroute_link: {email_for_klaviyo}")
+                                    profile_properties['stripe_checkout_link'] = checkout_session.url
+                                    logger.info(f"Generated Stripe checkout URL for Klaviyo: {email_for_klaviyo}")
                             except Exception as e:
-                                logger.warning(f"Failed to create Stripe checkout for Klaviyo reroute_link: {str(e)}")
-                        else:
-                            # For quick preview, use the full case form link
-                            reroute_link = form_link
+                                logger.warning(f"Failed to create Stripe checkout for Klaviyo: {str(e)}")
 
-                        # Update reroute_link property on profile
-                        if reroute_link:
-                            klaviyo_update_profile_properties(email_for_klaviyo, {
-                                'reroute_link': reroute_link
-                            })
+                        # Update properties on profile
+                        if profile_properties:
+                            klaviyo_update_profile_properties(email_for_klaviyo, profile_properties)
 
                     klaviyo_thread = threading.Thread(target=sync_klaviyo)
                     klaviyo_thread.daemon = True
@@ -4360,21 +4360,21 @@ def create_checkout_session():
 
             logger.info(f"Created checkout session {checkout_session.id} for case {case_id}")
 
-            # Update Klaviyo profile with the Stripe checkout link as reroute_link
+            # Update Klaviyo profile with the Stripe checkout link
             try:
                 email_for_klaviyo = case.get('email') or (case.get('payload') or {}).get('email')
                 if email_for_klaviyo and checkout_session.url:
-                    def update_klaviyo_reroute():
+                    def update_klaviyo_stripe_link():
                         klaviyo_update_profile_properties(email_for_klaviyo, {
-                            'reroute_link': checkout_session.url
+                            'stripe_checkout_link': checkout_session.url
                         })
-                        logger.info(f"Updated reroute_link to Stripe checkout URL for {email_for_klaviyo}")
+                        logger.info(f"Updated stripe_checkout_link for {email_for_klaviyo}")
 
-                    klaviyo_thread = threading.Thread(target=update_klaviyo_reroute)
+                    klaviyo_thread = threading.Thread(target=update_klaviyo_stripe_link)
                     klaviyo_thread.daemon = True
                     klaviyo_thread.start()
             except Exception as e:
-                logger.warning(f"Failed to update Klaviyo reroute_link (non-critical): {str(e)}")
+                logger.warning(f"Failed to update Klaviyo stripe_checkout_link (non-critical): {str(e)}")
 
             # Create response with multiple field names for frontend compatibility
             response_data = {
