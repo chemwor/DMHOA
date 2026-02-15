@@ -2219,22 +2219,21 @@ def save_case():
                 form_link = payload.get('fullCaseFormLink')
 
                 if target_list_id:
+                    is_full_preview = target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID
+
                     # Run in background to not block the response
                     def sync_klaviyo():
-                        klaviyo_sync_profile_to_list(email_for_klaviyo, target_list_id)
-                        is_full_preview = target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID
                         list_type = "full_preview" if is_full_preview else "quick_preview"
-                        logger.info(f"Synced {email_for_klaviyo} to Klaviyo {list_type} abandonment list")
 
-                        # Update profile properties based on list type
+                        # Step 1: Build profile properties FIRST
                         profile_properties = {}
 
                         # Always set quick_preview_link if we have a form link
                         if form_link:
                             profile_properties['quick_preview_link'] = form_link
 
+                        # Step 2: For full preview, generate Stripe checkout URL BEFORE syncing to Klaviyo
                         if is_full_preview:
-                            # For full preview, generate Stripe checkout URL
                             try:
                                 if STRIPE_SECRET_KEY and STRIPE_PRICE_ID:
                                     frontend_url = "https://disputemyhoa.com"
@@ -2255,13 +2254,20 @@ def save_case():
                                         }
                                     )
                                     profile_properties['stripe_checkout_link'] = checkout_session.url
-                                    logger.info(f"Generated Stripe checkout URL for Klaviyo: {email_for_klaviyo}")
+                                    logger.info(f"Generated Stripe checkout URL for Klaviyo: {email_for_klaviyo} - {checkout_session.url}")
+                                else:
+                                    logger.warning(f"Stripe not configured - STRIPE_SECRET_KEY: {bool(STRIPE_SECRET_KEY)}, STRIPE_PRICE_ID: {bool(STRIPE_PRICE_ID)}")
                             except Exception as e:
-                                logger.warning(f"Failed to create Stripe checkout for Klaviyo: {str(e)}")
+                                logger.error(f"Failed to create Stripe checkout for Klaviyo: {str(e)}")
 
-                        # Update properties on profile
+                        # Step 3: Sync profile to Klaviyo list
+                        klaviyo_sync_profile_to_list(email_for_klaviyo, target_list_id)
+                        logger.info(f"Synced {email_for_klaviyo} to Klaviyo {list_type} abandonment list")
+
+                        # Step 4: Update properties on profile
                         if profile_properties:
-                            klaviyo_update_profile_properties(email_for_klaviyo, profile_properties)
+                            success = klaviyo_update_profile_properties(email_for_klaviyo, profile_properties)
+                            logger.info(f"Klaviyo profile properties update for {email_for_klaviyo}: success={success}, properties={list(profile_properties.keys())}")
 
                     klaviyo_thread = threading.Thread(target=sync_klaviyo)
                     klaviyo_thread.daemon = True
