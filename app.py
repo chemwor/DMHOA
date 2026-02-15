@@ -284,7 +284,7 @@ def klaviyo_update_profile_properties(email: str, properties: Dict) -> bool:
 
         # Update profile properties using PATCH
         url = f"https://a.klaviyo.com/api/profiles/{profile_id}/"
-        payload = {
+        request_payload = {
             "data": {
                 "type": "profile",
                 "id": profile_id,
@@ -293,13 +293,14 @@ def klaviyo_update_profile_properties(email: str, properties: Dict) -> bool:
                 }
             }
         }
-        response = requests.patch(url, headers=klaviyo_headers(), json=payload, timeout=TIMEOUT)
+        logger.info(f"Klaviyo PATCH request to {url} with properties: {properties}")
+        response = requests.patch(url, headers=klaviyo_headers(), json=request_payload, timeout=TIMEOUT)
 
         if response.status_code in [200, 201, 204]:
-            logger.info(f"Successfully updated Klaviyo profile properties for {email}: {list(properties.keys())}")
+            logger.info(f"Successfully updated Klaviyo profile properties for {email}: {list(properties.keys())} - Status: {response.status_code}")
             return True
         else:
-            logger.warning(f"Klaviyo profile update failed: {response.status_code} - {response.text}")
+            logger.warning(f"Klaviyo profile update failed: {response.status_code} - {response.text[:500]}")
             return False
 
     except Exception as e:
@@ -324,7 +325,10 @@ def determine_klaviyo_abandonment_list(payload: Dict) -> Optional[str]:
     has_webhook_response = payload.get('webhook_response') is not None
     has_notice_storage_path = payload.get('notice_storage_path') is not None
 
-    if has_document_id or has_webhook_response or has_notice_storage_path:
+    is_full_preview = has_document_id or has_webhook_response or has_notice_storage_path
+    logger.info(f"Klaviyo list determination: document_id={has_document_id}, webhook_response={has_webhook_response}, notice_storage_path={has_notice_storage_path} -> {'FULL' if is_full_preview else 'QUICK'} preview")
+
+    if is_full_preview:
         return KLAVIYO_FULL_PREVIEW_LIST_ID
     else:
         return KLAVIYO_QUICK_PREVIEW_LIST_ID
@@ -2213,13 +2217,16 @@ def save_case():
         # Sync email to appropriate Klaviyo abandonment list (non-critical)
         try:
             email_for_klaviyo = payload.get('email')
+            logger.info(f"Klaviyo sync starting for email: {email_for_klaviyo}, token: {token[:20] if token else 'None'}...")
             if email_for_klaviyo:
                 target_list_id = determine_klaviyo_abandonment_list(payload)
                 case_token_for_klaviyo = token
                 form_link = payload.get('fullCaseFormLink')
+                logger.info(f"Klaviyo target list: {target_list_id}, form_link: {form_link[:50] if form_link else 'None'}...")
 
                 if target_list_id:
                     is_full_preview = target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID
+                    logger.info(f"Klaviyo is_full_preview: {is_full_preview}")
 
                     # Run in background to not block the response
                     def sync_klaviyo():
@@ -2234,11 +2241,13 @@ def save_case():
 
                         # Step 2: For full preview, generate Stripe checkout URL BEFORE syncing to Klaviyo
                         if is_full_preview:
+                            # Save case preview link (never expires)
+                            frontend_url = "https://disputemyhoa.com"
+                            profile_properties['case_preview_link'] = f"{frontend_url}/case-preview.html?case={case_token_for_klaviyo}"
+
+                            # Save direct Stripe checkout link (expires in 24 hours)
                             try:
                                 if STRIPE_SECRET_KEY and STRIPE_PRICE_ID:
-                                    frontend_url = "https://disputemyhoa.com"
-                                    # Set expiration to 17 days from now
-                                    expires_at = int(time.time()) + (17 * 24 * 60 * 60)
                                     checkout_session = stripe.checkout.Session.create(
                                         payment_method_types=['card'],
                                         line_items=[{
@@ -2246,9 +2255,8 @@ def save_case():
                                             'quantity': 1,
                                         }],
                                         mode='payment',
-                                        expires_at=expires_at,
                                         success_url=f"{frontend_url}/case.html?case={case_token_for_klaviyo}&session_id={{CHECKOUT_SESSION_ID}}",
-                                        cancel_url=f"{frontend_url}/case-preview?case={case_token_for_klaviyo}",
+                                        cancel_url=f"{frontend_url}/case-preview.html?case={case_token_for_klaviyo}",
                                         metadata={
                                             'case_token': case_token_for_klaviyo,
                                         }
