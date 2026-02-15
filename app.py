@@ -253,6 +253,60 @@ def klaviyo_sync_profile_to_list(email: str, target_list_id: str) -> bool:
     return klaviyo_add_profile_to_list(email, target_list_id)
 
 
+def klaviyo_update_profile_properties(email: str, properties: Dict) -> bool:
+    """
+    Update custom properties on a Klaviyo profile.
+
+    Args:
+        email: The email address of the profile to update
+        properties: Dictionary of custom properties to set on the profile
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if not KLAVIYO_API_KEY:
+        logger.warning("Klaviyo API key not configured, skipping profile update")
+        return False
+
+    if not properties:
+        logger.warning("No properties provided for Klaviyo profile update")
+        return False
+
+    try:
+        # Get the profile ID
+        profile_id = klaviyo_get_profile_id_by_email(email)
+        if not profile_id:
+            # Create profile if it doesn't exist
+            profile_id = klaviyo_create_or_get_profile(email)
+            if not profile_id:
+                logger.warning(f"Could not create or get Klaviyo profile for {email}")
+                return False
+
+        # Update profile properties using PATCH
+        url = f"https://a.klaviyo.com/api/profiles/{profile_id}/"
+        payload = {
+            "data": {
+                "type": "profile",
+                "id": profile_id,
+                "attributes": {
+                    "properties": properties
+                }
+            }
+        }
+        response = requests.patch(url, headers=klaviyo_headers(), json=payload, timeout=TIMEOUT)
+
+        if response.status_code in [200, 201, 204]:
+            logger.info(f"Successfully updated Klaviyo profile properties for {email}: {list(properties.keys())}")
+            return True
+        else:
+            logger.warning(f"Klaviyo profile update failed: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Klaviyo profile update error: {str(e)}")
+        return False
+
+
 def determine_klaviyo_abandonment_list(payload: Dict) -> Optional[str]:
     """
     Determine which abandonment list an email should be added to based on payload.
@@ -2161,12 +2215,20 @@ def save_case():
             email_for_klaviyo = payload.get('email')
             if email_for_klaviyo:
                 target_list_id = determine_klaviyo_abandonment_list(payload)
+                # Get the reroute_link - for quick preview, use fullCaseFormLink
+                reroute_link = payload.get('fullCaseFormLink')
                 if target_list_id:
                     # Run in background to not block the response
                     def sync_klaviyo():
                         klaviyo_sync_profile_to_list(email_for_klaviyo, target_list_id)
                         list_type = "full_preview" if target_list_id == KLAVIYO_FULL_PREVIEW_LIST_ID else "quick_preview"
                         logger.info(f"Synced {email_for_klaviyo} to Klaviyo {list_type} abandonment list")
+
+                        # Update reroute_link property on profile
+                        if reroute_link:
+                            klaviyo_update_profile_properties(email_for_klaviyo, {
+                                'reroute_link': reroute_link
+                            })
 
                     klaviyo_thread = threading.Thread(target=sync_klaviyo)
                     klaviyo_thread.daemon = True
@@ -4264,6 +4326,22 @@ def create_checkout_session():
             )
 
             logger.info(f"Created checkout session {checkout_session.id} for case {case_id}")
+
+            # Update Klaviyo profile with the Stripe checkout link as reroute_link
+            try:
+                email_for_klaviyo = case.get('email') or (case.get('payload') or {}).get('email')
+                if email_for_klaviyo and checkout_session.url:
+                    def update_klaviyo_reroute():
+                        klaviyo_update_profile_properties(email_for_klaviyo, {
+                            'reroute_link': checkout_session.url
+                        })
+                        logger.info(f"Updated reroute_link to Stripe checkout URL for {email_for_klaviyo}")
+
+                    klaviyo_thread = threading.Thread(target=update_klaviyo_reroute)
+                    klaviyo_thread.daemon = True
+                    klaviyo_thread.start()
+            except Exception as e:
+                logger.warning(f"Failed to update Klaviyo reroute_link (non-critical): {str(e)}")
 
             # Create response with multiple field names for frontend compatibility
             response_data = {
