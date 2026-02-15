@@ -96,6 +96,67 @@ def klaviyo_headers() -> Dict[str, str]:
     }
 
 
+def klaviyo_get_profile_id_by_email(email: str) -> Optional[str]:
+    """Get a Klaviyo profile ID by email address."""
+    if not KLAVIYO_API_KEY:
+        return None
+
+    try:
+        url = "https://a.klaviyo.com/api/profiles/"
+        params = {
+            'filter': f'equals(email,"{email}")'
+        }
+        response = requests.get(url, headers=klaviyo_headers(), params=params, timeout=TIMEOUT)
+
+        if response.status_code == 200:
+            data = response.json()
+            profiles = data.get('data', [])
+            if profiles:
+                return profiles[0].get('id')
+        return None
+
+    except Exception as e:
+        logger.error(f"Klaviyo get profile error: {str(e)}")
+        return None
+
+
+def klaviyo_create_or_get_profile(email: str) -> Optional[str]:
+    """Create a Klaviyo profile or get existing profile ID by email."""
+    if not KLAVIYO_API_KEY:
+        return None
+
+    try:
+        # First try to get existing profile
+        profile_id = klaviyo_get_profile_id_by_email(email)
+        if profile_id:
+            return profile_id
+
+        # Create new profile
+        url = "https://a.klaviyo.com/api/profiles/"
+        payload = {
+            "data": {
+                "type": "profile",
+                "attributes": {
+                    "email": email
+                }
+            }
+        }
+        response = requests.post(url, headers=klaviyo_headers(), json=payload, timeout=TIMEOUT)
+
+        if response.status_code in [200, 201]:
+            data = response.json()
+            profile_id = data.get('data', {}).get('id')
+            logger.info(f"Created Klaviyo profile for {email}: {profile_id}")
+            return profile_id
+        else:
+            logger.warning(f"Klaviyo create profile failed: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Klaviyo create/get profile error: {str(e)}")
+        return None
+
+
 def klaviyo_add_profile_to_list(email: str, list_id: str) -> bool:
     """Add a profile to a Klaviyo list. Creates the profile if it doesn't exist."""
     if not KLAVIYO_API_KEY or not list_id:
@@ -103,14 +164,19 @@ def klaviyo_add_profile_to_list(email: str, list_id: str) -> bool:
         return False
 
     try:
+        # First create or get the profile ID
+        profile_id = klaviyo_create_or_get_profile(email)
+        if not profile_id:
+            logger.warning(f"Could not create or get Klaviyo profile for {email}")
+            return False
+
+        # Add profile to list using the profile ID
         url = f"https://a.klaviyo.com/api/lists/{list_id}/relationships/profiles/"
         payload = {
             "data": [
                 {
                     "type": "profile",
-                    "attributes": {
-                        "email": email
-                    }
+                    "id": profile_id
                 }
             ]
         }
@@ -161,30 +227,6 @@ def klaviyo_remove_profile_from_list(email: str, list_id: str) -> bool:
     except Exception as e:
         logger.error(f"Klaviyo remove from list error: {str(e)}")
         return False
-
-
-def klaviyo_get_profile_id_by_email(email: str) -> Optional[str]:
-    """Get a Klaviyo profile ID by email address."""
-    if not KLAVIYO_API_KEY:
-        return None
-
-    try:
-        url = "https://a.klaviyo.com/api/profiles/"
-        params = {
-            'filter': f'equals(email,"{email}")'
-        }
-        response = requests.get(url, headers=klaviyo_headers(), params=params, timeout=TIMEOUT)
-
-        if response.status_code == 200:
-            data = response.json()
-            profiles = data.get('data', [])
-            if profiles:
-                return profiles[0].get('id')
-        return None
-
-    except Exception as e:
-        logger.error(f"Klaviyo get profile error: {str(e)}")
-        return None
 
 
 def klaviyo_sync_profile_to_list(email: str, target_list_id: str) -> bool:
