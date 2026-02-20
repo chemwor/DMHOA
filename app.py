@@ -3389,10 +3389,11 @@ STYLE:
                 }
                 try:
                     error_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-                    error_params = {'case_token': f'eq.{token}'}
                     error_headers = supabase_headers()
-                    requests.patch(error_url, params=error_params, headers=error_headers, json=error_data,
-                                   timeout=TIMEOUT)
+                    # Use UPSERT to ensure error is saved even if no row exists yet
+                    error_headers['Prefer'] = 'resolution=merge-duplicates'
+                    requests.post(error_url, headers=error_headers, json=error_data,
+                                  timeout=TIMEOUT)
                 except Exception:
                     pass  # Best effort
 
@@ -3414,7 +3415,7 @@ STYLE:
                     'doc_fingerprint': doc_fingerprint
                 }
 
-            # Save successful outputs (update existing row since we created/updated it earlier)
+            # Save successful outputs using UPSERT (insert if new, update if exists)
             success_data = {
                 'case_token': token,
                 'status': 'ready',
@@ -3427,10 +3428,11 @@ STYLE:
 
             try:
                 save_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
-                save_params = {'case_token': f'eq.{token}'}
                 save_headers = supabase_headers()
-                save_response = requests.patch(save_url, params=save_params, headers=save_headers, json=success_data,
-                                               timeout=TIMEOUT)
+                # Use UPSERT (insert or update) - this handles both new and existing rows
+                save_headers['Prefer'] = 'resolution=merge-duplicates'
+                save_response = requests.post(save_url, headers=save_headers, json=success_data,
+                                              timeout=TIMEOUT)
                 save_response.raise_for_status()
                 logger.info(f"Successfully saved case outputs for token: {token[:8]}...")
             except Exception as e:
