@@ -4532,5 +4532,150 @@ This email confirms your payment and provides access to your case. Keep this ema
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ============================================================================
+# BLOG ENDPOINTS
+# ============================================================================
+
+@app.route('/api/blog-posts', methods=['GET', 'OPTIONS'])
+def get_blog_posts():
+    """Get a list of published blog posts for the blog listing page."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Get pagination parameters
+        limit_param = request.args.get('limit', '10')
+        offset_param = request.args.get('offset', '0')
+        category = request.args.get('category', '').strip()
+
+        # Validate limit (min 1, max 50, default 10)
+        try:
+            limit = max(1, min(int(limit_param), 50))
+        except (ValueError, TypeError):
+            limit = 10
+
+        # Validate offset (min 0, default 0)
+        try:
+            offset = max(0, int(offset_param))
+        except (ValueError, TypeError):
+            offset = 0
+
+        logger.info(f"Fetching blog posts: limit={limit}, offset={offset}, category={category or 'all'}")
+
+        # Build query parameters
+        url = f"{SUPABASE_URL}/rest/v1/blog_posts"
+        params = {
+            'status': 'eq.published',
+            'select': 'id,title,slug,excerpt,image_url,image_alt,category,tags,author,read_time_minutes,published_at',
+            'order': 'published_at.desc',
+            'limit': str(limit),
+            'offset': str(offset)
+        }
+
+        # Add category filter if provided
+        if category:
+            params['category'] = f'eq.{category}'
+
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        posts = response.json()
+
+        # Get total count for pagination
+        count_url = f"{SUPABASE_URL}/rest/v1/blog_posts"
+        count_params = {
+            'status': 'eq.published',
+            'select': 'id'
+        }
+        if category:
+            count_params['category'] = f'eq.{category}'
+
+        count_headers = supabase_headers()
+        count_headers['Prefer'] = 'count=exact'
+        count_headers['Range-Unit'] = 'items'
+
+        count_response = requests.head(url, params=count_params, headers=count_headers, timeout=TIMEOUT)
+        total_count = 0
+        if 'content-range' in count_response.headers:
+            # Parse content-range header: "0-9/42" -> 42
+            content_range = count_response.headers.get('content-range', '')
+            if '/' in content_range:
+                total_count = int(content_range.split('/')[1])
+
+        logger.info(f"Successfully retrieved {len(posts)} blog posts (total: {total_count})")
+        return jsonify({
+            'posts': posts,
+            'pagination': {
+                'limit': limit,
+                'offset': offset,
+                'total': total_count,
+                'has_more': offset + len(posts) < total_count
+            }
+        }), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching blog posts: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+@app.route('/api/blog-post/<slug>', methods=['GET', 'OPTIONS'])
+def get_blog_post(slug):
+    """Get a single blog post by slug for the blog detail page."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        return response
+
+    try:
+        # Validate slug
+        if not slug or len(slug) < 1:
+            return jsonify({'error': 'Invalid slug'}), 400
+
+        logger.info(f"Fetching blog post with slug: {slug}")
+
+        # Fetch blog post from Supabase
+        url = f"{SUPABASE_URL}/rest/v1/blog_posts"
+        params = {
+            'slug': f'eq.{slug}',
+            'status': 'eq.published',
+            'select': '*'
+        }
+        headers = supabase_headers()
+
+        response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()
+
+        posts = response.json()
+        if not posts:
+            logger.warning(f"Blog post not found for slug: {slug}")
+            return jsonify({'error': 'Blog post not found'}), 404
+
+        post = posts[0]
+
+        # Increment view count asynchronously (fire and forget)
+        try:
+            update_url = f"{SUPABASE_URL}/rest/v1/blog_posts"
+            update_params = {'id': f"eq.{post['id']}"}
+            update_headers = supabase_headers()
+            update_data = {'view_count': post.get('view_count', 0) + 1}
+            requests.patch(update_url, params=update_params, headers=update_headers,
+                          json=update_data, timeout=(2, 5))
+        except Exception:
+            pass  # Don't fail the request if view count update fails
+
+        logger.info(f"Successfully retrieved blog post: {post.get('title', slug)}")
+        return jsonify(post), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching blog post: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
 if __name__ == '__main__':
     app.run(debug=True)
