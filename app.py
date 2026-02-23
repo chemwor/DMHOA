@@ -2255,6 +2255,7 @@ def save_case():
                                             'quantity': 1,
                                         }],
                                         mode='payment',
+                                        allow_promotion_codes=True,
                                         success_url=f"{frontend_url}/case.html?case={case_token_for_klaviyo}&session_id={{CHECKOUT_SESSION_ID}}",
                                         cancel_url=f"{frontend_url}/case-preview.html?case={case_token_for_klaviyo}",
                                         metadata={
@@ -4366,6 +4367,7 @@ def create_checkout_session():
                     'quantity': 1,
                 }],
                 mode='payment',
+                allow_promotion_codes=True,
                 success_url=f"{frontend_url}/case.html?case={case_token}&session_id={{CHECKOUT_SESSION_ID}}",
                 cancel_url=f"{frontend_url}/case-preview?case={case_token}",
                 metadata={
