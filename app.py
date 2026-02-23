@@ -4077,14 +4077,23 @@ def stripe_webhook():
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
 
+            # Get metadata - handle both dict and StripeObject
+            metadata = session.get('metadata') or {}
+            if hasattr(metadata, 'to_dict'):
+                metadata = metadata.to_dict()
+            elif not isinstance(metadata, dict):
+                metadata = dict(metadata) if metadata else {}
+
+            logger.info(f"Webhook metadata received: {metadata}")
+
             # Get token from client_reference_id or metadata (check both token and case_token)
             token = (
                     session.get('client_reference_id') or
-                    session.get('metadata', {}).get('token') or
-                    session.get('metadata', {}).get('case_token')
+                    metadata.get('token') or
+                    metadata.get('case_token')
             )
             if not token:
-                logger.error(f"No token found in session. Session data: {session.get('metadata', {})}")
+                logger.error(f"No token found in session. Session data: {metadata}, client_reference_id: {session.get('client_reference_id')}")
                 return jsonify({'error': 'No token in session'}), 400
 
             # Get email (prefer customer_details.email)
