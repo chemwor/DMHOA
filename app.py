@@ -3003,6 +3003,121 @@ def replace_date_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
     return text
 
 
+def fill_letter_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
+    """
+    Fill common letter placeholders with data from the case payload.
+    Used for email exchanges and generated letters.
+
+    Pre-fills:
+    - Property address (full address including city, state, ZIP)
+    - Owner name
+    - HOA name
+    - Today's date
+
+    Leaves brackets for genuinely unknown fields.
+    """
+    if not text or not payload:
+        return text
+
+    # Extract available information from payload
+    property_address = (
+        payload.get('propertyAddress') or
+        payload.get('property_address') or
+        ''
+    )
+
+    owner_name = (
+        payload.get('ownerName') or
+        payload.get('owner_name') or
+        ''
+    )
+
+    hoa_name = (
+        payload.get('hoaName') or
+        payload.get('hoa_name') or
+        ''
+    )
+
+    hoa_address = (
+        payload.get('hoaAddress') or
+        payload.get('hoa_address') or
+        payload.get('managementAddress') or
+        payload.get('management_address') or
+        ''
+    )
+
+    # Format today's date
+    today_formatted = datetime.now().strftime("%B %d, %Y")
+
+    # Replace date placeholders
+    date_patterns = [
+        r'\[DATE SENT\]',
+        r'\[DATE\s+SENT\]',
+        r'\[TODAY\'?S?\s+DATE\]',
+        r'\[CURRENT\s+DATE\]',
+        r'\[TODAY\]',
+        r'\[DATE\]',
+        r'\[SEND\s+DATE\]',
+        r'\[LETTER\s+DATE\]',
+        r'\[DATE\s+OF\s+LETTER\]',
+        r'\[DATE\s+HERE\]',
+    ]
+    for pattern in date_patterns:
+        text = re.sub(pattern, today_formatted, text, flags=re.IGNORECASE)
+
+    # Replace sender/owner address placeholders
+    if property_address:
+        address_patterns = [
+            r'\[YOUR\s+(?:FULL\s+)?ADDRESS\]',
+            r'\[SENDER\'?S?\s+(?:FULL\s+)?ADDRESS\]',
+            r'\[PROPERTY\s+ADDRESS\]',
+            r'\[INSERT\s+(?:YOUR\s+|PROPERTY\s+)?ADDRESS\]',
+            r'\[ADDRESS\]',
+            r'\[CITY,?\s*STATE,?\s*ZIP\]',
+            r'\[CITY\s+STATE\s+ZIP\]',
+            r'\[YOUR\s+CITY,?\s*STATE,?\s*ZIP\]',
+            r'\[INSERT\s+CITY,?\s*STATE,?\s*ZIP\]',
+        ]
+        for pattern in address_patterns:
+            text = re.sub(pattern, property_address, text, flags=re.IGNORECASE)
+
+    # Replace owner name placeholders
+    if owner_name:
+        name_patterns = [
+            r'\[YOUR\s+(?:FULL\s+)?NAME\]',
+            r'\[OWNER\'?S?\s+(?:FULL\s+)?NAME\]',
+            r'\[SENDER\'?S?\s+NAME\]',
+            r'\[INSERT\s+(?:YOUR\s+|OWNER\s+)?NAME\]',
+            r'\[NAME\]',
+            r'\[HOMEOWNER\s+NAME\]',
+        ]
+        for pattern in name_patterns:
+            text = re.sub(pattern, owner_name, text, flags=re.IGNORECASE)
+
+    # Replace HOA/recipient placeholders
+    if hoa_name:
+        hoa_patterns = [
+            r'\[HOA\s+NAME\]',
+            r'\[INSERT\s+HOA(?:\s+NAME)?\]',
+            r'\[RECIPIENT\s+NAME\]',
+            r'\[MANAGEMENT\s+COMPANY(?:\s+NAME)?\]',
+        ]
+        for pattern in hoa_patterns:
+            text = re.sub(pattern, hoa_name, text, flags=re.IGNORECASE)
+
+    if hoa_address:
+        hoa_addr_patterns = [
+            r'\[HOA\s+ADDRESS\]',
+            r'\[INSERT\s+HOA\s+ADDRESS\]',
+            r'\[RECIPIENT\s+ADDRESS\]',
+            r'\[MANAGEMENT\s+(?:COMPANY\s+)?ADDRESS\]',
+        ]
+        for pattern in hoa_addr_patterns:
+            text = re.sub(pattern, hoa_address, text, flags=re.IGNORECASE)
+
+    return text
+
+
 def fill_compliance_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
     """
     Fill [INSERT ...] placeholders in compliance letters where info exists in payload.
@@ -3018,6 +3133,9 @@ def fill_compliance_placeholders(text: str, payload: Dict[str, Any] = None) -> s
     """
     if not text or not payload:
         return text
+
+    # First apply common letter placeholders
+    text = fill_letter_placeholders(text, payload)
 
     # Extract available information from payload
     appliance_type = (
@@ -3629,6 +3747,7 @@ Errors: {errors}"""
 You generate HOA dispute assistance for a homeowner.
 This is educational drafting help, not legal advice.
 
+
 LEGAL CITATION REQUIREMENTS:
 - When state-specific statute information is provided, you MUST cite those specific statutes in your drafts.
 - Reference the exact statute name and section numbers in your response letters.
@@ -3678,6 +3797,15 @@ DEPTH REQUIREMENTS:
 
 STYLE:
 - Calm, professional, firm, factual.
+
+FORMATTING RULES — STRICTLY FOLLOW:
+- Output plain text only. No markdown of any kind.
+- No ** bold **, no ### headers, no # headings, no * bullets, no _ italics_
+- No emojis. No symbols used as decorators
+- Use ALL CAPS for section headings
+- Use plain numbered lists (1. 2. 3.) or dashes (-) for bullets
+- Separate sections with a blank line only
+- The output will be rendered and copied as a plain text letter
 """
 
         user_content = (
@@ -4282,10 +4410,14 @@ TONE:
 - Protective of the homeowner
 - Clear and confident, but not authoritative
 
-FORMATTING:
-- Use clean paragraphs and numbered lists
-- Do NOT use markdown symbols (no **, *, or bullets made of dashes)
-- Output should read like a human-prepared compliance draft, not AI-generated content
+FORMATTING RULES — STRICTLY FOLLOW:
+- Output plain text only. No markdown of any kind.
+- No ** bold **, no ### headers, no # headings, no * bullets, no _ italics_
+- No emojis. No symbols used as decorators
+- Use ALL CAPS for section headings
+- Use plain numbered lists (1. 2. 3.) or dashes (-) for bullets
+- Separate sections with a blank line only
+- The output will be rendered and copied as a plain text letter
 
 Your goal is to help the homeowner resolve the issue correctly the first time,
 with clear wording, proper procedure, and minimal risk — now that the case is unlocked.
@@ -4665,7 +4797,16 @@ def create_email_exchange(case_token):
         # 6) Build prompt and call Claude
         today_formatted = datetime.now().strftime("%B %d, %Y")
 
-        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional, legally-grounded counter-letters that cite applicable state statutes and address each specific point raised by the HOA."""
+        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional, legally-grounded counter-letters that cite applicable state statutes and address each specific point raised by the HOA.
+
+FORMATTING RULES — STRICTLY FOLLOW:
+- Output plain text only. No markdown of any kind.
+- No ** bold **, no ### headers, no # headings, no * bullets, no _ italics_
+- No emojis. No symbols used as decorators
+- Use ALL CAPS for section headings
+- Use plain numbered lists (1. 2. 3.) or dashes (-) for bullets
+- Separate sections with a blank line only
+- The output will be rendered and copied as a plain text letter"""
 
         user_message = f"""ORIGINAL CASE DETAILS:
 {json.dumps(case_payload, indent=2)}
@@ -4727,6 +4868,9 @@ Generate a specific counter-letter responding directly to this HOA message. Addr
             generated_response = content[0].get('text', '').strip()
         else:
             return jsonify({'error': 'Empty response from AI'}), 500
+
+        # Post-process: Fill in placeholders with actual data from case payload
+        generated_response = fill_letter_placeholders(generated_response, case_payload)
 
         # 7) Save exchange to database
         exchange_data = {
