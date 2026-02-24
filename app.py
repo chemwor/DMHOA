@@ -2945,6 +2945,84 @@ def case_analysis():
         return add_cors_headers(response), 500
 
 
+def replace_date_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
+    """
+    Replace date placeholders in generated text with actual dates.
+
+    Replaces:
+    - [DATE SENT], [TODAY'S DATE], [CURRENT DATE], [DATE], [TODAY] -> today's date
+    - [NOTICE DATE] -> notice date from payload if available
+
+    Leaves other placeholders like [INSERT MODEL/MAKE], [YOUR NAME] as-is.
+    """
+    if not text:
+        return text
+
+    # Format today's date as "Month DD, YYYY"
+    today = datetime.now()
+    today_formatted = today.strftime("%B %d, %Y")  # e.g., "February 23, 2026"
+
+    # Replace today's date placeholders (case-insensitive)
+    today_patterns = [
+        r'\[DATE SENT\]',
+        r'\[DATE\s+SENT\]',
+        r'\[TODAY\'?S?\s+DATE\]',
+        r'\[CURRENT\s+DATE\]',
+        r'\[TODAY\]',
+        r'\[SEND\s+DATE\]',
+        r'\[LETTER\s+DATE\]',
+        r'\[DATE\s+OF\s+LETTER\]',
+        r'\[DATE\s+HERE\]',
+    ]
+
+    for pattern in today_patterns:
+        text = re.sub(pattern, today_formatted, text, flags=re.IGNORECASE)
+
+    # Try to extract and use notice date from payload for deadline calculations
+    if payload:
+        notice_date_str = (
+            payload.get('noticeDate') or
+            payload.get('notice_date') or
+            payload.get('violationDate') or
+            payload.get('violation_date')
+        )
+        if notice_date_str:
+            try:
+                # Parse various date formats
+                for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y']:
+                    try:
+                        notice_date = datetime.strptime(notice_date_str, fmt)
+                        notice_formatted = notice_date.strftime("%B %d, %Y")
+                        text = re.sub(r'\[NOTICE\s+DATE\]', notice_formatted, text, flags=re.IGNORECASE)
+                        break
+                    except ValueError:
+                        continue
+            except Exception:
+                pass
+
+    return text
+
+
+def process_drafts_date_placeholders(outputs: Dict[str, Any], payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Post-process all draft letters to replace date placeholders with actual dates.
+    """
+    if not outputs:
+        return outputs
+
+    # Process drafts
+    if 'drafts' in outputs and isinstance(outputs['drafts'], dict):
+        for key in outputs['drafts']:
+            if isinstance(outputs['drafts'][key], str):
+                outputs['drafts'][key] = replace_date_placeholders(outputs['drafts'][key], payload)
+
+    # Process letter_summary if it contains placeholders
+    if 'letter_summary' in outputs and isinstance(outputs['letter_summary'], str):
+        outputs['letter_summary'] = replace_date_placeholders(outputs['letter_summary'], payload)
+
+    return outputs
+
+
 def get_draft_titles(payload: Dict[str, Any]) -> Dict[str, str]:
     """
     Keeps DB keys stable (drafts.clarification/extension/compliance),
@@ -3347,14 +3425,27 @@ OUTPUT RULES (CRITICAL):
   - Bullets: use "- item" lines
 - Return STRICT JSON that matches the schema exactly.
 
+SUMMARY_HTML REQUIREMENTS (CRITICAL - THIS IS A COMPACT FACT SHEET, NOT A DETAILED ANALYSIS):
+- summary_html must be a SHORT, COMPACT fact sheet with exactly 5-7 bullet points maximum.
+- It should ONLY include these facts (if available):
+  1. Notice date (when the HOA sent the notice)
+  2. Who sent it (HOA name/management company)
+  3. Core allegation (one line - what the violation is)
+  4. Key deadline(s) with SPECIFIC DATES (not "within 30 days" - calculate actual date)
+  5. Fines/amounts at risk
+  6. Owner's stated position (comply, dispute, need extension, etc.)
+- DO NOT include: action plans, questions to ask, lowest-cost path, detailed analysis, or guidance.
+- Keep it under 150 words total. This is a quick-reference fact sheet, not the full analysis.
+
 DRAFT QUALITY REQUIREMENTS:
 - Each draft must be a complete, ready-to-send letter.
 - MUST directly quote or reference concrete facts from the extracted documents when available
   (deadlines, email addresses, paragraph citations, dollar amounts, dates, etc.).
 - When state law is referenced, cite specific statutes to strengthen the homeowner's position.
+- Use actual dates instead of placeholders - today's date should be written out (e.g., "February 23, 2026").
 - Each must include:
   - Subject line
-  - Short opening
+  - Short opening with today's date
   - 3–6 bullet-point requests (specific asks)
   - Proposed timeline (e.g., "Please respond within 10 business days" if no deadline is provided)
   - Request fines/penalties be paused/waived while pending (when relevant)
@@ -3460,6 +3551,9 @@ Do not include any text before or after the JSON. The response must be parseable
                 structured = None
 
             if structured:
+                # Post-process drafts to replace date placeholders with actual dates
+                structured = process_drafts_date_placeholders(structured, payload)
+
                 outputs_to_store = {
                     **structured,
                     'draft_titles': structured.get('draft_titles', draft_titles),
@@ -3479,7 +3573,7 @@ Do not include any text before or after the JSON. The response must be parseable
                 'outputs': outputs_to_store,
                 'error': None,
                 'model': 'claude-sonnet-4-6',
-                'prompt_version': 'v4_anthropic_with_statutes',
+                'prompt_version': 'v5_compact_summary_date_fix',
                 'updated_at': datetime.utcnow().isoformat()
             }
 
