@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 import threading
 import time
+import random
 
 import requests
 from flask import Flask, request, jsonify
@@ -40,7 +41,7 @@ CORS(app, resources={r"/*": {"origins": "*"}},
      supports_credentials=False,
      allow_headers=["Content-Type", "Authorization", "apikey", "x-client-info", "x-supabase-api-version",
                     "X-Webhook-Secret"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -95,6 +96,169 @@ def supabase_headers() -> Dict[str, str]:
         'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
         'Content-Type': 'application/json'
     }
+
+
+# ============================================================================
+# RECIPIENT EXTRACTION HELPERS
+# ============================================================================
+
+def extract_recipients_from_text(text: str) -> Dict[str, Any]:
+    """
+    Extract recipient contact information from document text using Claude Haiku.
+    Returns dict with to_email, to_name, to_role, cc_email, cc_name, cc_role.
+    Never raises - returns empty dict on any failure.
+    """
+    if not text or not ANTHROPIC_API_KEY:
+        return {}
+
+    try:
+        # Limit text to avoid token limits
+        clipped_text = text[:8000] if len(text) > 8000 else text
+
+        prompt = f"""Extract recipient contact information from the following HOA document or communication. Return ONLY a valid JSON object with no explanation:
+{{
+  "to_email": "primary recipient email or null",
+  "to_name": "primary recipient full name or null",
+  "to_role": "their role e.g. HOA Attorney, Property Manager, Board President or null",
+  "cc_email": "CC recipient email or null",
+  "cc_name": "CC recipient name or null",
+  "cc_role": "CC recipient role or null"
+}}
+Only extract emails that are explicitly present in the text.
+Do not guess or infer. Return null for any field not clearly present.
+Document: {clipped_text}"""
+
+        response = requests.post(
+            'https://api.anthropic.com/v1/messages',
+            headers={
+                'x-api-key': ANTHROPIC_API_KEY,
+                'Content-Type': 'application/json',
+                'anthropic-version': '2023-06-01'
+            },
+            json={
+                'model': 'claude-haiku-4-5-20251001',
+                'max_tokens': 256,
+                'messages': [{'role': 'user', 'content': prompt}]
+            },
+            timeout=(10, 30)
+        )
+
+        if not response.ok:
+            logger.warning(f"Recipient extraction failed: Haiku returned {response.status_code}")
+            return {}
+
+        haiku_json = response.json()
+        content = haiku_json.get('content', [])
+        if not content or content[0].get('type') != 'text':
+            return {}
+
+        result_text = content[0].get('text', '').strip()
+
+        # Strip markdown fences if present
+        if result_text.startswith('```'):
+            result_text = re.sub(r'^```(?:json)?\s*', '', result_text)
+            result_text = re.sub(r'\s*```$', '', result_text)
+
+        # Parse JSON
+        recipients = json.loads(result_text)
+
+        # Validate and clean the result
+        valid_keys = {'to_email', 'to_name', 'to_role', 'cc_email', 'cc_name', 'cc_role'}
+        cleaned = {}
+        for key in valid_keys:
+            val = recipients.get(key)
+            if val and isinstance(val, str) and val.lower() != 'null':
+                cleaned[key] = val.strip()
+
+        if cleaned:
+            logger.info(f"Recipient extraction found: {list(cleaned.keys())}")
+
+        return cleaned
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Recipient extraction JSON parse error: {str(e)}")
+        return {}
+    except Exception as e:
+        logger.warning(f"Recipient extraction error: {str(e)}")
+        return {}
+
+
+def save_recipients_if_found(case_token: str, recipients: Dict[str, Any]) -> None:
+    """
+    Save extracted recipients to dmhoa_case_outputs, using merge logic.
+    Only updates NULL fields - never overwrites existing values.
+    Never raises - silently handles all errors.
+    """
+    if not recipients or not case_token:
+        return
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+
+    try:
+        # Fetch current recipient fields from dmhoa_case_outputs
+        fetch_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        fetch_params = {
+            'case_token': f'eq.{case_token}',
+            'select': 'recipient_to_email,recipient_to_name,recipient_to_role,recipient_cc_email,recipient_cc_name,recipient_cc_role'
+        }
+        fetch_headers = supabase_headers()
+
+        fetch_response = requests.get(fetch_url, params=fetch_params, headers=fetch_headers, timeout=TIMEOUT)
+        fetch_response.raise_for_status()
+        rows = fetch_response.json()
+
+        if not rows:
+            # No case_outputs row exists yet - nothing to update
+            logger.info(f"No case_outputs row for {case_token[:8]}... - skipping recipient save")
+            return
+
+        current = rows[0]
+
+        # Map extracted keys to DB column names
+        field_mapping = {
+            'to_email': 'recipient_to_email',
+            'to_name': 'recipient_to_name',
+            'to_role': 'recipient_to_role',
+            'cc_email': 'recipient_cc_email',
+            'cc_name': 'recipient_cc_name',
+            'cc_role': 'recipient_cc_role'
+        }
+
+        # Build update dict: only update NULL fields with non-null extracted values
+        updates = {}
+        for extracted_key, db_column in field_mapping.items():
+            current_val = current.get(db_column)
+            new_val = recipients.get(extracted_key)
+
+            if current_val is None and new_val:
+                updates[db_column] = new_val
+
+        if not updates:
+            logger.info(f"No new recipient fields to update for {case_token[:8]}...")
+            return
+
+        # Run single UPDATE
+        update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        update_params = {'case_token': f'eq.{case_token}'}
+        update_headers = supabase_headers()
+
+        update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                         json=updates, timeout=TIMEOUT)
+        update_response.raise_for_status()
+
+        logger.info(f"Recipients updated for case_token={case_token[:8]}...: {list(updates.keys())}")
+
+    except Exception as e:
+        logger.warning(f"Failed to save recipients for {case_token[:8]}...: {str(e)}")
+
+
+def is_valid_email(email: str) -> bool:
+    """Simple email validation using regex."""
+    if not email:
+        return False
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
 
 
 def klaviyo_headers() -> Dict[str, str]:
@@ -3628,6 +3792,21 @@ Docs found: {len(docs)}
 Statuses: {statuses}
 Errors: {errors}"""
 
+        # 1c) Extract recipient information from document text (fire-and-forget)
+        if usable_docs:
+            try:
+                # Combine all document text for extraction
+                combined_doc_text = '\n\n'.join([
+                    (d.get('extracted_text', '') or '')[:6000]
+                    for d in usable_docs[:3]
+                ])
+                if combined_doc_text.strip():
+                    extracted_recipients = extract_recipients_from_text(combined_doc_text)
+                    if extracted_recipients:
+                        save_recipients_if_found(token, extracted_recipients)
+            except Exception as e:
+                logger.warning(f"Recipient extraction failed for {token[:8]}...: {str(e)}")
+
         # 2) Check if outputs already exist and are ready
         outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
         outputs_params = {
@@ -5657,6 +5836,163 @@ def get_blog_post(slug):
 
     except Exception as e:
         error_msg = f"Error fetching blog post: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+# ============================================================================
+# RECIPIENT ENDPOINTS
+# ============================================================================
+
+@app.route('/api/cases/<case_token>/recipients', methods=['GET', 'OPTIONS'])
+def get_recipients(case_token):
+    """Get current recipient fields for a case."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    try:
+        # Validate case_token
+        if not case_token or not case_token.strip():
+            return jsonify({'error': 'case_token is required'}), 400
+
+        case_token = case_token.strip()
+        logger.info(f"Fetching recipients for case_token: {case_token[:8]}...")
+
+        # Check if case exists
+        case = read_case_by_token(case_token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        # Fetch recipient fields from dmhoa_case_outputs
+        outputs_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        outputs_params = {
+            'case_token': f'eq.{case_token}',
+            'select': 'recipient_to_email,recipient_to_name,recipient_to_role,recipient_cc_email,recipient_cc_name,recipient_cc_role'
+        }
+        outputs_headers = supabase_headers()
+
+        outputs_response = requests.get(outputs_url, params=outputs_params, headers=outputs_headers, timeout=TIMEOUT)
+        outputs_response.raise_for_status()
+        rows = outputs_response.json()
+
+        if rows:
+            recipients = rows[0]
+        else:
+            # No case_outputs row - return nulls
+            recipients = {
+                'recipient_to_email': None,
+                'recipient_to_name': None,
+                'recipient_to_role': None,
+                'recipient_cc_email': None,
+                'recipient_cc_name': None,
+                'recipient_cc_role': None
+            }
+
+        logger.info(f"Returning recipients for case_token {case_token[:8]}...")
+        return jsonify(recipients), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching recipients: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+@app.route('/api/cases/<case_token>/recipients', methods=['PATCH', 'OPTIONS'])
+def update_recipients(case_token):
+    """Update recipient fields for a case (manual edits)."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    try:
+        # Validate case_token
+        if not case_token or not case_token.strip():
+            return jsonify({'error': 'case_token is required'}), 400
+
+        case_token = case_token.strip()
+        logger.info(f"Updating recipients for case_token: {case_token[:8]}...")
+
+        # Check if case exists and is unlocked
+        case = read_case_by_token(case_token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        case_status = case.get('status', '')
+        if case_status != 'paid':
+            return jsonify({'error': 'Case is not unlocked. Payment required.'}), 403
+
+        # Parse request body
+        data = request.get_json() or {}
+
+        # Valid fields that can be updated
+        valid_fields = {
+            'to_email': 'recipient_to_email',
+            'to_name': 'recipient_to_name',
+            'to_role': 'recipient_to_role',
+            'cc_email': 'recipient_cc_email',
+            'cc_name': 'recipient_cc_name',
+            'cc_role': 'recipient_cc_role'
+        }
+
+        # Build update dict and validate emails
+        updates = {}
+        errors = {}
+
+        for field_key, db_column in valid_fields.items():
+            if field_key in data:
+                value = data[field_key]
+
+                # Validate email fields
+                if field_key in ['to_email', 'cc_email'] and value:
+                    if not is_valid_email(value):
+                        errors[field_key] = f"Invalid email format: {value}"
+                        continue
+
+                # Allow null/empty to clear a field, or non-empty string to set
+                if value is None or value == '':
+                    updates[db_column] = None
+                elif isinstance(value, str):
+                    updates[db_column] = value.strip()
+
+        if errors:
+            return jsonify({'error': 'Validation failed', 'field_errors': errors}), 400
+
+        if not updates:
+            return jsonify({'error': 'No valid fields provided to update'}), 400
+
+        # Update dmhoa_case_outputs
+        update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+        update_params = {'case_token': f'eq.{case_token}'}
+        update_headers = supabase_headers()
+        update_headers['Prefer'] = 'return=representation'
+
+        update_response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                         json=updates, timeout=TIMEOUT)
+        update_response.raise_for_status()
+
+        updated_rows = update_response.json()
+
+        if not updated_rows:
+            # No case_outputs row exists - might need to create one first
+            return jsonify({'error': 'Case outputs not found. Run case analysis first.'}), 404
+
+        # Return the full updated recipient fields
+        updated = updated_rows[0]
+        result = {
+            'recipient_to_email': updated.get('recipient_to_email'),
+            'recipient_to_name': updated.get('recipient_to_name'),
+            'recipient_to_role': updated.get('recipient_to_role'),
+            'recipient_cc_email': updated.get('recipient_cc_email'),
+            'recipient_cc_name': updated.get('recipient_cc_name'),
+            'recipient_cc_role': updated.get('recipient_cc_role')
+        }
+
+        logger.info(f"Recipients updated for case_token {case_token[:8]}...: {list(updates.keys())}")
+        return jsonify(result), 200
+
+    except Exception as e:
+        error_msg = f"Error updating recipients: {str(e)}"
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
 
