@@ -3844,6 +3844,8 @@ Do not include any text before or after the JSON. The response must be parseable
 
             # Fine extraction step - extract fine_per_day and fine_start_date using Claude Haiku
             # This runs after main analysis is saved, so failures won't break the main flow
+            extracted_fine_per_day = None
+            extracted_fine_start_date = None
             try:
                 if ANTHROPIC_API_KEY and structured:
                     # Build full analysis text from the structured output
@@ -3921,6 +3923,10 @@ Case analysis text:
                             fine_per_day = fine_data.get('fine_per_day')
                             fine_start_date = fine_data.get('fine_start_date')
 
+                            # Store extracted values for return
+                            extracted_fine_per_day = fine_per_day
+                            extracted_fine_start_date = fine_start_date
+
                             # Update dmhoa_case_outputs if we have values
                             if fine_per_day is not None or fine_start_date is not None:
                                 fine_update_data = {}
@@ -3952,12 +3958,20 @@ Case analysis text:
             except Exception as e:
                 logger.warning(f"Fine extraction failed: {str(e)} for token {token[:8]}...")
 
+            # Add fine data to outputs if extracted
+            if extracted_fine_per_day is not None:
+                outputs_to_store['fine_per_day'] = extracted_fine_per_day
+            if extracted_fine_start_date is not None:
+                outputs_to_store['fine_start_date'] = extracted_fine_start_date
+
             logger.info(f"Case analysis completed successfully for token: {token[:8]}...")
             return {
                 'ok': True,
                 'status': 'ready',
                 'cached': False,
-                'outputs': outputs_to_store
+                'outputs': outputs_to_store,
+                'fine_per_day': extracted_fine_per_day,
+                'fine_start_date': extracted_fine_start_date
             }
 
         except Exception as e:
