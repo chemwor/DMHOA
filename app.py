@@ -23,6 +23,13 @@ from email.mime.multipart import MIMEMultipart
 from PIL import Image
 import pytesseract
 
+# Statute lookup for state-specific HOA law context
+from statute_lookup import (
+    get_statute_context,
+    extract_state_from_payload,
+    extract_violation_type_from_payload
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -48,6 +55,9 @@ SITE_URL = os.environ.get('SITE_URL', 'https://disputemyhoa.com')
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+
+# Anthropic Configuration (for Claude API)
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
 # Configure Stripe
 if STRIPE_SECRET_KEY:
@@ -3238,9 +3248,27 @@ Errors: {errors}"""
             }
 
         payload = case_row.get('payload') or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except:
+                payload = {}
         draft_titles = get_draft_titles(payload)
 
-        # 3) OpenAI Responses API call (strict JSON schema)
+        # 2b) Get state-specific statute context for prompt injection
+        statute_context = None
+        try:
+            case_state = extract_state_from_payload(payload)
+            violation_type = extract_violation_type_from_payload(payload)
+            if case_state:
+                statute_context = get_statute_context(case_state, violation_type)
+                if statute_context:
+                    logger.info(f"Statute context loaded for {case_state}, token: {token[:8]}...")
+        except Exception as e:
+            logger.warning(f"Failed to get statute context for token {token[:8]}...: {str(e)}")
+            statute_context = None  # Graceful degradation - continue without statute context
+
+        # 3) Anthropic Claude API call for case analysis (strict JSON schema)
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -3295,12 +3323,20 @@ Errors: {errors}"""
             'charCounts': [d.get('char_count') for d in docs]
         }
 
-        messages = [
-            {
-                "role": "system",
-                "content": """
+        # Build statute context section for user message
+        statute_section = ""
+        if statute_context:
+            statute_section = f"\n\n{statute_context}\n\n"
+
+        system_prompt_analysis = """
 You generate HOA dispute assistance for a homeowner.
 This is educational drafting help, not legal advice.
+
+LEGAL CITATION REQUIREMENTS:
+- When state-specific statute information is provided, you MUST cite those specific statutes in your drafts.
+- Reference the exact statute name and section numbers in your response letters.
+- Mention procedural protections the homeowner is entitled to under state law.
+- Include homeowner rights and notice requirements from the statute reference.
 
 OUTPUT RULES (CRITICAL):
 - ONLY "summary_html" may contain HTML.
@@ -3315,6 +3351,7 @@ DRAFT QUALITY REQUIREMENTS:
 - Each draft must be a complete, ready-to-send letter.
 - MUST directly quote or reference concrete facts from the extracted documents when available
   (deadlines, email addresses, paragraph citations, dollar amounts, dates, etc.).
+- When state law is referenced, cite specific statutes to strengthen the homeowner's position.
 - Each must include:
   - Subject line
   - Short opening
@@ -3332,60 +3369,65 @@ DEPTH REQUIREMENTS:
 STYLE:
 - Calm, professional, firm, factual.
 """
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Case payload JSON:\n{json.dumps(payload)}\n\n"
-                    f"Document fingerprint (debug):\n{json.dumps(doc_fingerprint)}\n\n"
-                    f"Extracted documents:\n{docs_block}\n\n"
-                    f"Draft types for this case (MUST follow exactly):\n"
-                    f"- drafts.clarification MUST be: \"{draft_titles['clarification']}\"\n"
-                    f"- drafts.extension MUST be: \"{draft_titles['extension']}\"\n"
-                    f"- drafts.compliance MUST be: \"{draft_titles['compliance']}\"\n\n"
-                    f"Also include draft_titles using these exact same strings.\n\n"
-                    f"summary_html must be valid HTML using ONLY: <div>, <strong>, <ul>, <li>.\n"
-                    f"Drafts must be PLAIN TEXT ONLY with \\n, and must NOT include any HTML tags.\n\n"
-                    f"Make this feel like a $30 deliverable: concrete, specific, complete.\n"
-                )
-            }
+
+        user_content = (
+            f"Case payload JSON:\n{json.dumps(payload)}\n\n"
+            f"Document fingerprint (debug):\n{json.dumps(doc_fingerprint)}\n\n"
+            f"Extracted documents:\n{docs_block}\n"
+            f"{statute_section}"
+            f"Draft types for this case (MUST follow exactly):\n"
+            f"- drafts.clarification MUST be: \"{draft_titles['clarification']}\"\n"
+            f"- drafts.extension MUST be: \"{draft_titles['extension']}\"\n"
+            f"- drafts.compliance MUST be: \"{draft_titles['compliance']}\"\n\n"
+            f"Also include draft_titles using these exact same strings.\n\n"
+            f"summary_html must be valid HTML using ONLY: <div>, <strong>, <ul>, <li>.\n"
+            f"Drafts must be PLAIN TEXT ONLY with \\n, and must NOT include any HTML tags.\n\n"
+            f"Make this feel like a $30 deliverable: concrete, specific, complete.\n"
+        )
+
+        # Build JSON schema instruction for Claude
+        schema_instruction = f"""
+You must respond with ONLY valid JSON matching this exact schema:
+{json.dumps(schema, indent=2)}
+
+Do not include any text before or after the JSON. The response must be parseable as JSON.
+"""
+
+        anthropic_messages = [
+            {"role": "user", "content": user_content + "\n\n" + schema_instruction}
         ]
 
-        openai_payload = {
-            "model": "gpt-4o-mini",
-            "input": messages,
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "dmhoa_case_outputs",
-                    "strict": True,
-                    "schema": schema
-                }
-            }
-        }
-
-        # Make OpenAI API call
+        # Make Anthropic Claude API call for better legal writing quality
         try:
-            logger.info(f"Calling OpenAI for case analysis for token: {token[:8]}...")
-            openai_response = requests.post(
-                'https://api.openai.com/v1/responses',
+            if not ANTHROPIC_API_KEY:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+
+            logger.info(f"Calling Claude claude-sonnet-4-6 for case analysis for token: {token[:8]}...")
+            anthropic_response = requests.post(
+                'https://api.anthropic.com/v1/messages',
                 headers={
-                    'Authorization': f'Bearer {OPENAI_API_KEY}',
-                    'Content-Type': 'application/json'
+                    'x-api-key': ANTHROPIC_API_KEY,
+                    'Content-Type': 'application/json',
+                    'anthropic-version': '2023-06-01'
                 },
-                json=openai_payload,
-                timeout=(10, 120)  # 10s connect, 120s read
+                json={
+                    'model': 'claude-sonnet-4-6',
+                    'max_tokens': 8192,
+                    'system': system_prompt_analysis,
+                    'messages': anthropic_messages
+                },
+                timeout=(10, 180)  # 10s connect, 180s read for longer legal analysis
             )
 
-            if not openai_response.ok:
-                error_text = openai_response.text
-                logger.error(f'OpenAI call failed: {openai_response.status_code}, {error_text}')
+            if not anthropic_response.ok:
+                error_text = anthropic_response.text
+                logger.error(f'Claude API call failed: {anthropic_response.status_code}, {error_text}')
 
                 # Update outputs table with error
                 error_data = {
                     'case_token': token,
                     'status': 'error',
-                    'error': error_text or 'OpenAI call failed',
+                    'error': error_text or 'Claude API call failed',
                     'updated_at': datetime.utcnow().isoformat()
                 }
                 try:
@@ -3398,10 +3440,24 @@ STYLE:
                 except Exception:
                     pass  # Best effort
 
-                return {'ok': False, 'error': f'OpenAI call failed: {error_text}'}
+                return {'ok': False, 'error': f'Claude API call failed: {error_text}'}
 
-            openai_json = openai_response.json()
-            structured = extract_structured_result(openai_json)
+            # Parse Claude response
+            claude_json = anthropic_response.json()
+            content = claude_json.get('content', [])
+            if content and content[0].get('type') == 'text':
+                response_text = content[0].get('text', '')
+                # Try to extract JSON from the response
+                json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+                if json_match:
+                    response_text = json_match.group(1)
+                try:
+                    structured = json.loads(response_text)
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse Claude response as JSON for token {token[:8]}...")
+                    structured = None
+            else:
+                structured = None
 
             if structured:
                 outputs_to_store = {
@@ -3411,7 +3467,7 @@ STYLE:
                 }
             else:
                 outputs_to_store = {
-                    'raw': openai_json,
+                    'raw': claude_json,
                     'draft_titles': draft_titles,
                     'doc_fingerprint': doc_fingerprint
                 }
@@ -3422,8 +3478,8 @@ STYLE:
                 'status': 'ready',
                 'outputs': outputs_to_store,
                 'error': None,
-                'model': 'gpt-4o-mini',
-                'prompt_version': 'v3_docs_cache_invalidation',
+                'model': 'claude-sonnet-4-6',
+                'prompt_version': 'v4_anthropic_with_statutes',
                 'updated_at': datetime.utcnow().isoformat()
             }
 
@@ -3460,8 +3516,8 @@ STYLE:
             }
 
         except Exception as e:
-            logger.error(f'OpenAI API error: {str(e)}')
-            return {'ok': False, 'error': f'OpenAI API error: {str(e)}'}
+            logger.error(f'Claude API error: {str(e)}')
+            return {'ok': False, 'error': f'Claude API error: {str(e)}'}
 
     except Exception as e:
         logger.error(f'Case analysis error: {str(e)}')
@@ -3692,12 +3748,30 @@ def send_message():
 
         # 4) Get case payload for context
         case_payload = case.get('payload', {})
+        if isinstance(case_payload, str):
+            try:
+                case_payload = json.loads(case_payload)
+            except:
+                case_payload = {}
 
         # 4.5) Get preview information for additional context
         case_id = case.get('id')
         preview_info = None
         if case_id:
             preview_info = read_active_preview(case_id)
+
+        # 4.6) Get state-specific statute context
+        chat_statute_context = None
+        try:
+            case_state = extract_state_from_payload(case_payload)
+            violation_type = extract_violation_type_from_payload(case_payload)
+            if case_state:
+                chat_statute_context = get_statute_context(case_state, violation_type)
+                if chat_statute_context:
+                    logger.info(f"Statute context loaded for chat, state={case_state}, token: {token[:8]}...")
+        except Exception as e:
+            logger.warning(f"Failed to get statute context for chat, token {token[:8]}...: {str(e)}")
+            chat_statute_context = None
 
         # 5) Generate AI response using OpenAI Chat Completions API
         try:
@@ -3763,6 +3837,11 @@ with clear wording, proper procedure, and minimal risk — now that the case is 
             # Add context about the case
             context_message = f"Case context: {json.dumps(case_payload, indent=2)}"
             messages.append({'role': 'system', 'content': context_message})
+
+            # Add state-specific statute context if available
+            if chat_statute_context:
+                statute_message = f"State-specific HOA law reference for drafting:\n\n{chat_statute_context}\n\nWhen drafting responses, cite these specific statutes to strengthen the homeowner's position."
+                messages.append({'role': 'system', 'content': statute_message})
 
             # Add preview information if available
             if preview_info:
