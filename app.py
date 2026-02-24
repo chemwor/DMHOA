@@ -3711,8 +3711,8 @@ Do not include any text before or after the JSON. The response must be parseable
             if not ANTHROPIC_API_KEY:
                 raise ValueError("ANTHROPIC_API_KEY not configured")
 
-            max_retries = 4
-            base_delay = 2  # seconds
+            max_retries = 5
+            base_delay = 10  # seconds - longer initial delay to let API recover
             anthropic_response = None
 
             for attempt in range(max_retries):
@@ -3737,9 +3737,11 @@ Do not include any text before or after the JSON. The response must be parseable
                 # Check if we should retry (429 rate limit, 529 overloaded, 503 service unavailable)
                 if anthropic_response.status_code in [429, 529, 503]:
                     if attempt < max_retries - 1:
-                        # Exponential backoff: 2s, 4s, 8s, 16s
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(f"Claude API returned {anthropic_response.status_code} (overloaded/rate-limited), retrying in {delay}s for token {token[:8]}...")
+                        # Exponential backoff with jitter: 10-12s, 20-24s, 40-48s, 80-96s
+                        import random
+                        jitter = random.uniform(0, 0.2)  # Add up to 20% jitter
+                        delay = base_delay * (2 ** attempt) * (1 + jitter)
+                        logger.warning(f"Claude API returned {anthropic_response.status_code} (overloaded/rate-limited), retrying in {delay:.1f}s for token {token[:8]}...")
                         time.sleep(delay)
                         continue
                     else:
@@ -4686,61 +4688,50 @@ def stripe_webhook():
                 except Exception as e:
                     logger.warning(f"Failed to sync Klaviyo post-purchase list (non-fatal): {str(e)}")
 
-            # --- Run case analysis immediately after payment (non-fatal) ---
-            logger.info(f"Running case analysis after payment for token: {token}")
-            try:
-                analysis_result = run_case_analysis(token)
-                if analysis_result.get('ok'):
-                    logger.info(
-                        f"Case analysis completed successfully for token: {token}, cached={analysis_result.get('cached', False)}")
-                    # Log case analysis success event
-                    try:
-                        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                        event_data = {
-                            'token': token,
-                            'type': 'case_analysis_completed',
-                            'data': {
-                                'cached': analysis_result.get('cached', False),
-                                'status': analysis_result.get('status', 'unknown')
-                            }
-                        }
-                        event_headers = supabase_headers()
-                        requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                    except Exception:
-                        pass  # Best effort
-                else:
-                    logger.error(
-                        f"Case analysis failed for token: {token}, error: {analysis_result.get('error', 'unknown')}")
-                    # Log case analysis failure event
-                    try:
-                        event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                        event_data = {
-                            'token': token,
-                            'type': 'case_analysis_failed',
-                            'data': {
-                                'error': analysis_result.get('error', 'unknown')[:1000]
-                            }
-                        }
-                        event_headers = supabase_headers()
-                        requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                    except Exception:
-                        pass  # Best effort
-            except Exception as e:
-                logger.error(f"Exception running case analysis for token {token}: {str(e)}")
-                # Log case analysis exception event
+            # --- Run case analysis in background thread after payment (non-blocking) ---
+            # This prevents Stripe webhook timeout (30s) while Claude API may take longer
+            logger.info(f"Queuing case analysis in background for token: {token}")
+
+            def run_analysis_background(analysis_token):
+                """Background thread function for case analysis"""
                 try:
-                    event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
-                    event_data = {
-                        'token': token,
-                        'type': 'case_analysis_failed',
-                        'data': {
-                            'error': str(e)[:1000]
-                        }
-                    }
-                    event_headers = supabase_headers()
-                    requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
-                except Exception:
-                    pass  # Best effort
+                    # Small delay to let the system stabilize after payment
+                    time.sleep(2)
+
+                    logger.info(f"Starting background case analysis for token: {analysis_token}")
+                    analysis_result = run_case_analysis(analysis_token)
+
+                    if analysis_result.get('ok'):
+                        logger.info(
+                            f"Background case analysis completed successfully for token: {analysis_token}, cached={analysis_result.get('cached', False)}")
+                        # Log case analysis success event
+                        try:
+                            event_url = f"{SUPABASE_URL}/rest/v1/dmhoa_events"
+                            event_data = {
+                                'token': analysis_token,
+                                'type': 'case_analysis_completed',
+                                'data': {
+                                    'cached': analysis_result.get('cached', False),
+                                    'status': analysis_result.get('status', 'unknown')
+                                }
+                            }
+                            event_headers = supabase_headers()
+                            requests.post(event_url, headers=event_headers, json=event_data, timeout=TIMEOUT)
+                        except Exception:
+                            pass  # Best effort
+                    else:
+                        logger.error(
+                            f"Background case analysis failed for token: {analysis_token}, error: {analysis_result.get('error', 'unknown')}")
+                except Exception as e:
+                    logger.error(f"Background case analysis exception for token: {analysis_token}: {str(e)}")
+
+            try:
+                analysis_thread = threading.Thread(target=run_analysis_background, args=(token,))
+                analysis_thread.daemon = True
+                analysis_thread.start()
+                logger.info(f"Background analysis thread started for token: {token}")
+            except Exception as e:
+                logger.error(f"Failed to start background analysis thread for token {token}: {str(e)}")
 
             # --- Send receipt email directly (non-fatal) ---
             case_url_link = f"{SITE_URL}/case.html?case={token}"
