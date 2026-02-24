@@ -3003,9 +3003,217 @@ def replace_date_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
     return text
 
 
+def fill_compliance_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
+    """
+    Fill [INSERT ...] placeholders in compliance letters where info exists in payload.
+
+    Pre-fills:
+    - Appliance/equipment type (dryer, HVAC, etc.)
+    - Compliance action taken
+    - Property address
+    - Owner name
+    - HOA name
+
+    Leaves brackets for genuinely unknown fields like vendor name, model number, inspection date.
+    """
+    if not text or not payload:
+        return text
+
+    # Extract available information from payload
+    appliance_type = (
+        payload.get('applianceType') or
+        payload.get('appliance_type') or
+        payload.get('dryerType') or
+        payload.get('dryer_type') or
+        payload.get('equipmentType') or
+        payload.get('equipment_type')
+    )
+
+    appliance_description = (
+        payload.get('applianceDescription') or
+        payload.get('appliance_description') or
+        payload.get('equipmentDescription') or
+        payload.get('equipment_description')
+    )
+
+    compliance_action = (
+        payload.get('complianceAction') or
+        payload.get('compliance_action') or
+        payload.get('actionTaken') or
+        payload.get('action_taken') or
+        payload.get('remedyTaken') or
+        payload.get('remedy_taken')
+    )
+
+    property_address = (
+        payload.get('propertyAddress') or
+        payload.get('property_address')
+    )
+
+    owner_name = (
+        payload.get('ownerName') or
+        payload.get('owner_name')
+    )
+
+    hoa_name = (
+        payload.get('hoaName') or
+        payload.get('hoa_name')
+    )
+
+    violation_type = (
+        payload.get('violationType') or
+        payload.get('violation_type') or
+        payload.get('noticeType') or
+        payload.get('notice_type')
+    )
+
+    case_description = (
+        payload.get('caseDescription') or
+        payload.get('case_description') or
+        payload.get('description')
+    )
+
+    # Replace appliance/equipment placeholders
+    if appliance_type:
+        text = re.sub(r'\[INSERT\s+(?:APPLIANCE|EQUIPMENT|DRYER|HVAC)\s*(?:TYPE)?\]',
+                      appliance_type, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[(?:APPLIANCE|EQUIPMENT|DRYER|HVAC)\s*(?:TYPE)?\]',
+                      appliance_type, text, flags=re.IGNORECASE)
+
+    if appliance_description:
+        text = re.sub(r'\[INSERT\s+(?:APPLIANCE|EQUIPMENT)\s+DESCRIPTION\]',
+                      appliance_description, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[(?:APPLIANCE|EQUIPMENT)\s+DESCRIPTION\]',
+                      appliance_description, text, flags=re.IGNORECASE)
+
+    # Replace compliance action placeholders
+    if compliance_action:
+        text = re.sub(r'\[INSERT\s+(?:COMPLIANCE\s+)?ACTION(?:\s+TAKEN)?\]',
+                      compliance_action, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[(?:COMPLIANCE\s+)?ACTION(?:\s+TAKEN)?\]',
+                      compliance_action, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[INSERT\s+(?:REMEDY|WORK|REPAIR)(?:\s+TAKEN|COMPLETED|DONE)?\]',
+                      compliance_action, text, flags=re.IGNORECASE)
+
+    # Replace property/owner/HOA placeholders
+    if property_address:
+        text = re.sub(r'\[INSERT\s+(?:PROPERTY\s+)?ADDRESS\]',
+                      property_address, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[(?:PROPERTY\s+)?ADDRESS\]',
+                      property_address, text, flags=re.IGNORECASE)
+
+    if owner_name:
+        text = re.sub(r'\[INSERT\s+(?:YOUR\s+|OWNER\s+)?NAME\]',
+                      owner_name, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[(?:YOUR\s+|OWNER\s+)?NAME\]',
+                      owner_name, text, flags=re.IGNORECASE)
+
+    if hoa_name:
+        text = re.sub(r'\[INSERT\s+HOA(?:\s+NAME)?\]',
+                      hoa_name, text, flags=re.IGNORECASE)
+        text = re.sub(r'\[HOA(?:\s+NAME)?\]',
+                      hoa_name, text, flags=re.IGNORECASE)
+
+    # Use violation type or case description for generic description placeholders
+    description_fill = violation_type or case_description
+    if description_fill:
+        text = re.sub(r'\[INSERT\s+VIOLATION(?:\s+TYPE|DESCRIPTION)?\]',
+                      description_fill, text, flags=re.IGNORECASE)
+
+    return text
+
+
+def parse_date_from_text(text: str) -> Optional[datetime]:
+    """
+    Try to extract a date from text like "December 27, 2025" or "12/27/2025".
+    Returns datetime object if found, None otherwise.
+    """
+    if not text:
+        return None
+
+    # Common date patterns
+    date_patterns = [
+        (r'(\w+)\s+(\d{1,2}),?\s+(\d{4})', '%B %d %Y'),  # "December 27, 2025"
+        (r'(\d{1,2})/(\d{1,2})/(\d{4})', '%m/%d/%Y'),     # "12/27/2025"
+        (r'(\d{1,2})-(\d{1,2})-(\d{4})', '%m-%d-%Y'),     # "12-27-2025"
+        (r'(\d{4})-(\d{1,2})-(\d{1,2})', '%Y-%m-%d'),     # "2025-12-27"
+    ]
+
+    for pattern, _ in date_patterns:
+        match = re.search(pattern, text)
+        if match:
+            date_str = match.group(0).replace(',', '')
+            # Try parsing with various formats
+            for fmt in ['%B %d %Y', '%b %d %Y', '%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d']:
+                try:
+                    return datetime.strptime(date_str, fmt)
+                except ValueError:
+                    continue
+
+    return None
+
+
+def process_action_plan_deadlines(action_plan: List[str]) -> List[str]:
+    """
+    Process action plan items to flag any deadlines that have already passed.
+
+    If a deadline date is in the past, reframes the action item to indicate urgency:
+    - "Before December 27, 2025" -> "OVERDUE (was December 27, 2025) — Act immediately"
+    """
+    if not action_plan:
+        return action_plan
+
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    processed = []
+
+    for item in action_plan:
+        if not isinstance(item, str):
+            processed.append(item)
+            continue
+
+        # Check if item contains a date
+        extracted_date = parse_date_from_text(item)
+
+        if extracted_date and extracted_date < today:
+            # This deadline has passed
+            days_overdue = (today - extracted_date).days
+
+            # Check if it mentions "before", "by", "deadline", etc.
+            deadline_indicators = ['before', 'by', 'deadline', 'due', 'must', 'no later than']
+            is_deadline_item = any(ind in item.lower() for ind in deadline_indicators)
+
+            if is_deadline_item:
+                # Reframe the item to indicate it's overdue
+                date_str = extracted_date.strftime("%B %d, %Y")
+
+                if days_overdue == 1:
+                    overdue_text = "1 day overdue"
+                elif days_overdue < 7:
+                    overdue_text = f"{days_overdue} days overdue"
+                elif days_overdue < 30:
+                    weeks = days_overdue // 7
+                    overdue_text = f"{weeks} week{'s' if weeks > 1 else ''} overdue"
+                else:
+                    overdue_text = f"{days_overdue} days overdue"
+
+                # Prepend overdue notice and add urgency
+                new_item = f"⚠️ OVERDUE ({overdue_text}, was {date_str}): {item} — Act immediately to establish good faith."
+                processed.append(new_item)
+            else:
+                # Date is in the past but not clearly a deadline
+                processed.append(item)
+        else:
+            processed.append(item)
+
+    return processed
+
+
 def process_drafts_date_placeholders(outputs: Dict[str, Any], payload: Dict[str, Any] = None) -> Dict[str, Any]:
     """
-    Post-process all draft letters to replace date placeholders with actual dates.
+    Post-process all draft letters to:
+    1. Replace date placeholders with actual dates
+    2. Fill [INSERT] placeholders in compliance letter from payload data
+    3. Flag overdue deadlines in action plan
     """
     if not outputs:
         return outputs
@@ -3014,11 +3222,20 @@ def process_drafts_date_placeholders(outputs: Dict[str, Any], payload: Dict[str,
     if 'drafts' in outputs and isinstance(outputs['drafts'], dict):
         for key in outputs['drafts']:
             if isinstance(outputs['drafts'][key], str):
+                # Replace date placeholders
                 outputs['drafts'][key] = replace_date_placeholders(outputs['drafts'][key], payload)
+
+                # For compliance draft, also fill [INSERT] placeholders from payload
+                if key == 'compliance':
+                    outputs['drafts'][key] = fill_compliance_placeholders(outputs['drafts'][key], payload)
 
     # Process letter_summary if it contains placeholders
     if 'letter_summary' in outputs and isinstance(outputs['letter_summary'], str):
         outputs['letter_summary'] = replace_date_placeholders(outputs['letter_summary'], payload)
+
+    # Process action_plan to flag overdue deadlines
+    if 'action_plan' in outputs and isinstance(outputs['action_plan'], list):
+        outputs['action_plan'] = process_action_plan_deadlines(outputs['action_plan'])
 
     return outputs
 
@@ -3573,7 +3790,7 @@ Do not include any text before or after the JSON. The response must be parseable
                 'outputs': outputs_to_store,
                 'error': None,
                 'model': 'claude-sonnet-4-6',
-                'prompt_version': 'v5_compact_summary_date_fix',
+                'prompt_version': 'v6_compliance_prefill_overdue_flags',
                 'updated_at': datetime.utcnow().isoformat()
             }
 
