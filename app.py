@@ -4711,9 +4711,153 @@ def insert_case_output(output_data: Dict) -> bool:
         return False
 
 
+def run_email_exchange_generation(exchange_id: int, case_token: str, hoa_message: str,
+                                    case_payload: dict, statute_context: str,
+                                    exchange_history: str, today_formatted: str):
+    """Background task to generate email exchange response."""
+    try:
+        logger.info(f"Background: Starting email exchange generation for exchange_id={exchange_id}")
+
+        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional, legally-grounded counter-letters that cite applicable state statutes and address each specific point raised by the HOA.
+
+FORMATTING RULES — STRICTLY FOLLOW:
+- Output plain text only. No markdown of any kind.
+- No ** bold **, no ### headers, no # headings, no * bullets, no _ italics_
+- No emojis. No symbols used as decorators
+- Use ALL CAPS for section headings
+- Use plain numbered lists (1. 2. 3.) or dashes (-) for bullets
+- Separate sections with a blank line only
+- The output will be rendered and copied as a plain text letter
+
+EMAIL FORMAT RULES:
+- Do not include a From, To, or Re header block. That information belongs in the email client fields, not the body.
+- Do not include a date line at the top.
+- Start the output directly with the salutation: "Dear [Name],"
+- Replace every instance of "this letter" with "this email"
+- Replace "Attachments to include with this letter:" with "Attachments:"
+- Remove any standalone "This letter is submitted without prejudice" closing line — if reservation of rights language is needed, it belongs inside the Reservation of Rights section, not as a footer
+- End with the signature block only: name, address, email on separate lines
+- Output must be ready to paste directly into an email client with no editing"""
+
+        user_message = f"""ORIGINAL CASE DETAILS:
+{json.dumps(case_payload, indent=2)}
+
+APPLICABLE STATE STATUTES:
+{statute_context if statute_context else "No state-specific statutes available."}
+
+PRIOR EXCHANGE HISTORY:
+{exchange_history}
+
+NEW HOA MESSAGE TO RESPOND TO:
+{hoa_message}
+
+INSTRUCTIONS:
+Generate a specific counter-letter responding directly to this HOA message. Address each point raised. Cite the applicable statutes provided above. Use non-admission language. Do not generate a generic letter — this must respond to the specific points the HOA raised. Include today's date ({today_formatted}), the owner's address, and recipient address from the case payload."""
+
+        # Call Claude with retry logic
+        if not ANTHROPIC_API_KEY:
+            logger.error(f"Background: ANTHROPIC_API_KEY not configured for exchange_id={exchange_id}")
+            update_exchange_status(exchange_id, 'failed', 'AI service not configured')
+            return
+
+        max_retries = 5
+        base_delay = 10
+        anthropic_response = None
+
+        for attempt in range(max_retries):
+            try:
+                anthropic_response = requests.post(
+                    'https://api.anthropic.com/v1/messages',
+                    headers={
+                        'x-api-key': ANTHROPIC_API_KEY,
+                        'Content-Type': 'application/json',
+                        'anthropic-version': '2023-06-01'
+                    },
+                    json={
+                        'model': 'claude-sonnet-4-6',
+                        'max_tokens': 4096,
+                        'system': system_prompt,
+                        'messages': [{'role': 'user', 'content': user_message}]
+                    },
+                    timeout=(10, 120)
+                )
+
+                if anthropic_response.status_code in [429, 529, 503]:
+                    if attempt < max_retries - 1:
+                        jitter = random.uniform(0, 2)
+                        delay = base_delay * (2 ** attempt) + jitter
+                        logger.warning(f"Background: Claude API {anthropic_response.status_code} for exchange_id={exchange_id}, retry {attempt+1}/{max_retries} in {delay:.1f}s")
+                        time.sleep(delay)
+                        continue
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    jitter = random.uniform(0, 2)
+                    delay = base_delay * (2 ** attempt) + jitter
+                    logger.warning(f"Background: Request error for exchange_id={exchange_id}, retry {attempt+1}/{max_retries} in {delay:.1f}s: {str(e)}")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Background: All retries exhausted for exchange_id={exchange_id}: {str(e)}")
+                    update_exchange_status(exchange_id, 'failed', 'Network error')
+                    return
+
+        if not anthropic_response or not anthropic_response.ok:
+            error_msg = anthropic_response.text if anthropic_response else 'No response'
+            logger.error(f"Background: Claude API failed for exchange_id={exchange_id}: {error_msg}")
+            update_exchange_status(exchange_id, 'failed', 'AI generation failed')
+            return
+
+        # Parse response
+        claude_json = anthropic_response.json()
+        content = claude_json.get('content', [])
+        if content and content[0].get('type') == 'text':
+            generated_response = content[0].get('text', '').strip()
+        else:
+            logger.error(f"Background: Empty response from Claude for exchange_id={exchange_id}")
+            update_exchange_status(exchange_id, 'failed', 'Empty AI response')
+            return
+
+        # Post-process: Fill in placeholders with actual data from case payload
+        generated_response = fill_letter_placeholders(generated_response, case_payload)
+
+        # Update exchange record with generated response
+        update_exchange_status(exchange_id, 'completed', generated_response)
+        logger.info(f"Background: Email exchange completed for exchange_id={exchange_id}")
+
+    except Exception as e:
+        logger.error(f"Background: Unexpected error for exchange_id={exchange_id}: {str(e)}")
+        update_exchange_status(exchange_id, 'failed', str(e))
+
+
+def update_exchange_status(exchange_id: int, status: str, response_or_error: str):
+    """Update email exchange record with status and response."""
+    try:
+        update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_email_exchanges"
+        update_params = {'id': f'eq.{exchange_id}'}
+        update_headers = supabase_headers()
+
+        if status == 'completed':
+            update_data = {
+                'status': 'completed',
+                'generated_response': response_or_error
+            }
+        else:
+            update_data = {
+                'status': 'failed',
+                'generated_response': f'[Error: {response_or_error}]'
+            }
+
+        response = requests.patch(update_url, params=update_params, headers=update_headers,
+                                  json=update_data, timeout=TIMEOUT)
+        response.raise_for_status()
+        logger.info(f"Updated exchange_id={exchange_id} to status={status}")
+    except Exception as e:
+        logger.error(f"Failed to update exchange status for id={exchange_id}: {str(e)}")
+
+
 @app.route('/api/cases/<case_token>/email-exchange', methods=['POST', 'OPTIONS'])
 def create_email_exchange(case_token):
-    """Generate a counter-letter response to an HOA message."""
+    """Generate a counter-letter response to an HOA message (async with polling)."""
     # Handle CORS preflight
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
@@ -4763,12 +4907,13 @@ def create_email_exchange(case_token):
         except Exception as e:
             logger.warning(f"Failed to get statute context for email exchange: {str(e)}")
 
-        # 5) Fetch prior exchanges for this case
+        # 5) Fetch prior exchanges for this case (only completed ones)
         prior_exchanges = []
         try:
             exchanges_url = f"{SUPABASE_URL}/rest/v1/dmhoa_email_exchanges"
             exchanges_params = {
                 'case_token': f'eq.{case_token}',
+                'status': 'eq.completed',
                 'select': 'hoa_message,generated_response,exchange_date,created_at',
                 'order': 'created_at.asc'
             }
@@ -4794,89 +4939,14 @@ def create_email_exchange(case_token):
         else:
             exchange_history = "No prior exchanges"
 
-        # 6) Build prompt and call Claude
         today_formatted = datetime.now().strftime("%B %d, %Y")
 
-        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional, legally-grounded counter-letters that cite applicable state statutes and address each specific point raised by the HOA.
-
-FORMATTING RULES — STRICTLY FOLLOW:
-- Output plain text only. No markdown of any kind.
-- No ** bold **, no ### headers, no # headings, no * bullets, no _ italics_
-- No emojis. No symbols used as decorators
-- Use ALL CAPS for section headings
-- Use plain numbered lists (1. 2. 3.) or dashes (-) for bullets
-- Separate sections with a blank line only
-- The output will be rendered and copied as a plain text letter"""
-
-        user_message = f"""ORIGINAL CASE DETAILS:
-{json.dumps(case_payload, indent=2)}
-
-APPLICABLE STATE STATUTES:
-{statute_context if statute_context else "No state-specific statutes available."}
-
-PRIOR EXCHANGE HISTORY:
-{exchange_history}
-
-NEW HOA MESSAGE TO RESPOND TO:
-{hoa_message}
-
-INSTRUCTIONS:
-Generate a specific counter-letter responding directly to this HOA message. Address each point raised. Cite the applicable statutes provided above. Use non-admission language. Do not generate a generic letter — this must respond to the specific points the HOA raised. Include today's date ({today_formatted}), the owner's address, and recipient address from the case payload."""
-
-        # Call Claude with retry logic
-        if not ANTHROPIC_API_KEY:
-            return jsonify({'error': 'AI service not configured'}), 500
-
-        max_retries = 3
-        base_delay = 5
-        anthropic_response = None
-
-        for attempt in range(max_retries):
-            anthropic_response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers={
-                    'x-api-key': ANTHROPIC_API_KEY,
-                    'Content-Type': 'application/json',
-                    'anthropic-version': '2023-06-01'
-                },
-                json={
-                    'model': 'claude-sonnet-4-6',
-                    'max_tokens': 4096,
-                    'system': system_prompt,
-                    'messages': [{'role': 'user', 'content': user_message}]
-                },
-                timeout=(10, 120)
-            )
-
-            if anthropic_response.status_code in [429, 529, 503]:
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(f"Claude API returned {anthropic_response.status_code}, retrying in {delay}s...")
-                    time.sleep(delay)
-                    continue
-            break
-
-        if not anthropic_response.ok:
-            error_text = anthropic_response.text
-            logger.error(f"Claude API failed for email exchange: {anthropic_response.status_code}")
-            return jsonify({'error': 'Failed to generate response'}), 500
-
-        # Parse response
-        claude_json = anthropic_response.json()
-        content = claude_json.get('content', [])
-        if content and content[0].get('type') == 'text':
-            generated_response = content[0].get('text', '').strip()
-        else:
-            return jsonify({'error': 'Empty response from AI'}), 500
-
-        # Post-process: Fill in placeholders with actual data from case payload
-        generated_response = fill_letter_placeholders(generated_response, case_payload)
-
-        # 7) Save exchange to database
+        # 6) Create pending exchange record immediately
         exchange_data = {
             'case_token': case_token,
             'hoa_message': hoa_message,
-            'generated_response': generated_response,
+            'generated_response': '',
+            'status': 'pending',
             'exchange_date': datetime.utcnow().isoformat()
         }
 
@@ -4890,12 +4960,25 @@ Generate a specific counter-letter responding directly to this HOA message. Addr
         saved_data = save_response.json()
         exchange_id = saved_data[0].get('id') if saved_data else None
 
-        logger.info(f"Email exchange generated for case_token={case_token[:8]}..., prior_exchanges={len(prior_exchanges)}")
+        if not exchange_id:
+            return jsonify({'error': 'Failed to create exchange record'}), 500
 
+        logger.info(f"Created pending exchange_id={exchange_id} for case_token={case_token[:8]}...")
+
+        # 7) Start background thread for AI generation
+        thread = threading.Thread(
+            target=run_email_exchange_generation,
+            args=(exchange_id, case_token, hoa_message, case_payload,
+                  statute_context, exchange_history, today_formatted)
+        )
+        thread.start()
+
+        # Return immediately with pending status
         return jsonify({
-            'generated_response': generated_response,
-            'exchange_id': exchange_id
-        }), 200
+            'exchange_id': exchange_id,
+            'status': 'pending',
+            'message': 'Response is being generated. Poll GET /email-exchanges to check status.'
+        }), 202
 
     except Exception as e:
         error_msg = f"Error creating email exchange: {str(e)}"
@@ -4931,7 +5014,7 @@ def get_email_exchanges(case_token):
         exchanges_url = f"{SUPABASE_URL}/rest/v1/dmhoa_email_exchanges"
         exchanges_params = {
             'case_token': f'eq.{case_token}',
-            'select': 'id,hoa_message,generated_response,exchange_date,created_at',
+            'select': 'id,hoa_message,generated_response,exchange_date,created_at,status',
             'order': 'created_at.desc'
         }
         exchanges_headers = supabase_headers()
