@@ -3376,7 +3376,9 @@ def get_case_data():
             'updated_at': case.get('updated_at'),
             'payload': case.get('payload', {}),
             'outputs': case_outputs.get('outputs') if case_outputs else None,
-            'outputs_status': case_outputs.get('status') if case_outputs else None
+            'outputs_status': case_outputs.get('status') if case_outputs else None,
+            'fine_per_day': case_outputs.get('fine_per_day') if case_outputs else None,
+            'fine_start_date': case_outputs.get('fine_start_date') if case_outputs else None
         }
 
         logger.info(f"Successfully retrieved case data for token {token[:8]}...")
