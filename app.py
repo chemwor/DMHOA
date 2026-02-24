@@ -3706,26 +3706,48 @@ Do not include any text before or after the JSON. The response must be parseable
         ]
 
         # Make Anthropic Claude API call for better legal writing quality
+        # Includes retry logic with exponential backoff for 429/529 errors
         try:
             if not ANTHROPIC_API_KEY:
                 raise ValueError("ANTHROPIC_API_KEY not configured")
 
-            logger.info(f"Calling Claude claude-sonnet-4-6 for case analysis for token: {token[:8]}...")
-            anthropic_response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers={
-                    'x-api-key': ANTHROPIC_API_KEY,
-                    'Content-Type': 'application/json',
-                    'anthropic-version': '2023-06-01'
-                },
-                json={
-                    'model': 'claude-sonnet-4-6',
-                    'max_tokens': 8192,
-                    'system': system_prompt_analysis,
-                    'messages': anthropic_messages
-                },
-                timeout=(10, 180)  # 10s connect, 180s read for longer legal analysis
-            )
+            max_retries = 4
+            base_delay = 2  # seconds
+            anthropic_response = None
+
+            for attempt in range(max_retries):
+                logger.info(f"Calling Claude claude-sonnet-4-6 for case analysis for token: {token[:8]}... (attempt {attempt + 1}/{max_retries})")
+
+                anthropic_response = requests.post(
+                    'https://api.anthropic.com/v1/messages',
+                    headers={
+                        'x-api-key': ANTHROPIC_API_KEY,
+                        'Content-Type': 'application/json',
+                        'anthropic-version': '2023-06-01'
+                    },
+                    json={
+                        'model': 'claude-sonnet-4-6',
+                        'max_tokens': 8192,
+                        'system': system_prompt_analysis,
+                        'messages': anthropic_messages
+                    },
+                    timeout=(10, 180)  # 10s connect, 180s read for longer legal analysis
+                )
+
+                # Check if we should retry (429 rate limit, 529 overloaded, 503 service unavailable)
+                if anthropic_response.status_code in [429, 529, 503]:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff: 2s, 4s, 8s, 16s
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"Claude API returned {anthropic_response.status_code} (overloaded/rate-limited), retrying in {delay}s for token {token[:8]}...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"Claude API still returning {anthropic_response.status_code} after {max_retries} attempts for token {token[:8]}...")
+                        break
+                else:
+                    # Either success or a non-retryable error
+                    break
 
             if not anthropic_response.ok:
                 error_text = anthropic_response.text
@@ -3855,22 +3877,33 @@ If either value cannot be determined from the text, return null for that field.
 Case analysis text:
 {full_analysis_text[:12000]}"""
 
-                    haiku_response = requests.post(
-                        'https://api.anthropic.com/v1/messages',
-                        headers={
-                            'x-api-key': ANTHROPIC_API_KEY,
-                            'Content-Type': 'application/json',
-                            'anthropic-version': '2023-06-01'
-                        },
-                        json={
-                            'model': 'claude-haiku-4-5-20251001',
-                            'max_tokens': 256,
-                            'messages': [{'role': 'user', 'content': fine_extraction_prompt}]
-                        },
-                        timeout=(10, 30)
-                    )
+                    # Retry logic for fine extraction (handles 429/529/503 errors)
+                    haiku_response = None
+                    for haiku_attempt in range(3):
+                        haiku_response = requests.post(
+                            'https://api.anthropic.com/v1/messages',
+                            headers={
+                                'x-api-key': ANTHROPIC_API_KEY,
+                                'Content-Type': 'application/json',
+                                'anthropic-version': '2023-06-01'
+                            },
+                            json={
+                                'model': 'claude-haiku-4-5-20251001',
+                                'max_tokens': 256,
+                                'messages': [{'role': 'user', 'content': fine_extraction_prompt}]
+                            },
+                            timeout=(10, 30)
+                        )
 
-                    if haiku_response.ok:
+                        if haiku_response.status_code in [429, 529, 503]:
+                            if haiku_attempt < 2:
+                                delay = 2 * (2 ** haiku_attempt)  # 2s, 4s
+                                logger.warning(f"Fine extraction: Haiku returned {haiku_response.status_code}, retrying in {delay}s...")
+                                time.sleep(delay)
+                                continue
+                        break
+
+                    if haiku_response and haiku_response.ok:
                         haiku_json = haiku_response.json()
                         haiku_content = haiku_json.get('content', [])
                         if haiku_content and haiku_content[0].get('type') == 'text':
