@@ -3955,18 +3955,26 @@ SUMMARY_HTML REQUIREMENTS (CRITICAL - THIS IS A COMPACT FACT SHEET, NOT A DETAIL
 - Keep it under 150 words total. This is a quick-reference fact sheet, not the full analysis.
 
 DRAFT QUALITY REQUIREMENTS:
-- Each draft must be a complete, ready-to-send letter.
+- Each draft must be a complete, ready-to-send email body.
 - MUST directly quote or reference concrete facts from the extracted documents when available
   (deadlines, email addresses, paragraph citations, dollar amounts, dates, etc.).
 - When state law is referenced, cite specific statutes to strengthen the homeowner's position.
-- Use actual dates instead of placeholders - today's date should be written out (e.g., "February 23, 2026").
 - Each must include:
-  - Subject line
-  - Short opening with today's date
   - 3–6 bullet-point requests (specific asks)
   - Proposed timeline (e.g., "Please respond within 10 business days" if no deadline is provided)
   - Request fines/penalties be paused/waived while pending (when relevant)
   - Closing requesting confirmation in writing
+
+EMAIL FORMAT RULES FOR ALL DRAFTS — STRICTLY FOLLOW:
+- Do NOT output a date line at the top
+- Do NOT output a From/sender address block
+- Do NOT output a To/VIA EMAIL recipient block
+- Do NOT output a Re: subject line
+- Start the output directly with the salutation: "Dear [Name],"
+- End with signature block only: name, address, email on separate lines
+- Use "this email" instead of "this letter" throughout
+- Use "Attachments:" instead of "Attachments to include with this letter:"
+- The subject line, To, and CC fields are handled separately — they do not belong in the body
 
 DEPTH REQUIREMENTS:
 - action_plan >= 6 steps with timing hints (Today / 48 hours / Before deadline).
