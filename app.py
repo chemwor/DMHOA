@@ -4579,6 +4579,234 @@ def insert_case_output(output_data: Dict) -> bool:
         return False
 
 
+@app.route('/api/cases/<case_token>/email-exchange', methods=['POST', 'OPTIONS'])
+def create_email_exchange(case_token):
+    """Generate a counter-letter response to an HOA message."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    try:
+        # Validate case_token
+        if not case_token or not case_token.strip():
+            return jsonify({'error': 'case_token is required'}), 400
+
+        case_token = case_token.strip()
+        logger.info(f"Creating email exchange for case_token: {case_token[:8]}...")
+
+        # 1) Ensure case exists and is paid/unlocked
+        case = read_case_by_token(case_token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        case_status = case.get('status', '')
+        if case_status != 'paid':
+            return jsonify({'error': 'Case is not unlocked. Payment required.'}), 403
+
+        # 2) Validate request body
+        data = request.get_json() or {}
+        hoa_message = (data.get('hoa_message') or '').strip()
+
+        if not hoa_message:
+            return jsonify({'error': 'hoa_message is required and cannot be empty'}), 400
+
+        # 3) Get case payload
+        case_payload = case.get('payload', {})
+        if isinstance(case_payload, str):
+            try:
+                case_payload = json.loads(case_payload)
+            except:
+                case_payload = {}
+
+        # 4) Get statute context (same pattern as run_case_analysis)
+        statute_context = ""
+        try:
+            case_state = extract_state_from_payload(case_payload)
+            violation_type = extract_violation_type_from_payload(case_payload)
+            if case_state:
+                statute_ctx = get_statute_context(case_state, violation_type)
+                if statute_ctx:
+                    statute_context = statute_ctx
+                    logger.info(f"Statute context loaded for email exchange, state={case_state}")
+        except Exception as e:
+            logger.warning(f"Failed to get statute context for email exchange: {str(e)}")
+
+        # 5) Fetch prior exchanges for this case
+        prior_exchanges = []
+        try:
+            exchanges_url = f"{SUPABASE_URL}/rest/v1/dmhoa_email_exchanges"
+            exchanges_params = {
+                'case_token': f'eq.{case_token}',
+                'select': 'hoa_message,generated_response,exchange_date,created_at',
+                'order': 'created_at.asc'
+            }
+            exchanges_headers = supabase_headers()
+
+            exchanges_response = requests.get(exchanges_url, params=exchanges_params,
+                                              headers=exchanges_headers, timeout=TIMEOUT)
+            exchanges_response.raise_for_status()
+            prior_exchanges = exchanges_response.json() or []
+        except Exception as e:
+            logger.warning(f"Error fetching prior exchanges: {str(e)}")
+
+        # Format prior exchanges as readable thread
+        if prior_exchanges:
+            thread_parts = []
+            for ex in prior_exchanges:
+                ex_date = ex.get('exchange_date') or ex.get('created_at', 'Unknown date')
+                if isinstance(ex_date, str) and 'T' in ex_date:
+                    ex_date = ex_date.split('T')[0]  # Just the date part
+                thread_parts.append(f"HOA MESSAGE [{ex_date}]: {ex.get('hoa_message', '')}")
+                thread_parts.append(f"OUR RESPONSE [{ex_date}]: {ex.get('generated_response', '')}")
+            exchange_history = "\n\n".join(thread_parts)
+        else:
+            exchange_history = "No prior exchanges"
+
+        # 6) Build prompt and call Claude
+        today_formatted = datetime.now().strftime("%B %d, %Y")
+
+        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional, legally-grounded counter-letters that cite applicable state statutes and address each specific point raised by the HOA."""
+
+        user_message = f"""ORIGINAL CASE DETAILS:
+{json.dumps(case_payload, indent=2)}
+
+APPLICABLE STATE STATUTES:
+{statute_context if statute_context else "No state-specific statutes available."}
+
+PRIOR EXCHANGE HISTORY:
+{exchange_history}
+
+NEW HOA MESSAGE TO RESPOND TO:
+{hoa_message}
+
+INSTRUCTIONS:
+Generate a specific counter-letter responding directly to this HOA message. Address each point raised. Cite the applicable statutes provided above. Use non-admission language. Do not generate a generic letter — this must respond to the specific points the HOA raised. Include today's date ({today_formatted}), the owner's address, and recipient address from the case payload."""
+
+        # Call Claude with retry logic
+        if not ANTHROPIC_API_KEY:
+            return jsonify({'error': 'AI service not configured'}), 500
+
+        max_retries = 3
+        base_delay = 5
+        anthropic_response = None
+
+        for attempt in range(max_retries):
+            anthropic_response = requests.post(
+                'https://api.anthropic.com/v1/messages',
+                headers={
+                    'x-api-key': ANTHROPIC_API_KEY,
+                    'Content-Type': 'application/json',
+                    'anthropic-version': '2023-06-01'
+                },
+                json={
+                    'model': 'claude-sonnet-4-6',
+                    'max_tokens': 4096,
+                    'system': system_prompt,
+                    'messages': [{'role': 'user', 'content': user_message}]
+                },
+                timeout=(10, 120)
+            )
+
+            if anthropic_response.status_code in [429, 529, 503]:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Claude API returned {anthropic_response.status_code}, retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+            break
+
+        if not anthropic_response.ok:
+            error_text = anthropic_response.text
+            logger.error(f"Claude API failed for email exchange: {anthropic_response.status_code}")
+            return jsonify({'error': 'Failed to generate response'}), 500
+
+        # Parse response
+        claude_json = anthropic_response.json()
+        content = claude_json.get('content', [])
+        if content and content[0].get('type') == 'text':
+            generated_response = content[0].get('text', '').strip()
+        else:
+            return jsonify({'error': 'Empty response from AI'}), 500
+
+        # 7) Save exchange to database
+        exchange_data = {
+            'case_token': case_token,
+            'hoa_message': hoa_message,
+            'generated_response': generated_response,
+            'exchange_date': datetime.utcnow().isoformat()
+        }
+
+        save_url = f"{SUPABASE_URL}/rest/v1/dmhoa_email_exchanges"
+        save_headers = supabase_headers()
+        save_headers['Prefer'] = 'return=representation'
+
+        save_response = requests.post(save_url, headers=save_headers, json=exchange_data, timeout=TIMEOUT)
+        save_response.raise_for_status()
+
+        saved_data = save_response.json()
+        exchange_id = saved_data[0].get('id') if saved_data else None
+
+        logger.info(f"Email exchange generated for case_token={case_token[:8]}..., prior_exchanges={len(prior_exchanges)}")
+
+        return jsonify({
+            'generated_response': generated_response,
+            'exchange_id': exchange_id
+        }), 200
+
+    except Exception as e:
+        error_msg = f"Error creating email exchange: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
+@app.route('/api/cases/<case_token>/email-exchanges', methods=['GET', 'OPTIONS'])
+def get_email_exchanges(case_token):
+    """Get all email exchanges for a case."""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    try:
+        # Validate case_token
+        if not case_token or not case_token.strip():
+            return jsonify({'error': 'case_token is required'}), 400
+
+        case_token = case_token.strip()
+        logger.info(f"Fetching email exchanges for case_token: {case_token[:8]}...")
+
+        # 1) Ensure case exists and is paid/unlocked
+        case = read_case_by_token(case_token)
+        if not case:
+            return jsonify({'error': 'Case not found'}), 404
+
+        case_status = case.get('status', '')
+        if case_status != 'paid':
+            return jsonify({'error': 'Case is not unlocked. Payment required.'}), 403
+
+        # 2) Fetch all exchanges for this case
+        exchanges_url = f"{SUPABASE_URL}/rest/v1/dmhoa_email_exchanges"
+        exchanges_params = {
+            'case_token': f'eq.{case_token}',
+            'select': 'id,hoa_message,generated_response,exchange_date,created_at',
+            'order': 'created_at.desc'
+        }
+        exchanges_headers = supabase_headers()
+
+        exchanges_response = requests.get(exchanges_url, params=exchanges_params,
+                                          headers=exchanges_headers, timeout=TIMEOUT)
+        exchanges_response.raise_for_status()
+        exchanges = exchanges_response.json() or []
+
+        logger.info(f"Found {len(exchanges)} email exchanges for case_token {case_token[:8]}...")
+
+        return jsonify({'exchanges': exchanges}), 200
+
+    except Exception as e:
+        error_msg = f"Error fetching email exchanges: {str(e)}"
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+
 @app.route('/webhooks/stripe', methods=['POST'])
 def stripe_webhook():
     """Stripe webhook handler for processing payment events (converted from Deno/TypeScript)"""
