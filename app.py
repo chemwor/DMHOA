@@ -3818,6 +3818,105 @@ Do not include any text before or after the JSON. The response must be parseable
             except Exception:
                 pass  # Best effort
 
+            # Fine extraction step - extract fine_per_day and fine_start_date using Claude Haiku
+            # This runs after main analysis is saved, so failures won't break the main flow
+            try:
+                if ANTHROPIC_API_KEY and structured:
+                    # Build full analysis text from the structured output
+                    analysis_parts = []
+                    if structured.get('summary_html'):
+                        analysis_parts.append(f"Summary: {structured['summary_html']}")
+                    if structured.get('letter_summary'):
+                        analysis_parts.append(f"Letter Summary: {structured['letter_summary']}")
+                    if structured.get('risks_and_deadlines'):
+                        rd = structured['risks_and_deadlines']
+                        if rd.get('deadlines'):
+                            analysis_parts.append(f"Deadlines: {', '.join(rd['deadlines'])}")
+                        if rd.get('risks'):
+                            analysis_parts.append(f"Risks: {', '.join(rd['risks'])}")
+                    if structured.get('drafts'):
+                        for draft_key, draft_text in structured['drafts'].items():
+                            analysis_parts.append(f"Draft ({draft_key}): {draft_text}")
+
+                    # Also include the docs_block which has the original notice text
+                    analysis_parts.append(f"Original documents: {docs_block[:8000]}")
+
+                    full_analysis_text = "\n\n".join(analysis_parts)
+
+                    # Call Claude Haiku to extract fine information
+                    fine_extraction_prompt = f"""From the following HOA case analysis, extract two values and return ONLY a valid JSON object with no explanation, no markdown, no extra text:
+{{ "fine_per_day": <number or null>, "fine_start_date": "YYYY-MM-DD or null" }}
+
+fine_per_day: the daily fine dollar amount stated in the notice (e.g. 100)
+fine_start_date: the earliest specific date fines begin accruing per the notice
+
+If either value cannot be determined from the text, return null for that field.
+
+Case analysis text:
+{full_analysis_text[:12000]}"""
+
+                    haiku_response = requests.post(
+                        'https://api.anthropic.com/v1/messages',
+                        headers={
+                            'x-api-key': ANTHROPIC_API_KEY,
+                            'Content-Type': 'application/json',
+                            'anthropic-version': '2023-06-01'
+                        },
+                        json={
+                            'model': 'claude-haiku-4-5-20251001',
+                            'max_tokens': 256,
+                            'messages': [{'role': 'user', 'content': fine_extraction_prompt}]
+                        },
+                        timeout=(10, 30)
+                    )
+
+                    if haiku_response.ok:
+                        haiku_json = haiku_response.json()
+                        haiku_content = haiku_json.get('content', [])
+                        if haiku_content and haiku_content[0].get('type') == 'text':
+                            fine_text = haiku_content[0].get('text', '').strip()
+
+                            # Strip markdown fences if present
+                            if fine_text.startswith('```'):
+                                fine_text = re.sub(r'^```(?:json)?\s*', '', fine_text)
+                                fine_text = re.sub(r'\s*```$', '', fine_text)
+
+                            # Parse JSON
+                            fine_data = json.loads(fine_text)
+                            fine_per_day = fine_data.get('fine_per_day')
+                            fine_start_date = fine_data.get('fine_start_date')
+
+                            # Update dmhoa_case_outputs if we have values
+                            if fine_per_day is not None or fine_start_date is not None:
+                                fine_update_data = {}
+                                if fine_per_day is not None:
+                                    fine_update_data['fine_per_day'] = fine_per_day
+                                if fine_start_date is not None:
+                                    fine_update_data['fine_start_date'] = fine_start_date
+
+                                fine_update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_case_outputs"
+                                fine_update_params = {'case_token': f'eq.{token}'}
+                                fine_update_headers = supabase_headers()
+
+                                requests.patch(
+                                    fine_update_url,
+                                    params=fine_update_params,
+                                    headers=fine_update_headers,
+                                    json=fine_update_data,
+                                    timeout=TIMEOUT
+                                )
+
+                                logger.info(f"Fine extraction: fine_per_day={fine_per_day} fine_start_date={fine_start_date} for token {token[:8]}...")
+                            else:
+                                logger.info(f"Fine extraction: no fine data found for token {token[:8]}...")
+                    else:
+                        logger.warning(f"Fine extraction failed: Haiku API returned {haiku_response.status_code} for token {token[:8]}...")
+
+            except json.JSONDecodeError as e:
+                logger.warning(f"Fine extraction failed: JSON parse error - {str(e)} for token {token[:8]}...")
+            except Exception as e:
+                logger.warning(f"Fine extraction failed: {str(e)} for token {token[:8]}...")
+
             logger.info(f"Case analysis completed successfully for token: {token[:8]}...")
             return {
                 'ok': True,
