@@ -31,6 +31,9 @@ from statute_lookup import (
     extract_violation_type_from_payload
 )
 
+# Dashboard routes (migrated from Netlify functions)
+from dashboard_routes import dashboard_bp
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -42,6 +45,9 @@ CORS(app, resources={r"/*": {"origins": "*"}},
      allow_headers=["Content-Type", "Authorization", "apikey", "x-client-info", "x-supabase-api-version",
                     "X-Webhook-Secret"],
      methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+
+# Register dashboard blueprint (analytics endpoints migrated from Netlify)
+app.register_blueprint(dashboard_bp)
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
