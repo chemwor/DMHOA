@@ -712,7 +712,7 @@ def get_google_ads_data():
             campaign = row.get('campaign', {})
             metrics = row.get('metrics', {})
 
-            spend = (metrics.get('costMicros', 0) or 0) / 1_000_000
+            spend = int(metrics.get('costMicros', 0) or 0) / 1_000_000
             clicks = int(metrics.get('clicks', 0) or 0)
             impressions = int(metrics.get('impressions', 0) or 0)
             conversions = float(metrics.get('conversions', 0) or 0)
