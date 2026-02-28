@@ -39,9 +39,10 @@ GOOGLE_ADS_REFRESH_TOKEN = os.environ.get('GOOGLE_ADS_REFRESH_TOKEN')
 GOOGLE_ADS_API_VERSION = 'v21'
 GOOGLE_ADS_API_BASE = f'https://googleads.googleapis.com/{GOOGLE_ADS_API_VERSION}'
 
-# Clarity Configuration
-CLARITY_API_TOKEN = os.environ.get('CLARITY_API_TOKEN')
-CLARITY_API_URL = 'https://www.clarity.ms/export-data/api/v1/project-live-insights'
+# PostHog Configuration
+POSTHOG_PROJECT_ID = os.environ.get('POSTHOG_PROJECT_ID')
+POSTHOG_PERSONAL_API_KEY = os.environ.get('POSTHOG_PERSONAL_API_KEY')
+POSTHOG_API_URL = 'https://us.posthog.com'
 
 # Lighthouse Configuration
 GOOGLE_PAGESPEED_API_KEY = os.environ.get('GOOGLE_PAGESPEED_API_KEY')
@@ -763,16 +764,16 @@ def get_google_ads_data():
 
 
 # ============================================================================
-# CLARITY ENDPOINT
+# POSTHOG ENDPOINT
 # ============================================================================
 
-@dashboard_bp.route('/api/dashboard/clarity', methods=['GET', 'OPTIONS'])
-def get_clarity_data():
-    """Get Microsoft Clarity analytics data for dashboard."""
+@dashboard_bp.route('/api/dashboard/posthog', methods=['GET', 'OPTIONS'])
+def get_posthog_data():
+    """Get PostHog analytics data for dashboard."""
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
-    if not CLARITY_API_TOKEN:
+    if not POSTHOG_PERSONAL_API_KEY or not POSTHOG_PROJECT_ID:
         # Return mock data
         return jsonify({
             'totalSessions': 0,
@@ -791,13 +792,13 @@ def get_clarity_data():
             'jsErrors': 0,
             'slowPageLoads': 0,
             'isMockData': True,
-            'message': 'Clarity not configured.',
+            'message': 'PostHog not configured.',
         })
 
     try:
         # Check cache first
         force_refresh = request.args.get('refresh') == 'true'
-        cache_key = 'clarity_data'
+        cache_key = 'posthog_data'
 
         if not force_refresh and SUPABASE_URL:
             cache_response = requests.get(
@@ -811,65 +812,132 @@ def get_clarity_data():
                 if cache_data:
                     updated_at = datetime.fromisoformat(cache_data[0]['updated_at'].replace('Z', '+00:00'))
                     cache_age = (datetime.now(updated_at.tzinfo) - updated_at).total_seconds()
-                    if cache_age < 4 * 60 * 60:  # 4 hours
+                    if cache_age < 12 * 60 * 60:  # 12 hours
                         return jsonify({
                             **cache_data[0]['data'],
                             'fromCache': True,
                             'cacheAge': f'{int(cache_age / 60)} minutes',
                         })
 
-        # Fetch from Clarity API
-        response = requests.get(
-            f'{CLARITY_API_URL}?numOfDays=3',
-            headers={
-                'Authorization': f'Bearer {CLARITY_API_TOKEN}',
-                'Content-Type': 'application/json',
-            },
+        posthog_headers = {
+            'Authorization': f'Bearer {POSTHOG_PERSONAL_API_KEY}',
+            'Content-Type': 'application/json',
+        }
+
+        # Query 1: Sessions — total sessions, unique users, avg duration, pageviews, pages/session, bounce rate
+        sessions_query = {
+            'query': {
+                'kind': 'HogQLQuery',
+                'query': """
+                    SELECT
+                        count(DISTINCT $session_id) as total_sessions,
+                        count(DISTINCT person_id) as unique_users,
+                        avg(session.$session_duration) as avg_session_duration,
+                        count(*) as total_pageviews,
+                        count(*) / greatest(count(DISTINCT $session_id), 1) as pages_per_session,
+                        countIf(session.$session_duration < 10) * 100.0 / greatest(count(DISTINCT $session_id), 1) as bounce_rate
+                    FROM events
+                    WHERE event = '$pageview'
+                      AND timestamp > now() - INTERVAL 3 DAY
+                """
+            }
+        }
+
+        sessions_response = requests.post(
+            f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/',
+            headers=posthog_headers,
+            json=sessions_query,
             timeout=TIMEOUT
         )
 
-        if not response.ok:
-            raise Exception(f'Clarity API error: {response.status_code}')
+        sessions_data = {'total_sessions': 0, 'unique_users': 0, 'avg_session_duration': 0,
+                         'total_pageviews': 0, 'pages_per_session': 0, 'bounce_rate': 0}
 
-        api_data = response.json()
+        if sessions_response.ok:
+            result = sessions_response.json()
+            rows = result.get('results', [])
+            if rows and len(rows) > 0:
+                row = rows[0]
+                sessions_data = {
+                    'total_sessions': int(row[0] or 0),
+                    'unique_users': int(row[1] or 0),
+                    'avg_session_duration': round(float(row[2] or 0)),
+                    'total_pageviews': int(row[3] or 0),
+                    'pages_per_session': round(float(row[4] or 0), 1),
+                    'bounce_rate': round(float(row[5] or 0), 1),
+                }
+        else:
+            logger.warning(f'PostHog sessions query failed: {sessions_response.status_code} {sessions_response.text}')
 
-        # Parse metrics
-        metrics = {
-            'totalSessions': 0,
-            'uniqueVisitors': 0,
-            'pagesPerSession': 0,
+        # Query 2: Rage clicks (last 3 days)
+        rage_query = {
+            'query': {
+                'kind': 'HogQLQuery',
+                'query': """
+                    SELECT count(*) as rage_clicks
+                    FROM events
+                    WHERE event = '$rageclick'
+                      AND timestamp > now() - INTERVAL 3 DAY
+                """
+            }
+        }
+
+        rage_response = requests.post(
+            f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/',
+            headers=posthog_headers,
+            json=rage_query,
+            timeout=TIMEOUT
+        )
+
+        rage_clicks = 0
+        if rage_response.ok:
+            result = rage_response.json()
+            rows = result.get('results', [])
+            if rows and len(rows) > 0:
+                rage_clicks = int(rows[0][0] or 0)
+
+        # Query 3: Dead clicks (last 3 days)
+        dead_query = {
+            'query': {
+                'kind': 'HogQLQuery',
+                'query': """
+                    SELECT count(*) as dead_clicks
+                    FROM events
+                    WHERE event = '$dead_click'
+                      AND timestamp > now() - INTERVAL 3 DAY
+                """
+            }
+        }
+
+        dead_response = requests.post(
+            f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/',
+            headers=posthog_headers,
+            json=dead_query,
+            timeout=TIMEOUT
+        )
+
+        dead_clicks = 0
+        if dead_response.ok:
+            result = dead_response.json()
+            rows = result.get('results', [])
+            if rows and len(rows) > 0:
+                dead_clicks = int(rows[0][0] or 0)
+
+        data = {
+            'totalSessions': sessions_data['total_sessions'],
+            'totalPageViews': sessions_data['total_pageviews'],
+            'pagesPerSession': sessions_data['pages_per_session'],
             'avgScrollDepth': 0,
-            'avgTimeOnPage': 0,
-            'rageClicks': 0,
-            'deadClicks': 0,
+            'avgTimeOnPage': sessions_data['avg_session_duration'],
+            'bounceRate': sessions_data['bounce_rate'],
+            'totalVisits': sessions_data['total_sessions'],
+            'uniqueVisitors': sessions_data['unique_users'],
+            'returningVisitors': 0,
+            'rageClicks': rage_clicks,
+            'deadClicks': dead_clicks,
             'quickBacks': 0,
             'excessiveScrolling': 0,
             'jsErrors': 0,
-        }
-
-        for item in api_data if isinstance(api_data, list) else []:
-            metric_name = item.get('metricName')
-            info = item.get('information', [])
-
-            if metric_name == 'Traffic':
-                for entry in info:
-                    metrics['totalSessions'] += int(entry.get('totalSessionCount', 0))
-                    metrics['uniqueVisitors'] = max(metrics['uniqueVisitors'], int(entry.get('distantUserCount', 0)))
-            elif metric_name == 'Scroll Depth':
-                scroll_values = [float(e.get('avgScrollDepth', 0)) for e in info if e.get('avgScrollDepth')]
-                if scroll_values:
-                    metrics['avgScrollDepth'] = round(sum(scroll_values) / len(scroll_values))
-            elif metric_name == 'Dead Click Count':
-                metrics['deadClicks'] = sum(int(e.get('count', 0)) for e in info)
-            elif metric_name == 'Rage Click Count':
-                metrics['rageClicks'] = sum(int(e.get('count', 0)) for e in info)
-
-        data = {
-            **metrics,
-            'totalPageViews': round(metrics['totalSessions'] * max(metrics['pagesPerSession'], 1)),
-            'bounceRate': 0,
-            'totalVisits': metrics['totalSessions'],
-            'returningVisitors': 0,
             'slowPageLoads': 0,
             'isMockData': False,
             'dataRange': 'Last 3 days',
@@ -892,9 +960,9 @@ def get_clarity_data():
         return jsonify(data)
 
     except Exception as e:
-        logger.error(f'Clarity API error: {str(e)}')
+        logger.error(f'PostHog API error: {str(e)}')
         return jsonify({
-            'error': 'Failed to fetch Clarity data',
+            'error': 'Failed to fetch PostHog data',
             'message': str(e),
             'isMockData': True,
         }), 500
