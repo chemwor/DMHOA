@@ -2050,117 +2050,6 @@ def auto_generate_case_preview(token: str, case_id: str, force_regenerate: bool 
         return False
 
 
-# @app.route('/webhooks/generate-preview', methods=['POST'])
-# def generate_preview_webhook():
-#     """Webhook endpoint to generate case preview - can be called after case creation."""
-#     # Validate webhook secret
-#     webhook_secret = request.headers.get('X-Webhook-Secret')
-#     if not webhook_secret or webhook_secret != DOC_EXTRACT_WEBHOOK_SECRET:
-#         logger.warning("Invalid or missing webhook secret for generate-preview")
-#         return jsonify({'error': 'Unauthorized'}), 401
-#
-#     try:
-#         # Parse JSON body
-#         data = request.get_json()
-#         if not data:
-#             return jsonify({'error': 'Invalid JSON body'}), 400
-#
-#         # Validate required fields
-#         token = data.get('token')
-#         case_id = data.get('case_id')
-#
-#         if not token:
-#             return jsonify({'error': 'Missing required field: token'}), 400
-#
-#         logger.info(f"Generating preview for case - Token: {token[:8]}..., Case ID: {case_id}")
-#
-#         # If case_id not provided, look it up by token
-#         if not case_id:
-#             case = read_case_by_token(token)
-#             if not case:
-#                 return jsonify({'error': 'Case not found for token'}), 404
-#             case_id = case.get('id')
-#             if not case_id:
-#                 return jsonify({'error': 'Case ID not found'}), 404
-#
-#         # Generate preview
-#         success = auto_generate_case_preview(token, case_id)
-#
-#         if success:
-#             return jsonify({
-#                 'message': 'Preview generated successfully',
-#                 'token': token,
-#                 'case_id': case_id
-#             }), 200
-#         else:
-#             return jsonify({
-#                 'error': 'Failed to generate preview',
-#                 'token': token,
-#                 'case_id': case_id
-#             }), 500
-#
-#     except Exception as e:
-#         error_msg = f"Unexpected error generating preview: {str(e)}"
-#         logger.error(error_msg)
-#         return jsonify({'error': error_msg}), 500
-
-
-# @app.route('/webhooks/case-created', methods=['POST'])
-# def case_created_webhook():
-#     """Webhook to handle case creation and trigger initial preview generation."""
-#     # Validate webhook secret
-#     webhook_secret = request.headers.get('X-Webhook-Secret')
-#     if not webhook_secret or webhook_secret != DOC_EXTRACT_WEBHOOK_SECRET:
-#         logger.warning("Invalid or missing webhook secret for case-created")
-#         return jsonify({'error': 'Unauthorized'}), 401
-#
-#     try:
-#         # Parse JSON body
-#         data = request.get_json()
-#         if not data:
-#             return jsonify({'error': 'Invalid JSON body'}), 400
-#
-#         token = data.get('token')
-#         case_id = data.get('case_id')
-#
-#         if not token:
-#             return jsonify({'error': 'Missing required field: token'}), 400
-#
-#         logger.info(f"Case created - Token: {token[:8]}..., Case ID: {case_id}")
-#
-#         # If case_id not provided, look it up by token
-#         if not case_id:
-#             case = read_case_by_token(token)
-#             if not case:
-#                 return jsonify({'error': 'Case not found for token'}), 404
-#             case_id = case.get('id')
-#
-#         # Generate immediate preview
-#         immediate_success = auto_generate_case_preview(token, case_id)
-#
-#         # Check if there are any documents that might need processing
-#         all_documents = fetch_any_documents_status_by_token(token)
-#         pending_or_processing_docs = [doc for doc in all_documents if doc.get('status') in ['pending', 'processing']]
-#
-#         # Only schedule delayed jobs if there are documents that might become ready
-#         if pending_or_processing_docs:
-#             logger.info(f"Found {len(pending_or_processing_docs)} pending/processing documents - scheduling delayed preview generations")
-#             # Delayed: Give time for documents to be uploaded and processed, then regenerate
-#         else:
-#             logger.info(f"No pending/processing documents found - skipping delayed preview generations")
-#
-#         return jsonify({
-#             'message': 'Case creation handled and preview generation scheduled',
-#             'token': token,
-#             'case_id': case_id,
-#             'immediate_preview': immediate_success,
-#             'delayed_jobs_scheduled': len(pending_or_processing_docs) > 0
-#         }), 200
-#
-#     except Exception as e:
-#         error_msg = f"Unexpected error handling case creation: {str(e)}"
-#         logger.error(error_msg)
-#         return jsonify({'error': error_msg}), 500
 
 
 def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -3906,11 +3795,27 @@ Errors: {errors}"""
                     "required": ["clarification", "extension", "compliance"]
                 },
                 "questions_to_ask": {"type": "array", "items": {"type": "string"}, "minItems": 6},
-                "lowest_cost_path": {"type": "array", "items": {"type": "string"}, "minItems": 4}
+                "lowest_cost_path": {"type": "array", "items": {"type": "string"}, "minItems": 4},
+                "know_your_rights": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "title": {"type": "string"},
+                            "content": {"type": "string"},
+                            "relevance": {"type": "string"},
+                            "source": {"type": "string"}
+                        },
+                        "required": ["title", "content", "relevance", "source"]
+                    },
+                    "minItems": 3,
+                    "maxItems": 5
+                }
             },
             "required": [
                 "summary_html", "letter_summary", "draft_titles", "risks_and_deadlines",
-                "action_plan", "drafts", "questions_to_ask", "lowest_cost_path"
+                "action_plan", "drafts", "questions_to_ask", "lowest_cost_path", "know_your_rights"
             ]
         }
 
@@ -3933,11 +3838,12 @@ You generate HOA dispute assistance for a homeowner.
 This is educational drafting help, not legal advice.
 
 
-LEGAL CITATION REQUIREMENTS:
-- When state-specific statute information is provided, you MUST cite those specific statutes in your drafts.
-- Reference the exact statute name and section numbers in your response letters.
-- Mention procedural protections the homeowner is entitled to under state law.
-- Include homeowner rights and notice requirements from the statute reference.
+UPL COMPLIANCE RULES (CRITICAL):
+- Do NOT cite statutes, case law, or legal authority in any letter draft.
+- Do NOT make legal arguments or legal conclusions in letter drafts.
+- DO keep all personalized facts from the homeowner's documents (dates, names, amounts, deadlines).
+- Frame requests as reasonable asks from a homeowner, not legal demands.
+- Use knowledge of applicable state law to inform strategy and tone silently — the law shapes WHAT to ask for, not what to cite.
 
 OUTPUT RULES (CRITICAL):
 - ONLY "summary_html" may contain HTML.
@@ -3964,7 +3870,7 @@ DRAFT QUALITY REQUIREMENTS:
 - Each draft must be a complete, ready-to-send email body.
 - MUST directly quote or reference concrete facts from the extracted documents when available
   (deadlines, email addresses, paragraph citations, dollar amounts, dates, etc.).
-- When state law is referenced, cite specific statutes to strengthen the homeowner's position.
+- Use knowledge of applicable state law to inform strategy and tone, but do NOT cite statutes in the letter body.
 - Each must include:
   - 3–6 bullet-point requests (specific asks)
   - Proposed timeline (e.g., "Please respond within 10 business days" if no deadline is provided)
@@ -3987,6 +3893,16 @@ DEPTH REQUIREMENTS:
 - risks >= 3 concrete risks tied to HOA enforcement.
 - questions_to_ask >= 6 questions.
 - lowest_cost_path >= 4 items.
+
+KNOW YOUR RIGHTS (EDUCATIONAL SECTION):
+- Generate 3-5 educational cards in the "know_your_rights" array.
+- Each card has: title, content, relevance, source.
+  - "title": Short heading (e.g., "Right to a Hearing Before Fines").
+  - "content": Plain-language explanation of the legal concept in 2-3 sentences. Write for a non-lawyer.
+  - "relevance": One sentence explaining why this matters for THIS specific case.
+  - "source": The statute citation (e.g., "Texas Property Code § 209.007"). This is the ONLY place statute citations appear.
+- Focus on rights and protections that are directly relevant to the homeowner's situation.
+- Do NOT repeat information already in the drafts or action plan — this section is for legal education only.
 
 STYLE:
 - Calm, professional, firm, factual.
@@ -4557,12 +4473,12 @@ def send_message():
 
         # 5) Generate AI response using OpenAI Chat Completions API
         try:
-            system_prompt = """You are “Dispute My HOA,” an educational HOA response assistant.
+            system_prompt = """You are "Dispute My HOA," an educational HOA response assistant.
 This is a paid, unlocked case. The user expects complete guidance and ready-to-use drafts.
 You provide drafting assistance and procedural guidance — not legal advice.
 
 Your role is to help homeowners:
-- Fully understand their HOA violation notice in plain English
+- Understand their situation and options in plain English
 - Identify exact deadlines, risks, and procedural options
 - Draft complete, ready-to-send written responses
 - Choose the lowest-risk path to resolve the issue without escalation
@@ -4573,11 +4489,18 @@ IMPORTANT SAFETY RULES:
 - Base guidance strictly on the documents and facts provided
 - If uncertainty exists, explain it clearly and conservatively
 
+UPL COMPLIANCE RULES (CRITICAL):
+- Do NOT cite statutes, case law, or legal authority in any letter draft or guidance.
+- Do NOT make legal arguments or legal conclusions.
+- Present options, not directives: use "homeowners in similar situations often..." instead of "you should..."
+- Use "you may want to consider..." or "one option is..." instead of "I recommend..."
+- Frame requests as reasonable asks from a homeowner, not legal demands.
+
 ESCALATION & LIABILITY RULES (CRITICAL):
 - Default to NON-ADMISSION language unless the user explicitly requests a compliance or admission letter
-- Avoid phrases such as “I admit,” “I acknowledge the violation,” or similar
-- Preserve the homeowner’s procedural rights whenever possible
-- Flag language or actions that could weaken the homeowner’s position before drafting
+- Avoid phrases such as "I admit," "I acknowledge the violation," or similar
+- Preserve the homeowner's procedural rights whenever possible
+- Flag language or actions that could weaken the homeowner's position before drafting
 
 DRAFTING RULES:
 - When a letter is requested, produce a complete, ready-to-send plain-text draft
@@ -4585,12 +4508,13 @@ DRAFTING RULES:
 - Avoid emotional, defensive, or aggressive wording
 - Assume all written responses may be reviewed, logged, or used later
 - Clearly label each draft by purpose (clarification, extension, compliance, hearing request)
+- Do NOT cite statutes in letter drafts — use law knowledge to shape what to ask for, not what to cite
 
 GUIDANCE RULES:
-- Explain WHEN and WHY to use each response option
-- Recommend the safest sequence of actions when multiple paths exist
+- Present options and explain trade-offs rather than directing the homeowner
 - Highlight deadlines, hearing rights, documentation standards, and delivery methods (email, certified mail, portal)
 - Identify irreversible actions before suggesting them
+- Use option-presenting language: "Homeowners in this situation typically consider..." or "Some options include..."
 
 QUESTION RULES:
 - Ask at most 1–2 clarifying questions
@@ -4612,7 +4536,7 @@ FORMATTING RULES — STRICTLY FOLLOW:
 - Separate sections with a blank line only
 - The output will be rendered and copied as a plain text letter
 
-Your goal is to help the homeowner resolve the issue correctly the first time,
+Your goal is to help the homeowner understand their situation and options,
 with clear wording, proper procedure, and minimal risk — now that the case is unlocked.
 
 """
@@ -4626,7 +4550,7 @@ with clear wording, proper procedure, and minimal risk — now that the case is 
 
             # Add state-specific statute context if available
             if chat_statute_context:
-                statute_message = f"State-specific HOA law reference for drafting:\n\n{chat_statute_context}\n\nWhen drafting responses, cite these specific statutes to strengthen the homeowner's position."
+                statute_message = f"State-specific HOA law reference (for informing strategy and tone only — do NOT cite statutes in letter drafts or guidance):\n\n{chat_statute_context}"
                 messages.append({'role': 'system', 'content': statute_message})
 
             # Add preview information if available
@@ -4911,7 +4835,14 @@ def run_email_exchange_generation(exchange_id: int, case_token: str, hoa_message
     try:
         logger.info(f"Background: Starting email exchange generation for exchange_id={exchange_id}")
 
-        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional, legally-grounded counter-letters that cite applicable state statutes and address each specific point raised by the HOA.
+        system_prompt = """You are an HOA dispute assistant helping a homeowner respond to HOA communications. Generate professional counter-letters that address each specific point raised by the HOA.
+
+UPL COMPLIANCE RULES (CRITICAL):
+- Do NOT cite statutes, case law, or legal authority in the letter body.
+- Do NOT make legal arguments or legal conclusions.
+- DO keep all personalized facts from the homeowner's documents (dates, names, amounts, deadlines).
+- Frame requests as reasonable asks from a homeowner, not legal demands.
+- Use knowledge of applicable state law to inform strategy and tone silently.
 
 FORMATTING RULES — STRICTLY FOLLOW:
 - Output plain text only. No markdown of any kind.
@@ -4945,7 +4876,7 @@ NEW HOA MESSAGE TO RESPOND TO:
 {hoa_message}
 
 INSTRUCTIONS:
-Generate a specific counter-letter responding directly to this HOA message. Address each point raised. Cite the applicable statutes provided above. Use non-admission language. Do not generate a generic letter — this must respond to the specific points the HOA raised. Include today's date ({today_formatted}), the owner's address, and recipient address from the case payload."""
+Generate a specific counter-letter responding directly to this HOA message. Address each point raised. Do NOT cite statutes in the letter body — use the law to inform tone and strategy only. Use non-admission language. Do not generate a generic letter — this must respond to the specific points the HOA raised. Include today's date ({today_formatted}), the owner's address, and recipient address from the case payload."""
 
         # Call Claude with retry logic
         if not ANTHROPIC_API_KEY:

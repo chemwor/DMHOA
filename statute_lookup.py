@@ -347,7 +347,7 @@ def format_statute_for_prompt(statute: Dict[str, Any], state: str, category: str
         parts.append(f"Fine/Penalty Rules: {fine_rules}")
         parts.append("")
 
-    parts.append("IMPORTANT: Cite these specific statutes when drafting responses. Reference the exact statute name and relevant provisions.")
+    parts.append("IMPORTANT: Use these statutes to inform strategy and tone. Statute citations belong ONLY in the Know Your Rights educational section, NOT in letter drafts.")
 
     if ai_generated:
         parts.append("(Note: This statute information was AI-generated and should be verified for specific legal applications.)")
