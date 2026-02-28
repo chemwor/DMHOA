@@ -3334,8 +3334,8 @@ def process_action_plan_deadlines(action_plan: List[str]) -> List[str]:
     """
     Process action plan items to flag any deadlines that have already passed.
 
-    If a deadline date is in the past, reframes the action item to indicate urgency:
-    - "Before December 27, 2025" -> "OVERDUE (was December 27, 2025) — Act immediately"
+    If a deadline date is in the past, reframes the action item to note the overdue status
+    with informational, non-directive language.
     """
     if not action_plan:
         return action_plan
@@ -3373,8 +3373,8 @@ def process_action_plan_deadlines(action_plan: List[str]) -> List[str]:
                 else:
                     overdue_text = f"{days_overdue} days overdue"
 
-                # Prepend overdue notice and add urgency
-                new_item = f"⚠️ OVERDUE ({overdue_text}, was {date_str}): {item} — Act immediately to establish good faith."
+                # Prepend overdue notice with informational framing
+                new_item = f"OVERDUE ({overdue_text}, was {date_str}): {item} — This deadline has passed. Homeowners who have missed a deadline typically prioritize this step to begin addressing the issue."
                 processed.append(new_item)
             else:
                 # Date is in the past but not clearly a deadline
@@ -3889,20 +3889,64 @@ EMAIL FORMAT RULES FOR ALL DRAFTS — STRICTLY FOLLOW:
 - The subject line, To, and CC fields are handled separately — they do not belong in the body
 
 DEPTH REQUIREMENTS:
-- action_plan >= 6 steps with timing hints (Today / 48 hours / Before deadline).
+- action_plan >= 6 steps, each referencing factual deadlines from the notice where applicable.
 - risks >= 3 concrete risks tied to HOA enforcement.
 - questions_to_ask >= 6 questions.
 - lowest_cost_path >= 4 items.
+
+ACTION PLAN LANGUAGE RULES (CRITICAL — applies to action_plan items):
+- Never use direct commands like "Send this", "Do this", "Act immediately", "Contact [person] now".
+- Never say "act immediately to establish good faith" — this is strategic legal advice.
+- Frame each action item as what homeowners in similar situations commonly do:
+  - Instead of "TODAY — Send the Clarification email to person@example.com"
+    → "Based on the deadline in your notice, homeowners in similar situations typically send a clarification request to the HOA's representative early in the process."
+  - Instead of "Act immediately to establish good faith"
+    → "Responding before stated deadlines is one way to demonstrate willingness to cooperate."
+  - Instead of "contact a licensed HVAC specialist immediately"
+    → "If an inspection is required, scheduling with a licensed vendor before the deadline is a common approach."
+  - Instead of "request a formal hearing in writing immediately"
+    → "Homeowners who wish to contest proposed fines typically submit a written hearing request before the stated deadline."
+- Use framing like:
+  - "Homeowners in similar situations typically..."
+  - "A common approach is to..."
+  - "Options to consider include..."
+  - "Based on the [date] deadline in your notice..."
+  - "One way to demonstrate cooperation is..."
+- Still include factual deadline dates from the notice.
+- For overdue items, say "This deadline has passed. Homeowners who have missed a deadline typically prioritize [action] to begin addressing the issue." — NOT "Act immediately to establish good faith."
+- The action plan should feel like a knowledgeable guide showing what paths exist, not an advisor telling the user what to do.
+
+LOWEST-COST PATH LANGUAGE RULES (CRITICAL — applies to lowest_cost_path items):
+- Same option-presenting language as action plan items.
+- Instead of "Send the Clarification email immediately" → "Sending a clarification request early is typically the lowest-cost first step."
+- Instead of "Simultaneously submit a written hearing request" → "Some homeowners also submit a written hearing request at this stage to preserve their options."
+- Instead of "Avoid any unauthorized modifications" → "Making modifications without prior approval can trigger separate violations."
+- Frame as common approaches, not directives.
 
 KNOW YOUR RIGHTS (EDUCATIONAL SECTION):
 - Generate 3-5 educational cards in the "know_your_rights" array.
 - Each card has: title, content, relevance, source.
   - "title": Short heading (e.g., "Right to a Hearing Before Fines").
   - "content": Plain-language explanation of the legal concept in 2-3 sentences. Write for a non-lawyer.
-  - "relevance": One sentence explaining why this matters for THIS specific case.
+  - "relevance": One sentence explaining how this concept is commonly relevant in situations like this.
   - "source": The statute citation (e.g., "Texas Property Code § 209.007"). This is the ONLY place statute citations appear.
 - Focus on rights and protections that are directly relevant to the homeowner's situation.
 - Do NOT repeat information already in the drafts or action plan — this section is for legal education only.
+
+KNOW YOUR RIGHTS LANGUAGE RULES (CRITICAL — applies to "relevance" lines):
+- The educational content (title, content, source) is fine — keep statute citations, plain-language explanations, and source references.
+- The "relevance" line must use distanced, informational framing — NEVER personalized advice:
+  - Use "Some homeowners..." or "Homeowners who wish to..." NOT "you should" or "you have grounds to"
+  - Use "is commonly referenced when..." NOT "is critical to protecting your right"
+  - Use "can be relevant if..." NOT "you may have grounds to raise"
+- Never make legal conclusions about the specific user's case (e.g., don't say "you may have grounds")
+- Never tell the user what to do with the information — present it and let them decide
+- Examples of CORRECT relevance framing:
+  - "Homeowners who wish to contest proposed fines typically submit a written hearing request before the stated deadline in their notice."
+  - "Some homeowners in similar situations have raised questions about whether enforcement was applied consistently across all units."
+  - "Homeowners can review their Declaration for specific notice requirements that may apply."
+  - "Maintaining a record of all communications and actions taken is a common practice among homeowners navigating HOA disputes."
+- The tone should be: "Here is what the law says and how it is commonly relevant" — NOT "Here is what you should do with this."
 
 STYLE:
 - Calm, professional, firm, factual.
@@ -4515,6 +4559,23 @@ GUIDANCE RULES:
 - Highlight deadlines, hearing rights, documentation standards, and delivery methods (email, certified mail, portal)
 - Identify irreversible actions before suggesting them
 - Use option-presenting language: "Homeowners in this situation typically consider..." or "Some options include..."
+
+CHAT LANGUAGE RULES (CRITICAL):
+- When presenting next steps or options, use "Based on the deadlines in your notice, here are options homeowners typically consider:" instead of "Suggested next steps:"
+- Never give direct commands like "Send this today" or "Do this now"
+- Say "I can help you draft a response" instead of "I can write a reply" — the user is the author, you are the assistant
+- Instead of "I can write a calm, professional reply" say "I can help you draft a professional reply. You'll review and edit it before sending."
+- When the user asks "what should I do?", respond with options and information, not directives:
+  - "Here are the approaches homeowners commonly take in this situation: [A], [B], [C]. Which would you like to explore?"
+- When referencing deadlines, state them as facts from the notice, not as urgency pressure:
+  - "Your notice states a deadline of [date]" not "You need to act by [date]"
+- Always reinforce that the user makes the decisions: "Which of these would you like to start with?" or "Would you like help drafting any of these?"
+
+CHAT RESPONSES TO PASTED HOA REPLIES:
+- When the user pastes an HOA response and you generate a counter-reply:
+  - Frame it as "Here's a draft response for your review" not "Here's what to send"
+  - Add a brief note: "Review and edit this before sending. You may want to adjust the tone or add details."
+  - Apply the same letter generation rules: no statute citations, no legal arguments, professional factual tone
 
 QUESTION RULES:
 - Ask at most 1–2 clarifying questions
