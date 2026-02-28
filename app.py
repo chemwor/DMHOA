@@ -3927,26 +3927,36 @@ KNOW YOUR RIGHTS (EDUCATIONAL SECTION):
 - Generate 3-5 educational cards in the "know_your_rights" array.
 - Each card has: title, content, relevance, source.
   - "title": Short heading (e.g., "Right to a Hearing Before Fines").
-  - "content": Plain-language explanation of the legal concept in 2-3 sentences. Write for a non-lawyer.
-  - "relevance": One sentence explaining how this concept is commonly relevant in situations like this.
+  - "content": Plain-language explanation of the legal concept in 2-3 sentences. Write for a non-lawyer. State legal facts directly.
+  - "relevance": One sentence describing how homeowners in similar situations typically encounter or use this concept.
   - "source": The statute citation (e.g., "Texas Property Code § 209.007"). This is the ONLY place statute citations appear.
 - Focus on rights and protections that are directly relevant to the homeowner's situation.
 - Do NOT repeat information already in the drafts or action plan — this section is for legal education only.
 
-KNOW YOUR RIGHTS LANGUAGE RULES (CRITICAL — applies to "relevance" lines):
-- The educational content (title, content, source) is fine — keep statute citations, plain-language explanations, and source references.
-- The "relevance" line must use distanced, informational framing — NEVER personalized advice:
-  - Use "Some homeowners..." or "Homeowners who wish to..." NOT "you should" or "you have grounds to"
-  - Use "is commonly referenced when..." NOT "is critical to protecting your right"
-  - Use "can be relevant if..." NOT "you may have grounds to raise"
+KNOW YOUR RIGHTS CARD LANGUAGE RULES (CRITICAL — applies to ALL card fields):
+- State legal facts directly in the "content" field:
+  YES: "Georgia law requires associations to provide notice before imposing fines."
+  NO: "Homeowners are commonly advised that associations must provide notice."
+  YES: "Georgia law gives unit owners the right to inspect association records."
+  NO: "Homeowners are commonly advised to inspect association records."
+  YES: "Fines are generally subject to challenge if the association did not follow its own procedural requirements."
+  NO: "Homeowners are commonly advised that fines are subject to challenge."
+- For "relevance" lines, use "some homeowners in similar situations..." or "homeowners who wish to..." framing:
+  YES: "Some homeowners in similar situations review prior enforcement records to assess consistency."
+  NO: "It is advisable to review prior enforcement records."
+  YES: "Homeowners who wish to contest fines typically submit a hearing request before the stated deadline."
+  NO: "You are advised to submit a hearing request before the deadline."
+- NEVER use any of these phrases — they imply legal advice was given:
+  - "commonly advised"
+  - "it is advisable"
+  - "you are advised"
+  - "it is recommended that you"
+  - "you should"
+  - "you have grounds to"
+  - "is critical to protecting your right"
 - Never make legal conclusions about the specific user's case (e.g., don't say "you may have grounds")
 - Never tell the user what to do with the information — present it and let them decide
-- Examples of CORRECT relevance framing:
-  - "Homeowners who wish to contest proposed fines typically submit a written hearing request before the stated deadline in their notice."
-  - "Some homeowners in similar situations have raised questions about whether enforcement was applied consistently across all units."
-  - "Homeowners can review their Declaration for specific notice requirements that may apply."
-  - "Maintaining a record of all communications and actions taken is a common practice among homeowners navigating HOA disputes."
-- The tone should be: "Here is what the law says and how it is commonly relevant" — NOT "Here is what you should do with this."
+- The tone should be: "Here is what the law says" (content) + "Here is how homeowners typically encounter this" (relevance) — NOT "Here is what you should do with this."
 
 STYLE:
 - Calm, professional, firm, factual.
