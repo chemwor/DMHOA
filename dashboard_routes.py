@@ -2581,6 +2581,46 @@ def handle_ad_suggestions():
                 except Exception as e:
                     logger.warning(f'Failed to fetch ads data for suggestions: {str(e)}')
 
+                # Compute period insights from real data (not AI-generated)
+                total_spend = sum(c.get('spend', 0) for c in ads_data.get('campaigns', []))
+                total_clicks = sum(c.get('clicks', 0) for c in ads_data.get('campaigns', []))
+                total_impressions = sum(c.get('impressions', 0) for c in ads_data.get('campaigns', []))
+                total_conversions = sum(float(c.get('conversions', 0) or 0) for c in ads_data.get('campaigns', []))
+                days_analyzed = max(1, (datetime.strptime(end_date, '%Y-%m-%d') - datetime.strptime(start_date, '%Y-%m-%d')).days + 1)
+
+                # Fetch Stripe revenue for the analysis period
+                total_revenue = 0
+                paid_conversions = 0
+                try:
+                    if STRIPE_SECRET_KEY:
+                        import stripe
+                        stripe.api_key = STRIPE_SECRET_KEY
+                        start_ts = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp())
+                        end_ts = int((datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)).timestamp())
+                        charges = stripe.Charge.list(created={'gte': start_ts, 'lte': end_ts}, limit=100)
+                        successful = [c for c in charges.data if c.status == 'succeeded' and not c.refunded]
+                        total_revenue = round(sum(c.amount for c in successful) / 100, 2)
+                        paid_conversions = len(successful)
+                except Exception as e:
+                    logger.warning(f'Failed to fetch Stripe revenue for period insights: {e}')
+
+                net_position = round(total_revenue - total_spend, 2)
+                roas_ratio = round(total_revenue / total_spend, 2) if total_spend > 0 else 0
+                cost_per_paid = round(total_spend / paid_conversions, 2) if paid_conversions > 0 else 0
+                cost_per_case = round(total_spend / total_conversions, 2) if total_conversions > 0 else 0
+
+                period_insights = {
+                    'dateRange': f'{start_date} to {end_date}',
+                    'daysAnalyzed': days_analyzed,
+                    'totalSpend': round(total_spend, 2),
+                    'totalRevenue': total_revenue,
+                    'netPosition': net_position,
+                    'costPerCaseStart': cost_per_case,
+                    'costPerPaidConversion': cost_per_paid,
+                    'revenueToSpendRatio': roas_ratio,
+                    'dataQualityNote': '' if total_revenue > 0 else 'Revenue data not available for this period. Stripe charges may not directly correlate to Google Ads clicks within this date range.'
+                }
+
                 # Build plan context if requested
                 plan_context_str = ''
                 plan_context_data = {}
@@ -2646,19 +2686,18 @@ Respond with ONLY valid JSON, no markdown, no explanation. Every array in the re
 Based on ALL the data above, respond with ONLY a JSON object (no markdown code fences). EVERY array MUST contain at least 2-3 items:
 
 {{
-  "periodInsights": {{ "dateRange": "{start_date} to {end_date}", "totalSpend": <number>, "totalClicks": <number>, "totalImpressions": <number>, "avgCTR": <number> }},
   "performanceSummary": "<brief 2-3 sentence analysis of overall performance>",
   {campaign_brief_field}
-  "keywordSuggestions": [{{ "keyword": "<text>", "matchType": "PHRASE|EXACT|BROAD", "action": "add|pause|adjust_bid", "reason": "<why>", "expectedImpact": "high|medium|low" }}],
-  "negativeKeywordSuggestions": [{{ "keyword": "<search term to exclude>", "matchType": "EXACT|PHRASE", "reason": "<why this wastes budget — reference search terms data and active negatives>" }}],
-  "adCopySuggestions": [{{ "headline": "<new headline up to 30 chars>", "description": "<new description up to 90 chars>", "reason": "<what current ad copy is missing or how this improves CTR>" }}],
-  "generalRecommendations": [{{ "title": "<short title>", "description": "<actionable recommendation based on the data>", "priority": "high|medium|low" }}]
+  "keywordSuggestions": [{{ "keyword": "<text>", "matchType": "PHRASE|EXACT|BROAD", "action": "add|pause|modify", "rationale": "<why this keyword should be added/paused/modified>", "priority": "high|medium|low" }}],
+  "negativeKeywordSuggestions": [{{ "keyword": "<search term to exclude>", "rationale": "<why this wastes budget — reference search terms data and active negatives>", "priority": "high|medium|low" }}],
+  "adCopySuggestions": [{{ "type": "headline|description", "current": "<current text being replaced, or null if new>", "suggested": "<suggested new text — headlines max 30 chars, descriptions max 90 chars>", "rationale": "<what current ad copy is missing or how this improves CTR>", "priority": "high|medium|low" }}],
+  "generalRecommendations": [{{ "recommendation": "<actionable recommendation>", "category": "budget|targeting|bidding|creative|landing_page", "priority": "high|medium|low", "expectedImpact": "<expected outcome if implemented>" }}]
 }}
 
 IMPORTANT:
-- adCopySuggestions: Review the current headlines and descriptions above. Suggest NEW headlines/descriptions that aren't already in use. Focus on the $49 price point, DIY angle, and urgency.
-- negativeKeywordSuggestions: Look at search terms that are irrelevant (attorney/lawyer seekers, unrelated HOA topics). Also review the active negatives list and suggest any gaps.
-- generalRecommendations: Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items.'''
+- adCopySuggestions: Review the current headlines and descriptions above. Suggest NEW headlines/descriptions that aren't already in use. Focus on the $49 price point, DIY angle, and urgency. Use type "headline" or "description". Set current to the text being replaced (or null if brand new). Set suggested to the new text.
+- negativeKeywordSuggestions: Look at search terms that are irrelevant (attorney/lawyer seekers, unrelated HOA topics). Also review the active negatives list and suggest any gaps. Include a priority for each.
+- generalRecommendations: Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items. Each must have a category.'''
 
                 response_text = call_claude_api(prompt, system_prompt, 4096)
                 # Strip markdown fences if present, then find the JSON object
@@ -2676,8 +2715,9 @@ IMPORTANT:
 
                 result = {
                     **suggestions,
+                    'periodInsights': period_insights,
                     'generatedAt': datetime.now().isoformat(),
-                    'dateRange': {'startDate': start_date, 'endDate': end_date},
+                    'dateRange': {'startDate': start_date, 'endDate': end_date, 'daysAnalyzed': days_analyzed},
                 }
                 if plan_context_data:
                     result['planContext'] = plan_context_data
