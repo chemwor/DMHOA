@@ -2668,6 +2668,16 @@ Respond with ONLY valid JSON, no markdown, no explanation. Every array in the re
 The product helps DIY homeowners write responses to HOA fines and violations — NOT for people seeking attorneys.
 Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
 
+                # System prompt v2.1 — 2026-03-01
+                # Changes from v2.0:
+                # 1. Negative keyword logic: require spend>0 AND clicks>0
+                # 2. Keyword dedup: cross-reference keyword_view before ADD
+                # 3. Duplicate match type detection: flag phrase+exact conflicts
+                # 4. Email capture: surface Klaviyo captures as funnel signal
+                # 5. Ad copy constraints: no prevention/legal language, char limits
+                # 6. Ad scheduling: flag overnight impression waste >10%
+                # 7. Citation enforcement: verbatim dataSource required
+
                 # Build campaign brief JSON field if in campaign mode
                 campaign_brief_field = ''
                 if campaign_label:
@@ -2701,12 +2711,141 @@ Based on ALL the data above, respond with ONLY a JSON object (no markdown code f
   "generalRecommendations": [{{ "recommendation": "<actionable recommendation>", "category": "budget|targeting|bidding|creative|landing_page", "priority": "high|medium|low", "expectedImpact": "<expected outcome if implemented>" }}]
 }}
 
-IMPORTANT:
-- adCopySuggestions: Review the current headlines and descriptions above. Suggest NEW headlines/descriptions that aren't already in use. Focus on the $49 price point, DIY angle, and urgency. Use type "headline" or "description". Set current to the text being replaced (or null if brand new). Set suggested to the new text.
-- negativeKeywordSuggestions: Look at search terms that are irrelevant (attorney/lawyer seekers, unrelated HOA topics). Also review the active negatives list and suggest any gaps. Include a priority for each.
-- generalRecommendations: Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items. Each must have a category.'''
+===================================================================
+ANALYSIS RULES — follow every rule below precisely.
+===================================================================
 
-                response_text = call_claude_api(prompt, system_prompt, 4096, model='claude-opus-4-6')
+STEP 0 — DUPLICATE MATCH TYPE AUDIT — run first, before other analysis:
+Scan the keyword_view data for any keyword text that appears in more than one match type simultaneously with spend > $0 on both versions.
+
+For each duplicate found, add to generalRecommendations:
+{{
+  "recommendation": "DUPLICATE KEYWORD — [keyword] is running as both [match type A] ($X.XX spent) and [match type B] ($X.XX spent) simultaneously. They are competing against each other in the same auctions, splitting bid signal and inflating your own CPC. Pause the PHRASE match version. Keep EXACT match for precise bid control.",
+  "category": "bidding",
+  "priority": "high",
+  "expectedImpact": "Consolidates bid signal, eliminates internal auction competition, reduces wasted spend",
+  "dataSource": "keyword_view: [keyword] PHRASE $X.XX | [keyword] EXACT $X.XX"
+}}
+
+If no duplicates exist with spend > $0 on both versions, skip this check silently — do not mention it.
+
+---
+
+STEP 1 — KEYWORD DEDUPLICATION — REQUIRED BEFORE EVERY SUGGESTION:
+The data includes an existing keyword list from keyword_view. Before recommending any ADD keyword action, check whether that keyword text already exists in the keyword_view data in any match type (EXACT, PHRASE, BROAD).
+
+Rules:
+- If keyword exists in the same match type → skip it entirely, do not include it in keywordSuggestions
+- If keyword exists in a different match type AND there is a specific strategic reason to add the new match type → include it but note "already exists as [match type], adding [new match type] for [reason]"
+- If keyword does not exist in any match type → include normally
+
+Never recommend adding a keyword that is already active in the same match type in the account.
+
+---
+
+STEP 2 — NEGATIVE KEYWORD RULES — CRITICAL:
+Only recommend EXCLUDE for a search term if ALL of the following are true:
+  1. spend > $0 — the term actually cost money
+  2. clicks > 0 — someone actually clicked on it
+  3. conversions = 0 — it did not convert
+  4. The term contains wrong-intent signals: attorney, lawyer, lawyers, attorneys, near me, free, pro bono, template, templates, legal advice, lawsuit, sue, court, mediators
+
+NEVER recommend excluding a term where clicks = 0 and cost = $0. Impressions are free in CPC campaigns. Zero-click terms cost nothing and must not be flagged as waste.
+
+Broad informational words like "rules", "guidelines", "laws", "regulations" are NOT negative keyword candidates on their own. They only become candidates if they appear in a clicked term that also contains wrong-intent signals.
+
+If no search terms meet all 4 criteria above, return an empty negativeKeywordSuggestions array. Never invent candidates.
+
+---
+
+STEP 3 — AD COPY CONSTRAINTS — enforce on every suggestion:
+
+PRODUCT CONTEXT: Users already have an HOA violation, fine, notice, or collections threat. They need to RESPOND to something they already received. Never imply the product prevents violations or represents them legally.
+
+NEVER suggest copy containing:
+  - Violation prevention language: "Stop HOA Violations", "Prevent fines", "Avoid violations"
+  - Legal representation language: "legal help", "legal service", "attorney", "lawyer", "legal advice"
+  - Attorney replacement language: "no attorney needed", "without a lawyer", "handle without an attorney", "replaces legal counsel"
+
+ALWAYS frame copy around:
+  - Responding to something already received
+  - Understanding what a notice or fine means
+  - Free preview as zero-risk first step
+  - $49 flat fee as cost clarity vs hourly legal fees
+  - Self-serve empowerment: "handle it yourself", "respond yourself", "fight it yourself"
+  - "Skip the attorney fees" is acceptable — cost comparison without implying legal equivalence
+
+GOOGLE ADS CHARACTER LIMITS — hard limits, not guidelines:
+  Headlines: 30 characters maximum including spaces
+  Descriptions: 90 characters maximum including spaces
+  Callouts: 25 characters maximum including spaces
+
+Count every character before finalizing a suggestion. If a suggestion exceeds its limit, rewrite it until it fits. Never output a suggestion that violates these limits. A shorter accurate headline beats a longer one that gets truncated or rejected by Google.
+
+Use type "headline" or "description". Set current to the text being replaced (or null if brand new). Set suggested to the new text.
+
+---
+
+STEP 4 — EMAIL CAPTURE AS FUNNEL SIGNAL — include when Klaviyo data is present:
+If total klaviyo captures > 0 during the analysis period:
+  Calculate email_capture_rate = klaviyo_captures / total_clicks
+
+  If email_capture_rate >= 0.05 (5% or higher):
+    - Include as a POSITIVE signal in performanceSummary
+    - Phrase: "Email capture rate of X% from abandonment flows indicates the free preview is compelling. Leads are entering the funnel even without payment conversion."
+    - Add to periodInsights: emailCaptureRate (as decimal), emailCapturesTotal (integer), abandonmentFlowActive (bool)
+
+  Never grade a period as purely negative if email captures exist. Email capture is the intermediate conversion event between click and payment — it is meaningful funnel progress.
+
+  In gradeImpact within campaignBrief, note email capture rate alongside CTR as a positive contributing metric.
+
+---
+
+STEP 5 — AD SCHEDULING AUDIT — run when hour_of_day data is present:
+Analyze impressions by hour.
+
+Define overnight hours as: 10PM, 11PM, 12AM, 1AM, 2AM, 3AM, 4AM, 5AM, 6AM
+
+Calculate:
+  overnight_impressions = sum of impressions in overnight hours
+  total_impressions = sum of all hourly impressions
+  overnight_pct = overnight_impressions / total_impressions
+
+If overnight_pct > 0.10 (more than 10% overnight):
+  Add to generalRecommendations:
+  {{
+    "recommendation": "Set ad schedule to 7AM-9PM only. [X]% of impressions are occurring overnight (10PM-6AM). Homeowners making $49 decisions are asleep during these hours. These impressions accumulate low-engagement signals that reduce Quality Score without driving conversions. Peak impression hours are [list top 3 hours from data] - concentrate budget there.",
+    "category": "targeting",
+    "priority": "high",
+    "expectedImpact": "Redirect [X]% of wasted overnight budget to proven peak hours, improve Quality Score",
+    "dataSource": "hour_of_day data: overnight impressions [X] of [total] total"
+  }}
+
+---
+
+STEP 6 — GENERAL RECOMMENDATIONS:
+Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items. Each must have a category.
+
+---
+
+STEP 7 — CITATION ENFORCEMENT — non-negotiable:
+Every item in negativeKeywordSuggestions, keywordSuggestions, adCopySuggestions, and generalRecommendations must include a dataSource field populated with a specific verbatim value from the provided data.
+
+Acceptable dataSource formats:
+  - "search_term_view: term=[X], clicks=[Y], spend=$[Z]"
+  - "keyword_view: [keyword] [match type] clicks=[Y] spend=$[Z]"
+  - "hour_of_day: overnight=[X] impressions of [total] total"
+  - "campaign metrics: CTR=[X]%, CPC=$[Y], clicks=[Z]"
+
+NOT acceptable:
+  - "campaign data"
+  - "performance analysis"
+  - "based on account trends"
+  - Any vague reference without specific numbers
+
+If you cannot populate dataSource with a real verbatim value from the data provided, remove the item entirely. Fewer accurate recommendations always beat more hallucinated ones. This rule applies even if the result is an empty array.'''
+
+                response_text = call_claude_api(prompt, system_prompt, 8192, model='claude-opus-4-6')
                 # Strip markdown fences if present, then find the JSON object
                 cleaned = response_text.strip()
                 if cleaned.startswith('```'):
