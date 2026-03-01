@@ -546,16 +546,26 @@ def get_klaviyo_data():
         full_preview_count = get_klaviyo_list_count(KLAVIYO_FULL_PREVIEW_LIST_ID)
         quick_preview_count = get_klaviyo_list_count(KLAVIYO_QUICK_PREVIEW_LIST_ID)
 
-        # Get total profiles
-        response = requests.get(
-            'https://a.klaviyo.com/api/profiles/?page[size]=1',
-            headers=klaviyo_headers(),
-            timeout=TIMEOUT
-        )
+        # Get total profiles by paginating through all profiles
         total_profiles = 0
-        if response.ok:
-            data = response.json()
-            total_profiles = data.get('meta', {}).get('page_info', {}).get('total', 0)
+        next_url = '/profiles/?page[size]=100'
+        while next_url:
+            response = requests.get(
+                f'https://a.klaviyo.com/api{next_url}',
+                headers=klaviyo_headers(),
+                timeout=TIMEOUT
+            )
+            if not response.ok:
+                break
+            page_data = response.json()
+            total_profiles += len(page_data.get('data', []))
+            next_link = page_data.get('links', {}).get('next')
+            if next_link:
+                from urllib.parse import urlparse
+                parsed = urlparse(next_link)
+                next_url = parsed.path + ('?' + parsed.query if parsed.query else '')
+            else:
+                next_url = None
 
         # Get new profiles today
         since = (datetime.now() - timedelta(hours=24)).isoformat()
@@ -3173,18 +3183,32 @@ def _fetch_supabase_case_metrics(period='today') -> Dict:
 
 
 def _fetch_klaviyo_metrics() -> Dict:
-    """Fetch Klaviyo metrics internally."""
+    """Fetch Klaviyo metrics internally — total profiles and new subscribers today."""
     result = {'total_profiles': 0, 'new_today': 0}
     if not KLAVIYO_API_KEY:
         return result
     try:
-        response = requests.get(
-            'https://a.klaviyo.com/api/profiles/?page[size]=1',
-            headers=klaviyo_headers(),
-            timeout=TIMEOUT
-        )
-        if response.ok:
-            result['total_profiles'] = response.json().get('meta', {}).get('page_info', {}).get('total', 0)
+        # Count total profiles by paginating (meta.page_info.total not available in 2024 API)
+        total = 0
+        next_url = '/profiles/?page[size]=100'
+        while next_url:
+            response = requests.get(
+                f'https://a.klaviyo.com/api{next_url}',
+                headers=klaviyo_headers(),
+                timeout=TIMEOUT
+            )
+            if not response.ok:
+                break
+            page_data = response.json()
+            total += len(page_data.get('data', []))
+            next_link = page_data.get('links', {}).get('next')
+            if next_link:
+                from urllib.parse import urlparse
+                parsed = urlparse(next_link)
+                next_url = parsed.path + ('?' + parsed.query if parsed.query else '')
+            else:
+                next_url = None
+        result['total_profiles'] = total
 
         since = (datetime.now() - timedelta(hours=24)).isoformat()
         new_response = requests.get(
