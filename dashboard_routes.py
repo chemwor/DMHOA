@@ -2245,6 +2245,64 @@ Fill in real values based on the data. Be concise.'''
 ad_suggestion_jobs = {}
 
 
+def _build_plan_context() -> Dict:
+    """Build 6-month plan context for campaign brief AI prompts."""
+    now = datetime.now()
+    if now.strftime('%Y-%m-%d') < '2026-03-01':
+        current_month = 1
+    else:
+        current_month = max(1, min(6, now.month - 2))
+
+    current_plan = PLAN_MONTHS[current_month - 1]
+    days_since_plan_start = (now - datetime.strptime(PLAN_START_DATE, '%Y-%m-%d')).days
+
+    # Fetch live metrics for grading
+    stripe_month = _fetch_stripe_metrics('month')
+    ads = _fetch_google_ads_metrics('plan_start') or {}
+    posthog = _fetch_posthog_metrics_for_plan()
+
+    monthly_revenue = stripe_month.get('revenue', 0)
+    ads_spend = ads.get('spend', 0)
+    ads_ctr = ads.get('ctr', 0)
+    ads_conversions = ads.get('conversions', 0)
+    monthly_visitors = posthog.get('unique_visitors', 0)
+
+    roas = (monthly_revenue / ads_spend) if ads_spend > 0 else 0
+    cac = (ads_spend / ads_conversions) if ads_conversions > 0 else 0
+
+    traffic_grade = _grade(monthly_visitors, GRADING['traffic']['monthly_visitors'])
+    ctr_grade = _grade(ads_ctr, GRADING['traffic']['google_ads_ctr'])
+    revenue_grade = _grade(monthly_revenue, GRADING['revenue']['monthly_revenue'])
+    roas_grade = _grade(roas, GRADING['revenue']['roas'])
+
+    return {
+        'plan_start_date': PLAN_START_DATE,
+        'days_since_start': days_since_plan_start,
+        'current_month_number': current_month,
+        'current_month_name': current_plan['name'],
+        'current_theme': current_plan['theme'],
+        'budget_planned': current_plan['budget_planned'],
+        'budget_actual': round(ads_spend, 2),
+        'monthly_revenue': round(monthly_revenue, 2),
+        'roas': round(roas, 2),
+        'monthly_visitors': monthly_visitors,
+        'ads_ctr_pct': round(ads_ctr * 100, 2) if ads_ctr < 1 else round(ads_ctr, 2),
+        'ads_conversions': ads_conversions,
+        'cac': round(cac, 2),
+        'grades': {
+            'traffic': traffic_grade,
+            'ctr': ctr_grade,
+            'revenue': revenue_grade,
+            'roas': roas_grade,
+        },
+        'scenario': 'good' if traffic_grade != 'F' and revenue_grade != 'F' else ('ugly' if traffic_grade == 'F' and revenue_grade == 'F' else 'bad'),
+        'all_months': [
+            {'month': pm['month'], 'name': pm['name'], 'theme': pm['theme'], 'budget': pm['budget_planned']}
+            for pm in PLAN_MONTHS
+        ],
+    }
+
+
 @dashboard_bp.route('/api/dashboard/ad-suggestions', methods=['GET', 'POST', 'OPTIONS'])
 def handle_ad_suggestions():
     """Handle AI-powered Google Ads optimization suggestions."""
@@ -2298,8 +2356,19 @@ def handle_ad_suggestions():
         start_date = data.get('startDate')
         end_date = data.get('endDate')
         customer_id = data.get('customerId')
+        campaign_name = data.get('campaignName')
+        campaign_id = data.get('campaignId')
+        include_plan_context = data.get('includePlanContext', False)
 
-        if not start_date or not end_date:
+        # Campaign brief mode: default to full plan range if no dates specified
+        if campaign_name or campaign_id:
+            if not start_date:
+                start_date = PLAN_START_DATE
+            if not end_date:
+                now_la = datetime.now(ZoneInfo('America/Los_Angeles'))
+                end_date = now_la.strftime('%Y-%m-%d')
+            include_plan_context = True
+        elif not start_date or not end_date:
             return jsonify({'status': 'error', 'error': 'startDate and endDate are required'}), 400
 
         # Generate job ID
@@ -2328,6 +2397,14 @@ def handle_ad_suggestions():
 
         def process_analysis():
             try:
+                # Build campaign filter clause for GAQL
+                campaign_filter = ''
+                if campaign_id:
+                    campaign_filter = f" AND campaign.id = '{campaign_id}'"
+                elif campaign_name:
+                    safe_name = campaign_name.replace("'", "\\'")
+                    campaign_filter = f" AND campaign.name = '{safe_name}'"
+
                 # Fetch real Google Ads data to feed into the prompt
                 ads_data = {}
                 try:
@@ -2343,6 +2420,7 @@ def handle_ad_suggestions():
                             FROM campaign
                             WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
                                 AND campaign.status != 'REMOVED' AND metrics.cost_micros > 0
+                                {campaign_filter}
                             ORDER BY metrics.cost_micros DESC
                         """
                         camp_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, camp_query)
@@ -2366,6 +2444,7 @@ def handle_ad_suggestions():
                             FROM keyword_view
                             WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
                                 AND campaign.status = 'ENABLED' AND metrics.impressions > 0
+                                {campaign_filter}
                             ORDER BY metrics.clicks DESC LIMIT 30
                         """
                         kw_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, kw_query)
@@ -2390,6 +2469,7 @@ def handle_ad_suggestions():
                             FROM search_term_view
                             WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
                                 AND campaign.status = 'ENABLED' AND metrics.impressions > 0
+                                {campaign_filter}
                             ORDER BY metrics.clicks DESC LIMIT 30
                         """
                         st_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, st_query)
@@ -2419,6 +2499,7 @@ def handle_ad_suggestions():
                                 AND ad_group_ad.status != 'REMOVED'
                                 AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
                                 AND metrics.impressions > 0
+                                {campaign_filter}
                             ORDER BY metrics.clicks DESC LIMIT 20
                         """
                         ad_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, ad_query)
@@ -2446,7 +2527,7 @@ def handle_ad_suggestions():
                             })
 
                         # Active negative keywords
-                        neg_query = """
+                        neg_query = f"""
                             SELECT campaign.name, ad_group.name,
                                 ad_group_criterion.keyword.text,
                                 ad_group_criterion.keyword.match_type,
@@ -2456,6 +2537,7 @@ def handle_ad_suggestions():
                                 AND ad_group_criterion.status = 'ENABLED'
                                 AND campaign.status = 'ENABLED'
                                 AND ad_group_criterion.type = 'KEYWORD'
+                                {campaign_filter}
                             LIMIT 100
                         """
                         neg_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, neg_query)
@@ -2471,7 +2553,7 @@ def handle_ad_suggestions():
                             })
 
                         # Campaign-level negative keywords
-                        camp_neg_query = """
+                        camp_neg_query = f"""
                             SELECT campaign.name,
                                 campaign_criterion.keyword.text,
                                 campaign_criterion.keyword.match_type
@@ -2479,6 +2561,7 @@ def handle_ad_suggestions():
                             WHERE campaign_criterion.negative = TRUE
                                 AND campaign.status = 'ENABLED'
                                 AND campaign_criterion.type = 'KEYWORD'
+                                {campaign_filter}
                             LIMIT 100
                         """
                         try:
@@ -2498,13 +2581,53 @@ def handle_ad_suggestions():
                 except Exception as e:
                     logger.warning(f'Failed to fetch ads data for suggestions: {str(e)}')
 
-                system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
+                # Build plan context if requested
+                plan_context_str = ''
+                plan_context_data = {}
+                if include_plan_context:
+                    try:
+                        plan_context_data = _build_plan_context()
+                        plan_context_str = f"""
+=== 6-MONTH MARKETING PLAN CONTEXT ===
+Plan Start: {plan_context_data['plan_start_date']} ({plan_context_data['days_since_start']} days ago)
+Current Month: {plan_context_data['current_month_number']} - {plan_context_data['current_month_name']}
+Current Theme: {plan_context_data['current_theme']}
+Budget Planned This Month: ${plan_context_data['budget_planned']}
+Budget Spent (All Campaigns): ${plan_context_data['budget_actual']}
+Monthly Revenue: ${plan_context_data['monthly_revenue']}
+ROAS: {plan_context_data['roas']}x
+Monthly Visitors: {plan_context_data['monthly_visitors']}
+Ads CTR: {plan_context_data['ads_ctr_pct']}%
+Customer Acquisition Cost: ${plan_context_data['cac']}
+Grades: Traffic={plan_context_data['grades']['traffic']}, CTR={plan_context_data['grades']['ctr']}, Revenue={plan_context_data['grades']['revenue']}, ROAS={plan_context_data['grades']['roas']}
+Overall Scenario: {plan_context_data['scenario']}
+
+Full 6-Month Plan:
+{json.dumps(plan_context_data['all_months'], indent=2)}
+"""
+                    except Exception as e:
+                        logger.warning(f'Failed to build plan context: {str(e)}')
+
+                # Build system prompt
+                campaign_label = campaign_name or (f'Campaign ID {campaign_id}' if campaign_id else '')
+                if campaign_label:
+                    system_prompt = f'''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
+You are generating a CAMPAIGN BRIEF for: "{campaign_label}".
+This brief should provide a full picture of how this specific campaign is performing, grounded in the 6-month marketing plan context.
+Evaluate the campaign's trajectory — is it improving, declining, or stable? Is it on track for the plan goals?
+Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
+                else:
+                    system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
 The product helps DIY homeowners write responses to HOA fines and violations — NOT for people seeking attorneys.
 Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
 
-                ads_json = json.dumps(ads_data, indent=2) if ads_data else 'No data available'
-                prompt = f'''Analyze this Google Ads performance data for {start_date} to {end_date}.
+                # Build campaign brief JSON field if in campaign mode
+                campaign_brief_field = ''
+                if campaign_label:
+                    campaign_brief_field = f'"campaignBrief": {{ "campaignName": "{campaign_label}", "trajectory": "improving|declining|stable", "planAlignment": "<how this campaign aligns with current month theme and goals>", "budgetAssessment": "<is spending on track vs plan?>", "gradeImpact": "<how this campaign affects the overall grades>", "strategicRecommendation": "<1-2 sentence high-level recommendation based on plan phase>" }},'
 
+                prompt = f'''Analyze this Google Ads performance data for {start_date} to {end_date}{f' for campaign: "{campaign_label}"' if campaign_label else ''}.
+{plan_context_str}
 === CAMPAIGN PERFORMANCE ===
 {json.dumps(ads_data.get('campaigns', []), indent=2)}
 
@@ -2525,6 +2648,7 @@ Based on ALL the data above, respond with ONLY a JSON object (no markdown code f
 {{
   "periodInsights": {{ "dateRange": "{start_date} to {end_date}", "totalSpend": <number>, "totalClicks": <number>, "totalImpressions": <number>, "avgCTR": <number> }},
   "performanceSummary": "<brief 2-3 sentence analysis of overall performance>",
+  {campaign_brief_field}
   "keywordSuggestions": [{{ "keyword": "<text>", "matchType": "PHRASE|EXACT|BROAD", "action": "add|pause|adjust_bid", "reason": "<why>", "expectedImpact": "high|medium|low" }}],
   "negativeKeywordSuggestions": [{{ "keyword": "<search term to exclude>", "matchType": "EXACT|PHRASE", "reason": "<why this wastes budget — reference search terms data and active negatives>" }}],
   "adCopySuggestions": [{{ "headline": "<new headline up to 30 chars>", "description": "<new description up to 90 chars>", "reason": "<what current ad copy is missing or how this improves CTR>" }}],
@@ -2540,11 +2664,10 @@ IMPORTANT:
                 # Strip markdown fences if present, then find the JSON object
                 cleaned = response_text.strip()
                 if cleaned.startswith('```'):
-                    cleaned = cleaned.split('\n', 1)[-1]  # remove first line
+                    cleaned = cleaned.split('\n', 1)[-1]
                 if cleaned.endswith('```'):
                     cleaned = cleaned.rsplit('```', 1)[0]
                 cleaned = cleaned.strip()
-                # Find the JSON object boundaries
                 json_start = cleaned.find('{')
                 json_end = cleaned.rfind('}')
                 if json_start >= 0 and json_end > json_start:
@@ -2556,6 +2679,10 @@ IMPORTANT:
                     'generatedAt': datetime.now().isoformat(),
                     'dateRange': {'startDate': start_date, 'endDate': end_date},
                 }
+                if plan_context_data:
+                    result['planContext'] = plan_context_data
+                if campaign_label:
+                    result['campaignFilter'] = campaign_label
 
                 ad_suggestion_jobs[job_id] = {'status': 'complete', 'result': result}
 
