@@ -3839,14 +3839,10 @@ def acknowledge_alert(alert_id):
         return jsonify({'error': 'Failed to acknowledge alert'}), 500
 
 
-@dashboard_bp.route('/api/dashboard/alerts/scan', methods=['POST', 'OPTIONS'])
-def run_alert_scan():
-    """Run all health and performance checks, create alerts for triggered conditions."""
-    if request.method == 'OPTIONS':
-        return jsonify({'message': 'OK'})
-
+def _execute_alert_scan():
+    """Core alert scan logic — can be called from route handler or scheduler."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        return jsonify({'error': 'Supabase not configured'}), 500
+        return {'error': 'Supabase not configured', 'alerts_created': 0}
 
     alerts_created = []
 
@@ -4120,11 +4116,22 @@ def run_alert_scan():
     except Exception as e:
         logger.error(f'Alert scan - Conversion check failed: {str(e)}')
 
-    return jsonify({
+    return {
         'scan_completed': True,
         'alerts_created': len(alerts_created),
         'timestamp': datetime.utcnow().isoformat(),
-    })
+    }
+
+
+@dashboard_bp.route('/api/dashboard/alerts/scan', methods=['POST', 'OPTIONS'])
+def run_alert_scan():
+    """Run all health and performance checks, create alerts for triggered conditions."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+    result = _execute_alert_scan()
+    if 'error' in result:
+        return jsonify(result), 500
+    return jsonify(result)
 
 
 # ============================================================================

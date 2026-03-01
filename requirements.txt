@@ -6,3 +6,4 @@ pypdf>=3.17.0
 pillow>=10.0.0
 pytesseract>=0.3.10
 stripe>=7.0.0
+apscheduler>=3.10.0

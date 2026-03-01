@@ -32,7 +32,7 @@ from statute_lookup import (
 )
 
 # Dashboard routes (migrated from Netlify functions)
-from dashboard_routes import dashboard_bp
+from dashboard_routes import dashboard_bp, _execute_alert_scan
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -6025,6 +6025,42 @@ def update_recipients(case_token):
         error_msg = f"Error updating recipients: {str(e)}"
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
+
+
+# ============================================================================
+# SCHEDULED JOBS (APScheduler — runs in-process on the web dyno)
+# ============================================================================
+def _scheduled_alert_scan():
+    """Run alert scan within Flask app context."""
+    with app.app_context():
+        try:
+            result = _execute_alert_scan()
+            logger.info(f"Scheduled alert scan completed: {result.get('alerts_created', 0)} alert(s) created")
+        except Exception as e:
+            logger.error(f"Scheduled alert scan failed: {e}")
+
+
+def _start_scheduler():
+    """Initialize APScheduler with hourly alert scan."""
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        scheduler = BackgroundScheduler(daemon=True)
+        scheduler.add_job(
+            _scheduled_alert_scan,
+            'interval',
+            hours=1,
+            id='hourly_alert_scan',
+            replace_existing=True,
+        )
+        scheduler.start()
+        logger.info("APScheduler started — alert scan running every hour")
+    except Exception as e:
+        logger.error(f"Failed to start scheduler: {e}")
+
+
+# Only start scheduler in production (gunicorn), not during local dev reloads
+if os.environ.get('DYNO'):
+    _start_scheduler()
 
 
 if __name__ == '__main__':
