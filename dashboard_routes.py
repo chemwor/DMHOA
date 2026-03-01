@@ -384,21 +384,29 @@ def get_supabase_analytics():
                 except:
                     payload = {}
 
-            is_quick_preview = payload.get('completionPhase') == 'simple'
-            is_full_preview = not is_quick_preview and payload.get('pastedText')
-            is_purchase = case.get('unlocked') or case.get('stripe_payment_intent_id')
+            # Use status field directly: 'quick_preview', 'full_preview', 'paid'
+            case_status = case.get('status', '')
+
+            # Fallback: derive status from payload for older cases without status set
+            if case_status not in ('quick_preview', 'full_preview', 'paid'):
+                if case.get('unlocked') or case.get('stripe_payment_intent_id'):
+                    case_status = 'paid'
+                elif payload.get('completionPhase') == 'simple':
+                    case_status = 'quick_preview'
+                else:
+                    case_status = 'full_preview'
 
             case_output = outputs_map.get(case.get('token'))
             has_output = case_output is not None
 
-            if is_purchase:
+            if case_status == 'paid':
                 purchases += 1
                 if case.get('amount_total'):
                     total_revenue += case['amount_total'] / 100
 
-            if is_quick_preview:
+            if case_status == 'quick_preview':
                 quick_previews += 1
-            elif is_full_preview or payload.get('issueText'):
+            elif case_status == 'full_preview':
                 full_previews += 1
 
             if len(recent_cases) < 10:
@@ -407,9 +415,7 @@ def get_supabase_analytics():
                     'token': case.get('token'),
                     'email': payload.get('email') or case.get('email'),
                     'created_at': case.get('created_at'),
-                    'status': case.get('status'),
-                    'type': 'quick' if is_quick_preview else 'full',
-                    'unlocked': case.get('unlocked', False),
+                    'status': case_status,
                     'noticeType': payload.get('noticeType'),
                     'issueText': (payload.get('issueText') or '')[:100] + '...' if payload.get('issueText') else None,
                     'amount': case.get('amount_total', 0) / 100 if case.get('amount_total') else None,
@@ -417,7 +423,7 @@ def get_supabase_analytics():
                     'outputStatus': case_output.get('status') if case_output else None,
                 })
 
-            if is_purchase and len(completed_cases) < 20:
+            if case_status == 'paid' and len(completed_cases) < 20:
                 completed_cases.append({
                     'id': case.get('id'),
                     'token': case.get('token'),
@@ -1223,7 +1229,7 @@ def get_openai_usage():
                 f"{SUPABASE_URL}/rest/v1/dmhoa_cases",
                 params={
                     'select': 'id',
-                    'unlocked': 'eq.true',
+                    'status': 'eq.paid',
                     'created_at': f'gte.{thirty_days_ago}',
                 },
                 headers=supabase_headers(),
@@ -1946,7 +1952,7 @@ def handle_legality_scorecard():
         # Analyze cases
         by_type = {}
         by_state = {}
-        total_unlocked = 0
+        total_paid = 0
         total_revenue = 0
 
         for case in cases:
@@ -1961,17 +1967,18 @@ def handle_legality_scorecard():
             state = payload.get('state') or payload.get('hoaState') or 'Unknown'
 
             if notice_type not in by_type:
-                by_type[notice_type] = {'count': 0, 'unlocked': 0, 'revenue': 0}
+                by_type[notice_type] = {'count': 0, 'paid': 0, 'revenue': 0}
             by_type[notice_type]['count'] += 1
 
             if state not in by_state:
-                by_state[state] = {'count': 0, 'unlocked': 0, 'revenue': 0}
+                by_state[state] = {'count': 0, 'paid': 0, 'revenue': 0}
             by_state[state]['count'] += 1
 
-            if case.get('unlocked'):
-                total_unlocked += 1
-                by_type[notice_type]['unlocked'] += 1
-                by_state[state]['unlocked'] += 1
+            is_paid = case.get('status') == 'paid' or case.get('unlocked')
+            if is_paid:
+                total_paid += 1
+                by_type[notice_type]['paid'] += 1
+                by_state[state]['paid'] += 1
                 amount = (case.get('amount_total') or 0) / 100
                 total_revenue += amount
                 by_type[notice_type]['revenue'] += amount
@@ -1987,7 +1994,7 @@ def handle_legality_scorecard():
 
 VIOLATIONS (top 8): {json.dumps([{"type": t, **d} for t, d in top_types])}
 
-CONVERSION: Total={len(cases)}, Unlocked={total_unlocked}, Rate={round(total_unlocked/len(cases)*100, 1) if cases else 0}%
+CONVERSION: Total={len(cases)}, Paid={total_paid}, Rate={round(total_paid/len(cases)*100, 1) if cases else 0}%
 
 TOP STATES: {", ".join([f"{s}({d['count']})" for s, d in top_states])}
 
@@ -2009,8 +2016,8 @@ Fill in real values based on the data. Be concise.'''
             'geography': {'topStates': [{'state': s, **d} for s, d in top_states]},
             'conversionFunnel': {
                 'totalCases': len(cases),
-                'unlockedCases': total_unlocked,
-                'overallConversionRate': round(total_unlocked / len(cases) * 100, 1) if cases else 0,
+                'paidCases': total_paid,
+                'overallConversionRate': round(total_paid / len(cases) * 100, 1) if cases else 0,
             },
         }
 
@@ -3143,7 +3150,7 @@ def run_alert_scan():
             f"{SUPABASE_URL}/rest/v1/dmhoa_cases",
             params={
                 'select': 'id,token,created_at',
-                'unlocked': 'eq.true',
+                'status': 'eq.paid',
                 'created_at': f'gte.{one_hour_ago_iso}',
                 'created_at': f'lte.{ten_min_ago}',
             },
@@ -3200,7 +3207,7 @@ def run_alert_scan():
             f"{SUPABASE_URL}/rest/v1/dmhoa_cases",
             params={
                 'select': 'id',
-                'unlocked': 'eq.true',
+                'status': 'eq.paid',
                 'created_at': f'gte.{seven_days_ago}',
             },
             headers=supabase_headers(),
@@ -3271,7 +3278,7 @@ def _fetch_supabase_case_metrics(period='today') -> Dict:
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/dmhoa_cases",
             params={
-                'select': 'id,unlocked,email,payload',
+                'select': 'id,status,email,payload',
                 'created_at': f'gte.{date_range["start"]}',
             },
             headers=supabase_headers(),
@@ -3285,7 +3292,7 @@ def _fetch_supabase_case_metrics(period='today') -> Dict:
             )]
             result['total_cases'] = len(filtered)
             result['new_cases'] = len(filtered)
-            paid = [c for c in filtered if c.get('unlocked')]
+            paid = [c for c in filtered if c.get('status') == 'paid']
             result['paid_cases'] = len(paid)
             result['conversion_rate'] = round(len(paid) / len(filtered) * 100, 1) if filtered else 0
     except Exception as e:
