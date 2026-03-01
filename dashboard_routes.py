@@ -3332,11 +3332,30 @@ def seed_checklists():
         return jsonify({'error': 'Anthropic API key not configured'}), 500
 
     try:
-        data = request.get_json()
-        if not data or not data.get('documents'):
-            return jsonify({'error': 'Request body must include "documents" mapping doc_key to document text'}), 400
+        data = request.get_json() or {}
+        documents = data.get('documents')
 
-        documents = data['documents']
+        # If no documents provided, auto-fetch summaries from doc_references
+        if not documents:
+            doc_refs_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/dmhoa_doc_references",
+                params={'select': 'doc_key,doc_name,summary_text,key_points'},
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if doc_refs_resp.ok:
+                documents = {}
+                for ref in doc_refs_resp.json():
+                    content_parts = [f"Document: {ref.get('doc_name', '')}"]
+                    if ref.get('summary_text'):
+                        content_parts.append(f"Summary: {ref['summary_text']}")
+                    if ref.get('key_points'):
+                        content_parts.append("Key Points:\n" + "\n".join(f"- {p}" for p in ref['key_points']))
+                    if len(content_parts) > 1:
+                        documents[ref['doc_key']] = "\n\n".join(content_parts)
+
+        if not documents:
+            return jsonify({'error': 'No document content available. Ensure doc references have summaries.'}), 400
 
         # Check which docs already have checklists
         existing_response = requests.get(
