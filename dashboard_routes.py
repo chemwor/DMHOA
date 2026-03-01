@@ -775,6 +775,19 @@ def get_google_ads_data():
                 'ctr': round((clicks / impressions) * 100, 2) if impressions > 0 else 0,
             })
 
+        # Calculate daily budget from plan
+        import calendar
+        now = datetime.now()
+        days_in_month = calendar.monthrange(now.year, now.month)[1]
+        # Map current month to plan budget (March=1, April=2, etc.)
+        plan_month_index = now.month - 2  # March(3) -> 1, April(4) -> 2, etc.
+        monthly_budget = 600  # default
+        for pm in PLAN_MONTHS:
+            if pm['month'] == plan_month_index:
+                monthly_budget = pm['budget_planned']
+                break
+        daily_budget = round(monthly_budget / days_in_month, 2)
+
         return jsonify({
             'dailySpend': round(total_spend, 2),
             'clicks': total_clicks,
@@ -788,6 +801,7 @@ def get_google_ads_data():
             'searchTerms': [],  # Can be expanded
             'ads': [],  # Can be expanded
             'targetCampaign': 'DMHOA - DIY Response - Phrase - March',
+            'dailyBudget': daily_budget,
             'period': period,
             'dateRange': date_range,
             'isMockData': False,
