@@ -777,6 +777,164 @@ def get_google_ads_data():
                 'ctr': round((clicks / impressions) * 100, 2) if impressions > 0 else 0,
             })
 
+        # --- Keyword performance ---
+        keywords = []
+        try:
+            kw_query = f"""
+                SELECT
+                    campaign.name,
+                    ad_group.name,
+                    ad_group_criterion.keyword.text,
+                    ad_group_criterion.keyword.match_type,
+                    ad_group_criterion.status,
+                    ad_group_criterion.quality_info.quality_score,
+                    metrics.impressions,
+                    metrics.clicks,
+                    metrics.cost_micros,
+                    metrics.conversions,
+                    metrics.conversions_value,
+                    metrics.search_impression_share,
+                    metrics.search_top_impression_share
+                FROM keyword_view
+                WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
+                    AND campaign.status != 'REMOVED'
+                    AND ad_group_criterion.status != 'REMOVED'
+                ORDER BY metrics.clicks DESC
+                LIMIT 50
+            """
+            kw_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, kw_query)
+            for row in kw_results:
+                m = row.get('metrics', {})
+                crit = row.get('adGroupCriterion', {})
+                kw_info = crit.get('keyword', {})
+                qi = crit.get('qualityInfo', {})
+                kw_clicks = int(m.get('clicks', 0) or 0)
+                kw_impr = int(m.get('impressions', 0) or 0)
+                kw_spend = int(m.get('costMicros', 0) or 0) / 1_000_000
+                kw_conv = float(m.get('conversions', 0) or 0)
+                kw_conv_val = float(m.get('conversionsValue', 0) or 0)
+                qs_raw = qi.get('qualityScore')
+                qs = int(qs_raw) if qs_raw is not None else None
+                sis_raw = m.get('searchImpressionShare')
+                sis = round(float(sis_raw), 4) if sis_raw is not None else None
+                tis_raw = m.get('searchTopImpressionShare')
+                tis = round(float(tis_raw), 4) if tis_raw is not None else None
+                keywords.append({
+                    'campaignName': row.get('campaign', {}).get('name', ''),
+                    'adGroupName': row.get('adGroup', {}).get('name', ''),
+                    'keyword': kw_info.get('text', ''),
+                    'matchType': kw_info.get('matchType', 'BROAD'),
+                    'status': crit.get('status', ''),
+                    'qualityScore': qs,
+                    'impressions': kw_impr,
+                    'clicks': kw_clicks,
+                    'spend': round(kw_spend, 2),
+                    'conversions': round(kw_conv, 2),
+                    'conversionValue': round(kw_conv_val, 2),
+                    'costPerConversion': round(kw_spend / kw_conv, 2) if kw_conv > 0 else 0,
+                    'ctr': round((kw_clicks / kw_impr) * 100, 2) if kw_impr > 0 else 0,
+                    'cpc': round(kw_spend / kw_clicks, 2) if kw_clicks > 0 else 0,
+                    'searchImpressionShare': sis,
+                    'topImpressionShare': tis,
+                })
+        except Exception as e:
+            logger.warning(f'Failed to fetch keyword data: {str(e)}')
+
+        # --- Search terms ---
+        search_terms = []
+        try:
+            st_query = f"""
+                SELECT
+                    campaign.name,
+                    ad_group.name,
+                    search_term_view.search_term,
+                    search_term_view.status,
+                    metrics.impressions,
+                    metrics.clicks,
+                    metrics.cost_micros,
+                    metrics.conversions
+                FROM search_term_view
+                WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
+                    AND campaign.status != 'REMOVED'
+                ORDER BY metrics.clicks DESC
+                LIMIT 50
+            """
+            st_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, st_query)
+            for row in st_results:
+                m = row.get('metrics', {})
+                stv = row.get('searchTermView', {})
+                st_clicks = int(m.get('clicks', 0) or 0)
+                st_impr = int(m.get('impressions', 0) or 0)
+                st_spend = int(m.get('costMicros', 0) or 0) / 1_000_000
+                st_conv = float(m.get('conversions', 0) or 0)
+                search_terms.append({
+                    'campaignName': row.get('campaign', {}).get('name', ''),
+                    'adGroupName': row.get('adGroup', {}).get('name', ''),
+                    'searchTerm': stv.get('searchTerm', ''),
+                    'status': stv.get('status', 'NONE'),
+                    'impressions': st_impr,
+                    'clicks': st_clicks,
+                    'spend': round(st_spend, 2),
+                    'conversions': round(st_conv, 2),
+                    'ctr': round((st_clicks / st_impr) * 100, 2) if st_impr > 0 else 0,
+                })
+        except Exception as e:
+            logger.warning(f'Failed to fetch search term data: {str(e)}')
+
+        # --- Ad copy performance ---
+        ads = []
+        try:
+            ad_query = f"""
+                SELECT
+                    campaign.name,
+                    ad_group.name,
+                    ad_group_ad.ad.id,
+                    ad_group_ad.ad.responsive_search_ad.headlines,
+                    ad_group_ad.ad.responsive_search_ad.descriptions,
+                    ad_group_ad.ad.final_urls,
+                    ad_group_ad.status,
+                    metrics.impressions,
+                    metrics.clicks,
+                    metrics.cost_micros,
+                    metrics.conversions
+                FROM ad_group_ad
+                WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
+                    AND campaign.status != 'REMOVED'
+                    AND ad_group_ad.status != 'REMOVED'
+                    AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+                ORDER BY metrics.clicks DESC
+                LIMIT 20
+            """
+            ad_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, ad_query)
+            for row in ad_results:
+                m = row.get('metrics', {})
+                aga = row.get('adGroupAd', {})
+                ad = aga.get('ad', {})
+                rsa = ad.get('responsiveSearchAd', {})
+                ad_clicks = int(m.get('clicks', 0) or 0)
+                ad_impr = int(m.get('impressions', 0) or 0)
+                ad_spend = int(m.get('costMicros', 0) or 0) / 1_000_000
+                ad_conv = float(m.get('conversions', 0) or 0)
+                headlines = [h.get('text', '') for h in (rsa.get('headlines') or [])]
+                descriptions = [d.get('text', '') for d in (rsa.get('descriptions') or [])]
+                final_urls = ad.get('finalUrls') or []
+                ads.append({
+                    'adId': str(ad.get('id', '')),
+                    'campaignName': row.get('campaign', {}).get('name', ''),
+                    'adGroupName': row.get('adGroup', {}).get('name', ''),
+                    'headlines': headlines,
+                    'descriptions': descriptions,
+                    'finalUrl': final_urls[0] if final_urls else '',
+                    'status': aga.get('status', ''),
+                    'impressions': ad_impr,
+                    'clicks': ad_clicks,
+                    'spend': round(ad_spend, 2),
+                    'conversions': round(ad_conv, 2),
+                    'ctr': round((ad_clicks / ad_impr) * 100, 2) if ad_impr > 0 else 0,
+                })
+        except Exception as e:
+            logger.warning(f'Failed to fetch ad copy data: {str(e)}')
+
         # Calculate daily budget from plan (use account timezone)
         import calendar
         ads_now = datetime.now(ZoneInfo('America/Los_Angeles'))
@@ -799,9 +957,9 @@ def get_google_ads_data():
             'conversions': round(total_conversions, 2),
             'costPerConversion': round(total_spend / total_conversions, 2) if total_conversions > 0 else 0,
             'campaigns': campaigns,
-            'keywords': [],  # Can be expanded
-            'searchTerms': [],  # Can be expanded
-            'ads': [],  # Can be expanded
+            'keywords': keywords,
+            'searchTerms': search_terms,
+            'ads': ads,
             'targetCampaign': 'DMHOA - DIY Response - Phrase - March',
             'dailyBudget': daily_budget,
             'period': period,
