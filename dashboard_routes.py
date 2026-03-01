@@ -609,12 +609,19 @@ def get_klaviyo_data():
 
         total_emails_in_flow = full_preview_count + quick_preview_count
 
+        # Fetch leads from Supabase (more reliable than Klaviyo for lead count)
+        case_metrics = _fetch_supabase_case_metrics('today')
+        case_metrics_all = _fetch_supabase_case_metrics('all')
+
         return jsonify({
             'totalProfiles': total_profiles,
             'totalEmailsInFlow': total_emails_in_flow,
             'fullPreviewEmails': full_preview_count,
             'quickPreviewEmails': quick_preview_count,
             'emailsCollectedToday': emails_collected_today,
+            'leadsToday': case_metrics.get('new_cases', 0),
+            'totalLeads': case_metrics_all.get('total_cases', 0),
+            'paidCasesToday': case_metrics.get('paid_cases', 0),
             'lists': [
                 {'id': KLAVIYO_FULL_PREVIEW_LIST_ID, 'name': 'Full Preview Abandonment', 'count': full_preview_count},
                 {'id': KLAVIYO_QUICK_PREVIEW_LIST_ID, 'name': 'Quick Preview Abandonment', 'count': quick_preview_count},
