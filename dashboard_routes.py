@@ -599,13 +599,85 @@ def get_klaviyo_data():
         )
         flows = flows_response.json().get('data', []) if flows_response.ok else []
 
-        flow_stats = [
-            {
-                'name': f.get('attributes', {}).get('name', 'Unknown Flow'),
-                'status': f.get('attributes', {}).get('status', 'unknown'),
+        # Fetch performance stats for each flow via Reporting API
+        flow_stats = []
+        reporting_headers = {
+            **klaviyo_headers(),
+            'revision': '2024-10-15',
+        }
+        thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%dT00:00:00+00:00')
+        now_iso = datetime.now().strftime('%Y-%m-%dT23:59:59+00:00')
+
+        for f in flows[:5]:
+            flow_id = f.get('id', '')
+            flow_name = f.get('attributes', {}).get('name', 'Unknown Flow')
+            flow_status = f.get('attributes', {}).get('status', 'unknown')
+
+            stats = {
+                'name': flow_name,
+                'status': flow_status,
+                'sends': 0,
+                'opens': 0,
+                'clicks': 0,
+                'openRate': 0,
+                'clickRate': 0,
+                'deliveryRate': 0,
+                'bounces': 0,
+                'unsubscribes': 0,
             }
-            for f in flows[:5]
-        ]
+
+            if flow_id:
+                try:
+                    report_response = requests.post(
+                        'https://a.klaviyo.com/api/flow-values-reports/',
+                        headers=reporting_headers,
+                        json={
+                            'data': {
+                                'type': 'flow-values-report',
+                                'attributes': {
+                                    'timeframe': {
+                                        'start': thirty_days_ago,
+                                        'end': now_iso,
+                                    },
+                                    'statistics': [
+                                        'recipients',
+                                        'deliveries',
+                                        'opens',
+                                        'opens_unique',
+                                        'clicks',
+                                        'clicks_unique',
+                                        'bounces',
+                                        'unsubscribes',
+                                        'delivery_rate',
+                                        'open_rate',
+                                        'click_rate',
+                                    ],
+                                    'filter': f'equals(flow_id,"{flow_id}")',
+                                    'group_by': ['flow_id'],
+                                }
+                            }
+                        },
+                        timeout=TIMEOUT
+                    )
+                    if report_response.ok:
+                        report_data = report_response.json()
+                        results = report_data.get('data', {}).get('attributes', {}).get('results', [])
+                        if results:
+                            row = results[0].get('statistics', {})
+                            stats['sends'] = row.get('recipients', 0) or 0
+                            stats['opens'] = row.get('opens_unique', 0) or 0
+                            stats['clicks'] = row.get('clicks_unique', 0) or 0
+                            stats['bounces'] = row.get('bounces', 0) or 0
+                            stats['unsubscribes'] = row.get('unsubscribes', 0) or 0
+                            stats['deliveryRate'] = round((row.get('delivery_rate', 0) or 0) * 100, 1)
+                            stats['openRate'] = round((row.get('open_rate', 0) or 0) * 100, 1)
+                            stats['clickRate'] = round((row.get('click_rate', 0) or 0) * 100, 1)
+                    else:
+                        logger.warning(f'Flow report API returned {report_response.status_code} for flow {flow_id}: {report_response.text[:200]}')
+                except Exception as e:
+                    logger.warning(f'Failed to fetch flow stats for {flow_name}: {e}')
+
+            flow_stats.append(stats)
 
         total_emails_in_flow = full_preview_count + quick_preview_count
 
