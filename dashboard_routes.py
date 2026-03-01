@@ -639,6 +639,7 @@ def get_klaviyo_data():
                                         'start': thirty_days_ago,
                                         'end': now_iso,
                                     },
+                                    'conversion_metric_id': 'UE778r',
                                     'statistics': [
                                         'recipients',
                                         'opens',
