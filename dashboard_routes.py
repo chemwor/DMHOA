@@ -84,6 +84,13 @@ OPENAI_PRICING = {
     'default': {'input': 0.002, 'output': 0.002},
 }
 
+# Claude pricing: $/1K tokens
+CLAUDE_PRICING = {
+    'claude-sonnet-4-20250514': {'input': 0.003, 'output': 0.015},
+    'claude-haiku-4-5-20251001': {'input': 0.001, 'output': 0.005},
+    'default': {'input': 0.003, 'output': 0.015},
+}
+
 
 def supabase_headers() -> Dict[str, str]:
     """Return headers for Supabase API requests."""
@@ -1471,6 +1478,29 @@ def estimate_read_time(content: str) -> int:
     return max(1, math.ceil(words / 200))
 
 
+def _log_claude_usage(model: str, input_tokens: int, output_tokens: int, endpoint: str = ''):
+    """Log Claude API usage to Supabase for cost tracking."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    try:
+        pricing = CLAUDE_PRICING.get(model, CLAUDE_PRICING['default'])
+        cost = (input_tokens / 1000) * pricing['input'] + (output_tokens / 1000) * pricing['output']
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_claude_usage",
+            headers=supabase_headers(),
+            json={
+                'model': model,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'cost': round(cost, 6),
+                'endpoint': endpoint,
+            },
+            timeout=5
+        )
+    except Exception as e:
+        logger.warning(f'Failed to log Claude usage: {str(e)}')
+
+
 def call_claude_api(prompt: str, system_prompt: str, max_tokens: int = 4096) -> str:
     """Call Claude API."""
     response = requests.post(
@@ -1493,6 +1523,13 @@ def call_claude_api(prompt: str, system_prompt: str, max_tokens: int = 4096) -> 
         raise Exception(f'Claude API error: {response.status_code} - {response.text}')
 
     data = response.json()
+    usage = data.get('usage', {})
+    _log_claude_usage(
+        model='claude-sonnet-4-20250514',
+        input_tokens=usage.get('input_tokens', 0),
+        output_tokens=usage.get('output_tokens', 0),
+        endpoint='sonnet'
+    )
     return data['content'][0]['text']
 
 
@@ -2215,6 +2252,13 @@ def call_claude_haiku(prompt, system_prompt='', max_retries=3):
                 raise Exception(f'Claude Haiku error: {response.status_code} {response.text[:200]}')
 
             result = response.json()
+            usage = result.get('usage', {})
+            _log_claude_usage(
+                model='claude-haiku-4-5-20251001',
+                input_tokens=usage.get('input_tokens', 0),
+                output_tokens=usage.get('output_tokens', 0),
+                endpoint='haiku'
+            )
             content = result.get('content', [])
             if content and content[0].get('type') == 'text':
                 return content[0]['text']
@@ -2722,6 +2766,73 @@ def _fetch_openai_usage_metrics() -> Optional[Dict]:
         }
     except Exception as e:
         logger.error(f'Alert scan - OpenAI usage fetch failed: {str(e)}')
+        return None
+
+
+def _fetch_claude_usage_metrics() -> Optional[Dict]:
+    """Fetch MTD Claude usage from Supabase dmhoa_claude_usage table."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+
+    try:
+        # Get first day of current month
+        now = datetime.now()
+        month_start = now.replace(day=1).strftime('%Y-%m-%dT00:00:00')
+
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_claude_usage",
+            params={
+                'select': 'model,input_tokens,output_tokens,cost',
+                'created_at': f'gte.{month_start}',
+            },
+            headers=supabase_headers(),
+            timeout=TIMEOUT
+        )
+
+        if not response.ok:
+            logger.warning(f'Claude usage table query failed: {response.status_code}')
+            return None
+
+        rows = response.json()
+        total_cost = 0
+        total_input = 0
+        total_output = 0
+        calls = len(rows)
+        today_cost = 0
+        today_str = now.strftime('%Y-%m-%d')
+
+        for row in rows:
+            total_cost += row.get('cost', 0)
+            total_input += row.get('input_tokens', 0)
+            total_output += row.get('output_tokens', 0)
+
+        # Get today's cost separately
+        today_response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_claude_usage",
+            params={
+                'select': 'cost',
+                'created_at': f'gte.{today_str}T00:00:00',
+            },
+            headers=supabase_headers(),
+            timeout=TIMEOUT
+        )
+        if today_response.ok:
+            today_rows = today_response.json()
+            today_cost = sum(r.get('cost', 0) for r in today_rows)
+
+        days_in_month = max(now.day, 1)
+        avg_daily = total_cost / days_in_month if days_in_month > 0 else 0
+
+        return {
+            'mtd_cost': round(total_cost, 4),
+            'today_cost': round(today_cost, 4),
+            'avg_daily': round(avg_daily, 4),
+            'total_calls': calls,
+            'total_input_tokens': total_input,
+            'total_output_tokens': total_output,
+        }
+    except Exception as e:
+        logger.error(f'Claude usage metrics fetch failed: {str(e)}')
         return None
 
 
@@ -4196,12 +4307,17 @@ def get_costs():
         days_in_month = datetime.now().day
         openai_mtd = round(openai_avg * days_in_month, 2)
 
+        # Claude / Anthropic
+        claude = _fetch_claude_usage_metrics() or {}
+        claude_mtd = claude.get('mtd_cost', 0)
+        claude_today = claude.get('today_cost', 0)
+
         # Fixed costs (estimates)
         heroku_mtd = 7
         supabase_mtd = 0
         tools_mtd = 42  # domain, email, misc tools
 
-        total_costs = round(ads_mtd + openai_mtd + heroku_mtd + supabase_mtd + tools_mtd + stripe_fees, 2)
+        total_costs = round(ads_mtd + openai_mtd + claude_mtd + heroku_mtd + supabase_mtd + tools_mtd + stripe_fees, 2)
         profit = round(net_revenue - total_costs + stripe_fees, 2)  # stripe fees already deducted from net
         margin_pct = round(profit / gross_revenue, 3) if gross_revenue > 0 else 0
         burn_rate_daily = round(total_costs / max(days_in_month, 1), 2)
@@ -4216,6 +4332,7 @@ def get_costs():
             'costs': {
                 'google_ads': {'mtd': ads_mtd, 'daily_avg': round(ads_mtd / max(days_in_month, 1), 2)},
                 'openai_api': {'mtd': openai_mtd, 'today': openai_today},
+                'claude_api': {'mtd': claude_mtd, 'today': claude_today, 'total_calls': claude.get('total_calls', 0)},
                 'heroku': {'mtd': heroku_mtd},
                 'supabase': {'mtd': supabase_mtd},
                 'tools': {'mtd': tools_mtd},
