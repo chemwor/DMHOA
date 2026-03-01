@@ -2328,21 +2328,115 @@ def handle_ad_suggestions():
 
         def process_analysis():
             try:
-                # Fetch data and generate suggestions (simplified)
-                system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool.
-Focus on DIY homeowners, not attorney-seekers. Provide actionable suggestions in JSON format.'''
+                # Fetch real Google Ads data to feed into the prompt
+                ads_data = {}
+                try:
+                    access_token = get_google_ads_access_token()
+                    if access_token:
+                        date_range_ads = {'startDate': start_date, 'endDate': end_date}
 
-                prompt = f'''Analyze Google Ads performance for {start_date} to {end_date}.
-Provide optimization suggestions in JSON format with these fields:
-- periodInsights: date range, spend, revenue
-- performanceSummary: brief analysis
-- keywordSuggestions: array of keyword recommendations
-- negativeKeywordSuggestions: array of keywords to exclude
-- adCopySuggestions: array of ad copy improvements
-- generalRecommendations: array of strategic recommendations'''
+                        # Campaign performance
+                        camp_query = f"""
+                            SELECT campaign.name, campaign.status,
+                                metrics.impressions, metrics.clicks, metrics.cost_micros,
+                                metrics.conversions, metrics.ctr, metrics.average_cpc
+                            FROM campaign
+                            WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+                                AND campaign.status != 'REMOVED' AND metrics.cost_micros > 0
+                            ORDER BY metrics.cost_micros DESC
+                        """
+                        camp_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, camp_query)
+                        ads_data['campaigns'] = []
+                        for row in camp_results:
+                            c = row.get('campaign', {})
+                            m = row.get('metrics', {})
+                            ads_data['campaigns'].append({
+                                'name': c.get('name'), 'status': c.get('status'),
+                                'clicks': m.get('clicks', 0), 'impressions': m.get('impressions', 0),
+                                'spend': round(int(m.get('costMicros', 0) or 0) / 1_000_000, 2),
+                                'conversions': m.get('conversions', 0),
+                            })
+
+                        # Keyword performance
+                        kw_query = f"""
+                            SELECT campaign.name, ad_group.name,
+                                ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+                                ad_group_criterion.quality_info.quality_score,
+                                metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+                            FROM keyword_view
+                            WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+                                AND campaign.status = 'ENABLED' AND metrics.impressions > 0
+                            ORDER BY metrics.clicks DESC LIMIT 30
+                        """
+                        kw_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, kw_query)
+                        ads_data['keywords'] = []
+                        for row in kw_results:
+                            crit = row.get('adGroupCriterion', {})
+                            kw = crit.get('keyword', {})
+                            m = row.get('metrics', {})
+                            qs = crit.get('qualityInfo', {}).get('qualityScore')
+                            ads_data['keywords'].append({
+                                'keyword': kw.get('text', ''), 'matchType': kw.get('matchType', ''),
+                                'qualityScore': int(qs) if qs is not None else None,
+                                'clicks': m.get('clicks', 0), 'impressions': m.get('impressions', 0),
+                                'spend': round(int(m.get('costMicros', 0) or 0) / 1_000_000, 2),
+                                'conversions': m.get('conversions', 0),
+                            })
+
+                        # Search terms
+                        st_query = f"""
+                            SELECT campaign.name, search_term_view.search_term,
+                                metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+                            FROM search_term_view
+                            WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+                                AND campaign.status = 'ENABLED' AND metrics.impressions > 0
+                            ORDER BY metrics.clicks DESC LIMIT 30
+                        """
+                        st_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, st_query)
+                        ads_data['searchTerms'] = []
+                        for row in st_results:
+                            stv = row.get('searchTermView', {})
+                            m = row.get('metrics', {})
+                            ads_data['searchTerms'].append({
+                                'searchTerm': stv.get('searchTerm', ''),
+                                'clicks': m.get('clicks', 0), 'impressions': m.get('impressions', 0),
+                                'spend': round(int(m.get('costMicros', 0) or 0) / 1_000_000, 2),
+                                'conversions': m.get('conversions', 0),
+                            })
+                except Exception as e:
+                    logger.warning(f'Failed to fetch ads data for suggestions: {str(e)}')
+
+                system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
+Focus on DIY homeowners, not attorney-seekers. Respond with ONLY valid JSON, no markdown, no explanation.'''
+
+                ads_json = json.dumps(ads_data, indent=2) if ads_data else 'No data available'
+                prompt = f'''Analyze this Google Ads performance data for {start_date} to {end_date}:
+
+{ads_json}
+
+Respond with ONLY a JSON object (no markdown code fences) with these fields:
+{{
+  "periodInsights": {{ "dateRange": "{start_date} to {end_date}", "totalSpend": <number>, "totalClicks": <number>, "totalImpressions": <number>, "avgCTR": <number> }},
+  "performanceSummary": "<brief 2-3 sentence analysis>",
+  "keywordSuggestions": [{{ "keyword": "<text>", "matchType": "PHRASE|EXACT|BROAD", "action": "add|pause|adjust_bid", "reason": "<why>", "expectedImpact": "high|medium|low" }}],
+  "negativeKeywordSuggestions": [{{ "keyword": "<text>", "matchType": "EXACT|PHRASE", "reason": "<why>" }}],
+  "adCopySuggestions": [{{ "headline": "<text>", "description": "<text>", "reason": "<why>" }}],
+  "generalRecommendations": [{{ "title": "<text>", "description": "<text>", "priority": "high|medium|low" }}]
+}}'''
 
                 response_text = call_claude_api(prompt, system_prompt, 4096)
-                cleaned = response_text.replace('```json', '').replace('```', '').strip()
+                # Strip markdown fences if present, then find the JSON object
+                cleaned = response_text.strip()
+                if cleaned.startswith('```'):
+                    cleaned = cleaned.split('\n', 1)[-1]  # remove first line
+                if cleaned.endswith('```'):
+                    cleaned = cleaned.rsplit('```', 1)[0]
+                cleaned = cleaned.strip()
+                # Find the JSON object boundaries
+                json_start = cleaned.find('{')
+                json_end = cleaned.rfind('}')
+                if json_start >= 0 and json_end > json_start:
+                    cleaned = cleaned[json_start:json_end + 1]
                 suggestions = json.loads(cleaned)
 
                 result = {
