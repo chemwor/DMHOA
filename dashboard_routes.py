@@ -411,6 +411,46 @@ def get_supabase_analytics():
 
             if case_status == 'paid':
                 purchases += 1
+                # If amount_total is missing, try to look it up from Stripe
+                if not case.get('amount_total'):
+                    try:
+                        import stripe
+                        stripe.api_key = STRIPE_SECRET_KEY
+                        amount = None
+                        backfill_data = {}
+                        if case.get('stripe_payment_intent_id'):
+                            pi = stripe.PaymentIntent.retrieve(case['stripe_payment_intent_id'])
+                            amount = pi.get('amount') or pi.get('amount_received') or 0
+                        else:
+                            # No payment intent ID — search Stripe checkout sessions by token
+                            token = case.get('token')
+                            sessions = stripe.checkout.Session.list(limit=100)
+                            for sess in sessions.auto_paging_iter():
+                                meta = sess.get('metadata') or {}
+                                sess_token = meta.get('token') or meta.get('case_token') or sess.get('client_reference_id')
+                                if sess_token == token and sess.get('payment_status') == 'paid':
+                                    amount = sess.get('amount_total') or 0
+                                    backfill_data['stripe_checkout_session_id'] = sess.get('id')
+                                    backfill_data['stripe_payment_intent_id'] = sess.get('payment_intent')
+                                    backfill_data['currency'] = sess.get('currency')
+                                    cd = sess.get('customer_details') or {}
+                                    if cd.get('email') and not case.get('email'):
+                                        backfill_data['email'] = cd['email']
+                                    break
+                        if amount:
+                            case['amount_total'] = amount
+                            backfill_data['amount_total'] = amount
+                            try:
+                                backfill_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+                                requests.patch(backfill_url,
+                                    params={'token': f'eq.{case.get("token")}'},
+                                    headers=supabase_headers(),
+                                    json=backfill_data,
+                                    timeout=5)
+                            except Exception:
+                                pass  # non-fatal backfill
+                    except Exception as e:
+                        logger.warning(f"Stripe lookup failed for {case.get('token')}: {e}")
                 if case.get('amount_total'):
                     total_revenue += case['amount_total'] / 100
 
@@ -3408,6 +3448,15 @@ Document:
 # DOCUMENT REFERENCES ENDPOINTS
 # ============================================================================
 
+DOC_URLS = {
+    '6month_plan': 'https://docs.google.com/document/d/1edSWxbDRH6NvaXgTZFcV0XIFJk9XzBv_/edit',
+    'scenario': 'https://docs.google.com/document/d/1midUedXwq4Dc6cXZspx37vuAFI5kH62r/edit',
+    'media_plan': 'https://docs.google.com/document/d/1fpdvSdnmegUcEXP9ch7ULMD8cliNac2Y/edit',
+    'persona': 'https://docs.google.com/document/d/1E-s4qfKkyJugXndEq8qg0-iRqp6AT2WL/edit',
+    'identity': 'https://docs.google.com/document/d/1734OW_IZuzhrIzZ4eTghqbK3KPhQnjAp/edit',
+    'dev_system': 'https://docs.google.com/document/d/1qmdYKzCw4Jc4T5AfX1BX2c4FYagBt41g/edit',
+}
+
 @dashboard_bp.route('/api/dashboard/doc-references', methods=['GET', 'OPTIONS'])
 def get_doc_references():
     """Get all document references with summaries and links."""
@@ -3428,7 +3477,10 @@ def get_doc_references():
         if not response.ok:
             raise Exception(f'Failed to fetch doc references: {response.text}')
 
-        return jsonify(response.json())
+        docs = response.json()
+        for doc in docs:
+            doc['doc_url'] = DOC_URLS.get(doc.get('doc_key'))
+        return jsonify(docs)
 
     except Exception as e:
         logger.error(f'Doc references GET error: {str(e)}')
