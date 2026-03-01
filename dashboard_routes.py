@@ -53,6 +53,10 @@ POSTHOG_API_URL = 'https://us.posthog.com'
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
 GITHUB_REPOS = ['chemwor/DMHOA', 'chemwor/dmohadash', 'chemwor/disputemyhoa']
 
+# Supabase Management API (for security advisor)
+SUPABASE_ACCESS_TOKEN = os.environ.get('SUPABASE_ACCESS_TOKEN')
+SUPABASE_PROJECT_REF = os.environ.get('SUPABASE_PROJECT_REF', 'yvdwrkhntyutpnklxsvz')
+
 # Lighthouse Configuration
 GOOGLE_PAGESPEED_API_KEY = os.environ.get('GOOGLE_PAGESPEED_API_KEY')
 PAGESPEED_API_URL = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
@@ -4180,6 +4184,75 @@ def _execute_alert_scan():
                     logger.error(f'Alert scan - Dependabot check failed for {repo}: {str(e)}')
     except Exception as e:
         logger.error(f'Alert scan - Dependabot check failed: {str(e)}')
+
+    # === CHECK 9: SUPABASE SECURITY ADVISOR ===
+    try:
+        if SUPABASE_ACCESS_TOKEN and SUPABASE_PROJECT_REF:
+            sb_resp = requests.get(
+                f'https://api.supabase.com/v1/projects/{SUPABASE_PROJECT_REF}/advisors/security',
+                headers={
+                    'Authorization': f'Bearer {SUPABASE_ACCESS_TOKEN}',
+                    'Content-Type': 'application/json',
+                },
+                timeout=15
+            )
+            if sb_resp.ok:
+                lints = sb_resp.json()
+                # Filter to ERROR and WARN level issues
+                errors = [l for l in lints if l.get('level') == 'ERROR']
+                warnings = [l for l in lints if l.get('level') == 'WARN']
+
+                if errors:
+                    issue_list = ', '.join(set(l.get('title', l.get('name', '?')) for l in errors[:5]))
+                    create_alert_if_new(
+                        'supabase_security', 'critical',
+                        f'{len(errors)} Supabase security error(s)',
+                        f'Security advisor found {len(errors)} error(s) and {len(warnings)} warning(s). '
+                        f'Issues: {issue_list}.',
+                        {
+                            'errors': len(errors),
+                            'warnings': len(warnings),
+                            'issues': [
+                                {
+                                    'name': l.get('name'),
+                                    'title': l.get('title'),
+                                    'level': l.get('level'),
+                                    'detail': l.get('detail'),
+                                    'remediation': l.get('remediation'),
+                                    'metadata': l.get('metadata'),
+                                }
+                                for l in errors
+                            ],
+                        }
+                    )
+                elif warnings:
+                    issue_list = ', '.join(set(l.get('title', l.get('name', '?')) for l in warnings[:5]))
+                    create_alert_if_new(
+                        'supabase_security', 'warning',
+                        f'{len(warnings)} Supabase security warning(s)',
+                        f'Security advisor found {len(warnings)} warning(s). Issues: {issue_list}.',
+                        {
+                            'errors': 0,
+                            'warnings': len(warnings),
+                            'issues': [
+                                {
+                                    'name': l.get('name'),
+                                    'title': l.get('title'),
+                                    'level': l.get('level'),
+                                    'detail': l.get('detail'),
+                                    'remediation': l.get('remediation'),
+                                    'metadata': l.get('metadata'),
+                                }
+                                for l in warnings
+                            ],
+                        }
+                    )
+            elif sb_resp.status_code == 401:
+                logger.warning('Supabase security check - invalid access token')
+            else:
+                logger.warning(f'Supabase security check returned {sb_resp.status_code}: {sb_resp.text[:200]}')
+    except Exception as e:
+        logger.error(f'Alert scan - Supabase security check failed: {str(e)}')
 
     return {
         'scan_completed': True,
