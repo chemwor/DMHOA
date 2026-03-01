@@ -9,7 +9,8 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
 from functools import wraps
 
@@ -164,8 +165,9 @@ def get_timestamp_range(period: str) -> Dict[str, int]:
 PLAN_START_DATE = '2026-02-25'
 
 def get_google_ads_date_range(period: str) -> Dict[str, str]:
-    """Get date range in YYYY-MM-DD format for Google Ads API."""
-    now = datetime.now()
+    """Get date range in YYYY-MM-DD format for Google Ads API.
+    Uses America/Los_Angeles timezone to match the Google Ads account timezone."""
+    now = datetime.now(ZoneInfo('America/Los_Angeles'))
     today = now.strftime('%Y-%m-%d')
 
     if period == 'today':
@@ -775,12 +777,12 @@ def get_google_ads_data():
                 'ctr': round((clicks / impressions) * 100, 2) if impressions > 0 else 0,
             })
 
-        # Calculate daily budget from plan
+        # Calculate daily budget from plan (use account timezone)
         import calendar
-        now = datetime.now()
-        days_in_month = calendar.monthrange(now.year, now.month)[1]
+        ads_now = datetime.now(ZoneInfo('America/Los_Angeles'))
+        days_in_month = calendar.monthrange(ads_now.year, ads_now.month)[1]
         # Map current month to plan budget (March=1, April=2, etc.)
-        plan_month_index = now.month - 2  # March(3) -> 1, April(4) -> 2, etc.
+        plan_month_index = ads_now.month - 2  # March(3) -> 1, April(4) -> 2, etc.
         monthly_budget = 600  # default
         for pm in PLAN_MONTHS:
             if pm['month'] == plan_month_index:
