@@ -645,8 +645,6 @@ def get_klaviyo_data():
                                         'opens_unique',
                                         'clicks',
                                         'clicks_unique',
-                                        'bounces',
-                                        'unsubscribes',
                                         'delivery_rate',
                                         'open_rate',
                                         'click_rate',
@@ -666,8 +664,6 @@ def get_klaviyo_data():
                             stats['sends'] = row.get('recipients', 0) or 0
                             stats['opens'] = row.get('opens_unique', 0) or 0
                             stats['clicks'] = row.get('clicks_unique', 0) or 0
-                            stats['bounces'] = row.get('bounces', 0) or 0
-                            stats['unsubscribes'] = row.get('unsubscribes', 0) or 0
                             stats['deliveryRate'] = round((row.get('delivery_rate', 0) or 0) * 100, 1)
                             stats['openRate'] = round((row.get('open_rate', 0) or 0) * 100, 1)
                             stats['clickRate'] = round((row.get('click_rate', 0) or 0) * 100, 1)
@@ -678,7 +674,7 @@ def get_klaviyo_data():
 
             flow_stats.append(stats)
             if flow_id:
-                time.sleep(0.5)  # Avoid Klaviyo rate limits
+                time.sleep(1.5)  # Avoid Klaviyo rate limits (429 at 0.5s)
 
         total_emails_in_flow = full_preview_count + quick_preview_count
 
