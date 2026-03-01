@@ -1603,7 +1603,14 @@ def get_openai_usage():
 # HOA NEWS ENDPOINT
 # ============================================================================
 
-HOA_QUERIES = ['HOA homeowners association news', 'HOA legislation law']
+HOA_QUERIES = [
+    'HOA homeowners association news',
+    'HOA legislation law 2026',
+    'homeowners association disputes fines',
+    'community association management',
+    'HOA reform homeowner rights',
+    'HOA homeowners association site:youtube.com',
+]
 
 
 def categorize_article(title: str, description: str) -> str:
