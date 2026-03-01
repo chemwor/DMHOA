@@ -1691,7 +1691,7 @@ def _log_claude_usage(model: str, input_tokens: int, output_tokens: int, endpoin
         logger.warning(f'Failed to log Claude usage: {str(e)}')
 
 
-def call_claude_api(prompt: str, system_prompt: str, max_tokens: int = 4096) -> str:
+def call_claude_api(prompt: str, system_prompt: str, max_tokens: int = 4096, model: str = 'claude-sonnet-4-20250514') -> str:
     """Call Claude API."""
     response = requests.post(
         'https://api.anthropic.com/v1/messages',
@@ -1701,12 +1701,12 @@ def call_claude_api(prompt: str, system_prompt: str, max_tokens: int = 4096) -> 
             'anthropic-version': '2023-06-01',
         },
         json={
-            'model': 'claude-sonnet-4-20250514',
+            'model': model,
             'max_tokens': max_tokens,
             'system': system_prompt,
             'messages': [{'role': 'user', 'content': prompt}],
         },
-        timeout=(10, 120)
+        timeout=(10, 180)
     )
 
     if not response.ok:
@@ -1715,10 +1715,10 @@ def call_claude_api(prompt: str, system_prompt: str, max_tokens: int = 4096) -> 
     data = response.json()
     usage = data.get('usage', {})
     _log_claude_usage(
-        model='claude-sonnet-4-20250514',
+        model=model,
         input_tokens=usage.get('input_tokens', 0),
         output_tokens=usage.get('output_tokens', 0),
-        endpoint='sonnet'
+        endpoint=model.split('-')[1] if '-' in model else model
     )
     return data['content'][0]['text']
 
@@ -2706,7 +2706,7 @@ IMPORTANT:
 - negativeKeywordSuggestions: Look at search terms that are irrelevant (attorney/lawyer seekers, unrelated HOA topics). Also review the active negatives list and suggest any gaps. Include a priority for each.
 - generalRecommendations: Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items. Each must have a category.'''
 
-                response_text = call_claude_api(prompt, system_prompt, 4096)
+                response_text = call_claude_api(prompt, system_prompt, 4096, model='claude-opus-4-6')
                 # Strip markdown fences if present, then find the JSON object
                 cleaned = response_text.strip()
                 if cleaned.startswith('```'):
