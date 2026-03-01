@@ -4040,13 +4040,13 @@ def _execute_alert_scan():
         one_hour_ago_iso = (datetime.utcnow() - timedelta(hours=1)).isoformat()
 
         # Find paid cases from the last hour that should have outputs by now
+        # Use PostgREST 'and' filter to combine two conditions on created_at
         paid_cases_response = requests.get(
             f"{SUPABASE_URL}/rest/v1/dmhoa_cases",
             params={
                 'select': 'id,token,created_at',
                 'status': 'eq.paid',
-                'created_at': f'gte.{one_hour_ago_iso}',
-                'created_at': f'lte.{ten_min_ago}',
+                'and': f'(created_at.gte.{one_hour_ago_iso},created_at.lte.{ten_min_ago})',
             },
             headers=supabase_headers(),
             timeout=TIMEOUT
