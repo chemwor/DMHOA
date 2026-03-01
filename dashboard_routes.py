@@ -51,7 +51,7 @@ POSTHOG_API_URL = 'https://us.posthog.com'
 
 # GitHub Configuration (for Dependabot alerts)
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
-GITHUB_REPOS = ['chemwor/DMHOA', 'chemwor/dmohadash']
+GITHUB_REPOS = ['chemwor/DMHOA', 'chemwor/dmohadash', 'chemwor/disputemyhoa']
 
 # Lighthouse Configuration
 GOOGLE_PAGESPEED_API_KEY = os.environ.get('GOOGLE_PAGESPEED_API_KEY')
