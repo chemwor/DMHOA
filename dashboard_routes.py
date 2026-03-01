@@ -3314,14 +3314,17 @@ def _build_live_data_snapshot() -> Dict:
         sources_failed.append('supabase')
         data['cases'] = {}
 
-    # Google Ads
+    # Google Ads — today's data, only campaigns with spend
     try:
-        ads = _fetch_google_ads_metrics()
-        data['google_ads'] = ads or {}
+        ads = _fetch_google_ads_metrics('today')
         if ads:
+            # Convert CTR to percentage for clarity (raw is decimal like 0.0565)
+            ads['ctr_pct'] = round(ads.get('ctr', 0) * 100, 2)
+            data['google_ads'] = ads
             sources_loaded.append('google_ads')
         else:
             sources_failed.append('google_ads')
+            data['google_ads'] = {}
     except Exception as e:
         logger.error(f'Snapshot - Google Ads failed: {str(e)}')
         sources_failed.append('google_ads')
@@ -3654,7 +3657,14 @@ def _generate_daily_summary() -> Dict:
     data_text = json.dumps(snapshot, indent=2, default=str)
 
     # Generate structured JSON summary
-    json_prompt = f"""You are a business operations assistant for DMHOA, a bootstrapped $49 one-time-purchase educational platform.
+    json_prompt = f"""You are a business operations assistant for DisputeMyHOA (DMHOA), a bootstrapped $49 one-time-purchase educational platform.
+
+CONTEXT:
+- The 6-month growth plan started February 25, 2026. We are currently in Month 1 (Foundation & Launch).
+- Target campaign: "DMHOA - DIY Response - Phrase - March"
+- Only campaigns with actual ad spend are included in the ads data below.
+- The "ctr_pct" field is CTR as a percentage (e.g., 5.65 means 5.65%). Use this for grading, NOT the raw "ctr" decimal.
+- The "total_profiles" in Klaviyo represents email list size.
 
 Generate a daily business summary for {today}. Be concise, direct, and action-oriented.
 
@@ -3705,9 +3715,9 @@ FORMAT YOUR RESPONSE AS A JSON OBJECT:
   "wins": ["Anything positive to highlight"]
 }}
 
-GRADING REFERENCE:
+GRADING REFERENCE (use ctr_pct for CTR grading):
 - Traffic A: 1,000+ visitors/mo | C: 250-999 | F: <250
-- Ads CTR A: >3.5% | C: 2-3.5% | F: <2%
+- Ads CTR A: >3.5% | C: 2-3.5% | F: <2%  (compare against ctr_pct, NOT raw ctr decimal)
 - Conversion A: >3% | C: 1-3% | F: <1%
 - Revenue A: >$1,000/mo | C: $300-1,000 | F: <$300
 
