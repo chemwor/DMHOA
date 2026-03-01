@@ -4249,7 +4249,8 @@ def _execute_alert_scan():
                 timeout=15
             )
             if sb_resp.ok:
-                lints = sb_resp.json()
+                sb_data = sb_resp.json()
+                lints = sb_data.get('lints', []) if isinstance(sb_data, dict) else sb_data
                 # Filter to ERROR and WARN level issues
                 errors = [l for l in lints if l.get('level') == 'ERROR']
                 warnings = [l for l in lints if l.get('level') == 'WARN']
