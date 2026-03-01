@@ -49,6 +49,10 @@ POSTHOG_PROJECT_ID = os.environ.get('POSTHOG_PROJECT_ID')
 POSTHOG_PERSONAL_API_KEY = os.environ.get('POSTHOG_PERSONAL_API_KEY')
 POSTHOG_API_URL = 'https://us.posthog.com'
 
+# GitHub Configuration (for Dependabot alerts)
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+GITHUB_REPOS = ['chemwor/DMHOA', 'chemwor/dmohadash']
+
 # Lighthouse Configuration
 GOOGLE_PAGESPEED_API_KEY = os.environ.get('GOOGLE_PAGESPEED_API_KEY')
 PAGESPEED_API_URL = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
@@ -4115,6 +4119,67 @@ def _execute_alert_scan():
                     )
     except Exception as e:
         logger.error(f'Alert scan - Conversion check failed: {str(e)}')
+
+    # === CHECK 8: GITHUB DEPENDABOT SECURITY ALERTS ===
+    try:
+        if GITHUB_TOKEN:
+            github_headers = {
+                'Authorization': f'Bearer {GITHUB_TOKEN}',
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+            }
+            for repo in GITHUB_REPOS:
+                try:
+                    gh_resp = requests.get(
+                        f'https://api.github.com/repos/{repo}/dependabot/alerts',
+                        headers=github_headers,
+                        params={'state': 'open', 'severity': 'high,critical', 'per_page': '100'},
+                        timeout=10
+                    )
+                    if gh_resp.ok:
+                        alerts = gh_resp.json()
+                        if alerts:
+                            critical = [a for a in alerts if a.get('security_vulnerability', {}).get('severity') == 'critical']
+                            high = [a for a in alerts if a.get('security_vulnerability', {}).get('severity') == 'high']
+                            repo_short = repo.split('/')[-1]
+                            packages = ', '.join(set(
+                                a.get('dependency', {}).get('package', {}).get('name', '?')
+                                for a in alerts[:5]
+                            ))
+                            severity = 'critical' if critical else 'warning'
+                            create_alert_if_new(
+                                'dependabot', severity,
+                                f'{len(alerts)} Dependabot alert(s) in {repo_short}',
+                                f'{len(critical)} critical, {len(high)} high severity. '
+                                f'Affected packages: {packages}.',
+                                {
+                                    'repo': repo,
+                                    'total': len(alerts),
+                                    'critical': len(critical),
+                                    'high': len(high),
+                                    'packages': [
+                                        {
+                                            'name': a.get('dependency', {}).get('package', {}).get('name'),
+                                            'severity': a.get('security_vulnerability', {}).get('severity'),
+                                            'advisory': a.get('security_advisory', {}).get('summary'),
+                                            'patched_version': (a.get('security_vulnerability', {})
+                                                                .get('first_patched_version', {}) or {}).get('identifier'),
+                                            'url': a.get('html_url'),
+                                        }
+                                        for a in alerts
+                                    ],
+                                }
+                            )
+                    elif gh_resp.status_code == 403:
+                        logger.warning(f'Dependabot check - insufficient permissions for {repo}')
+                    elif gh_resp.status_code == 404:
+                        logger.warning(f'Dependabot check - alerts not enabled for {repo}')
+                    else:
+                        logger.warning(f'Dependabot check - {repo} returned {gh_resp.status_code}')
+                except Exception as e:
+                    logger.error(f'Alert scan - Dependabot check failed for {repo}: {str(e)}')
+    except Exception as e:
+        logger.error(f'Alert scan - Dependabot check failed: {str(e)}')
 
     return {
         'scan_completed': True,
