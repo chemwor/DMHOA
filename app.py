@@ -3018,6 +3018,64 @@ def case_analysis():
         return add_cors_headers(response), 500
 
 
+@app.route('/api/admin/cases/<token>/retry', methods=['POST', 'OPTIONS'])
+def admin_retry_case(token):
+    """Manually retry case analysis generation for a paid case."""
+    if request.method == 'OPTIONS':
+        return jsonify({'ok': True})
+
+    try:
+        body = request.get_json() or {}
+        send_email = body.get('sendEmail', False)
+
+        # Fetch case from Supabase
+        case_resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_cases",
+            params={'select': 'token,status,payload', 'token': f'eq.{token}', 'limit': '1'},
+            headers={
+                'apikey': SUPABASE_SERVICE_ROLE_KEY,
+                'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+                'Content-Type': 'application/json',
+            },
+            timeout=10
+        )
+        if not case_resp.ok or not case_resp.json():
+            return jsonify({'error': 'Case not found'}), 404
+
+        case = case_resp.json()[0]
+        if case.get('status') != 'paid':
+            return jsonify({'error': f"Case status is '{case.get('status')}', must be 'paid'"}), 400
+
+        # Run analysis (synchronous — may take 30-60s)
+        logger.info(f"Admin retry: running case analysis for token {token}")
+        result = run_case_analysis(token)
+
+        if not result.get('ok'):
+            return jsonify({'error': result.get('error', 'Analysis failed')}), 500
+
+        # Optionally send receipt email
+        email_sent = False
+        if send_email:
+            payload = case.get('payload', {})
+            email = payload.get('email', '')
+            if email:
+                case_url = f"https://disputemyhoa.com/case.html?case={token}"
+                email_sent = send_receipt_email_direct(token, email, case_url)
+                logger.info(f"Admin retry: receipt email {'sent' if email_sent else 'failed'} to {email}")
+            else:
+                logger.warning(f"Admin retry: no email in case payload for token {token}")
+
+        return jsonify({
+            'ok': True,
+            'status': result.get('status', 'ready'),
+            'emailSent': email_sent,
+        })
+
+    except Exception as e:
+        logger.error(f"Admin retry case error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
 def replace_date_placeholders(text: str, payload: Dict[str, Any] = None) -> str:
     """
     Replace date placeholders in generated text with actual dates.
