@@ -2582,9 +2582,9 @@ def handle_ad_suggestions():
                     logger.warning(f'Failed to fetch ads data for suggestions: {str(e)}')
 
                 # Compute period insights from real data (not AI-generated)
-                total_spend = sum(c.get('spend', 0) for c in ads_data.get('campaigns', []))
-                total_clicks = sum(c.get('clicks', 0) for c in ads_data.get('campaigns', []))
-                total_impressions = sum(c.get('impressions', 0) for c in ads_data.get('campaigns', []))
+                total_spend = sum(float(c.get('spend', 0) or 0) for c in ads_data.get('campaigns', []))
+                total_clicks = sum(int(c.get('clicks', 0) or 0) for c in ads_data.get('campaigns', []))
+                total_impressions = sum(int(c.get('impressions', 0) or 0) for c in ads_data.get('campaigns', []))
                 total_conversions = sum(float(c.get('conversions', 0) or 0) for c in ads_data.get('campaigns', []))
                 days_analyzed = max(1, (datetime.strptime(end_date, '%Y-%m-%d') - datetime.strptime(start_date, '%Y-%m-%d')).days + 1)
 
