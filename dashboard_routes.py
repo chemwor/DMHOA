@@ -2403,26 +2403,138 @@ def handle_ad_suggestions():
                                 'spend': round(int(m.get('costMicros', 0) or 0) / 1_000_000, 2),
                                 'conversions': m.get('conversions', 0),
                             })
+
+                        # Ad copy performance (responsive search ads)
+                        ad_query = f"""
+                            SELECT campaign.name, ad_group.name,
+                                ad_group_ad.ad.id,
+                                ad_group_ad.ad.responsive_search_ad.headlines,
+                                ad_group_ad.ad.responsive_search_ad.descriptions,
+                                ad_group_ad.ad.final_urls,
+                                ad_group_ad.status,
+                                metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+                            FROM ad_group_ad
+                            WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+                                AND campaign.status = 'ENABLED'
+                                AND ad_group_ad.status != 'REMOVED'
+                                AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+                                AND metrics.impressions > 0
+                            ORDER BY metrics.clicks DESC LIMIT 20
+                        """
+                        ad_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, ad_query)
+                        ads_data['adCopy'] = []
+                        for row in ad_results:
+                            aga = row.get('adGroupAd', {})
+                            ad = aga.get('ad', {})
+                            rsa = ad.get('responsiveSearchAd', {})
+                            m = row.get('metrics', {})
+                            ad_clicks = int(m.get('clicks', 0) or 0)
+                            ad_impr = int(m.get('impressions', 0) or 0)
+                            ad_spend = int(m.get('costMicros', 0) or 0) / 1_000_000
+                            headlines = [h.get('text', '') for h in (rsa.get('headlines') or [])]
+                            descriptions = [d.get('text', '') for d in (rsa.get('descriptions') or [])]
+                            ads_data['adCopy'].append({
+                                'campaignName': row.get('campaign', {}).get('name', ''),
+                                'adGroupName': row.get('adGroup', {}).get('name', ''),
+                                'status': aga.get('status', ''),
+                                'headlines': headlines,
+                                'descriptions': descriptions,
+                                'finalUrl': (ad.get('finalUrls') or [''])[0],
+                                'clicks': ad_clicks, 'impressions': ad_impr,
+                                'spend': round(ad_spend, 2),
+                                'ctr': round((ad_clicks / ad_impr) * 100, 2) if ad_impr > 0 else 0,
+                            })
+
+                        # Active negative keywords
+                        neg_query = """
+                            SELECT campaign.name, ad_group.name,
+                                ad_group_criterion.keyword.text,
+                                ad_group_criterion.keyword.match_type,
+                                ad_group_criterion.negative
+                            FROM ad_group_criterion
+                            WHERE ad_group_criterion.negative = TRUE
+                                AND ad_group_criterion.status = 'ENABLED'
+                                AND campaign.status = 'ENABLED'
+                                AND ad_group_criterion.type = 'KEYWORD'
+                            LIMIT 100
+                        """
+                        neg_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, neg_query)
+                        ads_data['activeNegativeKeywords'] = []
+                        for row in neg_results:
+                            crit = row.get('adGroupCriterion', {})
+                            kw = crit.get('keyword', {})
+                            ads_data['activeNegativeKeywords'].append({
+                                'keyword': kw.get('text', ''),
+                                'matchType': kw.get('matchType', ''),
+                                'campaignName': row.get('campaign', {}).get('name', ''),
+                                'adGroupName': row.get('adGroup', {}).get('name', ''),
+                            })
+
+                        # Campaign-level negative keywords
+                        camp_neg_query = """
+                            SELECT campaign.name,
+                                campaign_criterion.keyword.text,
+                                campaign_criterion.keyword.match_type
+                            FROM campaign_criterion
+                            WHERE campaign_criterion.negative = TRUE
+                                AND campaign.status = 'ENABLED'
+                                AND campaign_criterion.type = 'KEYWORD'
+                            LIMIT 100
+                        """
+                        try:
+                            camp_neg_results = query_google_ads(GOOGLE_ADS_CUSTOMER_ID, access_token, camp_neg_query)
+                            for row in camp_neg_results:
+                                crit = row.get('campaignCriterion', {})
+                                kw = crit.get('keyword', {})
+                                ads_data['activeNegativeKeywords'].append({
+                                    'keyword': kw.get('text', ''),
+                                    'matchType': kw.get('matchType', ''),
+                                    'campaignName': row.get('campaign', {}).get('name', ''),
+                                    'adGroupName': '(campaign-level)',
+                                })
+                        except Exception:
+                            pass  # campaign_criterion may not be available
+
                 except Exception as e:
                     logger.warning(f'Failed to fetch ads data for suggestions: {str(e)}')
 
                 system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
-Focus on DIY homeowners, not attorney-seekers. Respond with ONLY valid JSON, no markdown, no explanation.'''
+The product helps DIY homeowners write responses to HOA fines and violations — NOT for people seeking attorneys.
+Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
 
                 ads_json = json.dumps(ads_data, indent=2) if ads_data else 'No data available'
-                prompt = f'''Analyze this Google Ads performance data for {start_date} to {end_date}:
+                prompt = f'''Analyze this Google Ads performance data for {start_date} to {end_date}.
 
-{ads_json}
+=== CAMPAIGN PERFORMANCE ===
+{json.dumps(ads_data.get('campaigns', []), indent=2)}
 
-Respond with ONLY a JSON object (no markdown code fences) with these fields:
+=== KEYWORD PERFORMANCE (active campaigns only) ===
+{json.dumps(ads_data.get('keywords', []), indent=2)}
+
+=== SEARCH TERMS (what users actually searched) ===
+{json.dumps(ads_data.get('searchTerms', []), indent=2)}
+
+=== CURRENT AD COPY (headlines & descriptions in use) ===
+{json.dumps(ads_data.get('adCopy', []), indent=2)}
+
+=== ACTIVE NEGATIVE KEYWORDS (currently excluded) ===
+{json.dumps(ads_data.get('activeNegativeKeywords', []), indent=2)}
+
+Based on ALL the data above, respond with ONLY a JSON object (no markdown code fences). EVERY array MUST contain at least 2-3 items:
+
 {{
   "periodInsights": {{ "dateRange": "{start_date} to {end_date}", "totalSpend": <number>, "totalClicks": <number>, "totalImpressions": <number>, "avgCTR": <number> }},
-  "performanceSummary": "<brief 2-3 sentence analysis>",
+  "performanceSummary": "<brief 2-3 sentence analysis of overall performance>",
   "keywordSuggestions": [{{ "keyword": "<text>", "matchType": "PHRASE|EXACT|BROAD", "action": "add|pause|adjust_bid", "reason": "<why>", "expectedImpact": "high|medium|low" }}],
-  "negativeKeywordSuggestions": [{{ "keyword": "<text>", "matchType": "EXACT|PHRASE", "reason": "<why>" }}],
-  "adCopySuggestions": [{{ "headline": "<text>", "description": "<text>", "reason": "<why>" }}],
-  "generalRecommendations": [{{ "title": "<text>", "description": "<text>", "priority": "high|medium|low" }}]
-}}'''
+  "negativeKeywordSuggestions": [{{ "keyword": "<search term to exclude>", "matchType": "EXACT|PHRASE", "reason": "<why this wastes budget — reference search terms data and active negatives>" }}],
+  "adCopySuggestions": [{{ "headline": "<new headline up to 30 chars>", "description": "<new description up to 90 chars>", "reason": "<what current ad copy is missing or how this improves CTR>" }}],
+  "generalRecommendations": [{{ "title": "<short title>", "description": "<actionable recommendation based on the data>", "priority": "high|medium|low" }}]
+}}
+
+IMPORTANT:
+- adCopySuggestions: Review the current headlines and descriptions above. Suggest NEW headlines/descriptions that aren't already in use. Focus on the $49 price point, DIY angle, and urgency.
+- negativeKeywordSuggestions: Look at search terms that are irrelevant (attorney/lawyer seekers, unrelated HOA topics). Also review the active negatives list and suggest any gaps.
+- generalRecommendations: Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items.'''
 
                 response_text = call_claude_api(prompt, system_prompt, 4096)
                 # Strip markdown fences if present, then find the JSON object
