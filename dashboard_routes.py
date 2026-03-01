@@ -1636,24 +1636,182 @@ def get_priority(title: str, description: str) -> str:
     return 'low'
 
 
-@dashboard_bp.route('/api/dashboard/hoa-news', methods=['GET', 'PATCH', 'OPTIONS'])
+def _clean_html(text):
+    """Strip HTML tags and decode entities from text."""
+    if not text:
+        return text
+    import re
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+    text = re.sub(r'<[^>]*>', '', text)
+    text = re.sub(r'<[^>]*$', '', text)
+    return text.strip()
+
+
+def _fetch_google_news_rss(query):
+    """Fetch articles from Google News RSS for a given query."""
+    import xml.etree.ElementTree as ET
+    encoded_query = requests.utils.quote(query)
+    url = f'https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en'
+    try:
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (compatible; HOADashboard/1.0)'}, timeout=10)
+        if not resp.ok:
+            return []
+        root = ET.fromstring(resp.text)
+        items = []
+        for item in root.findall('.//item'):
+            title = _clean_html(item.findtext('title', ''))
+            link = item.findtext('link', '')
+            description = _clean_html(item.findtext('description', '') or '')
+            if description:
+                description = description[:300]
+            pub_date = item.findtext('pubDate', '')
+            source_el = item.find('source')
+            source = _clean_html(source_el.text) if source_el is not None and source_el.text else ''
+            if not source and link:
+                try:
+                    from urllib.parse import urlparse
+                    source = urlparse(link).hostname.replace('www.', '')
+                except Exception:
+                    source = 'Unknown'
+            if title and link:
+                items.append({
+                    'title': title,
+                    'link': link,
+                    'description': description,
+                    'pub_date': pub_date,
+                    'source': source,
+                    'query': query,
+                    'fetched_from': 'google_news',
+                })
+        return items
+    except Exception as e:
+        logger.warning(f'Failed to fetch Google News for "{query}": {e}')
+        return []
+
+
+@dashboard_bp.route('/api/dashboard/hoa-news', methods=['GET', 'POST', 'PATCH', 'OPTIONS'])
 def handle_hoa_news():
-    """Get or update HOA news articles."""
+    """Get, scan, or update HOA news articles."""
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return jsonify({'error': 'Supabase not configured'}), 500
 
+    # Handle POST for scanning new articles from RSS
+    if request.method == 'POST':
+        try:
+            all_articles = []
+            for query in HOA_QUERIES:
+                all_articles.extend(_fetch_google_news_rss(query))
+
+            # Deduplicate by normalized title
+            seen = set()
+            unique = []
+            for a in all_articles:
+                norm = a['title'].lower()[:50]
+                if norm not in seen:
+                    seen.add(norm)
+                    unique.append(a)
+
+            # Get existing links to avoid duplicates
+            existing_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+                params={'select': 'link', 'limit': '500'},
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            existing_links = set()
+            if existing_resp.ok:
+                existing_links = {a.get('link') for a in existing_resp.json()}
+
+            new_articles = [a for a in unique if a['link'] not in existing_links]
+            saved = 0
+            now = datetime.now().isoformat()
+
+            for a in new_articles:
+                text = (a['title'] + ' ' + a.get('description', '')).lower()
+                category = categorize_article(a['title'], a.get('description', ''))
+                priority = get_priority(a['title'], a.get('description', ''))
+
+                pub_date_iso = None
+                if a.get('pub_date'):
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        pub_date_iso = parsedate_to_datetime(a['pub_date']).isoformat()
+                    except Exception:
+                        pub_date_iso = None
+
+                insert_data = {
+                    'link': a['link'],
+                    'title': a['title'],
+                    'description': a.get('description', ''),
+                    'source': a.get('source', ''),
+                    'pub_date': pub_date_iso,
+                    'query': a.get('query'),
+                    'fetched_from': a.get('fetched_from', 'google_news'),
+                    'category': category,
+                    'priority': priority,
+                    'status': 'new',
+                    'first_seen_at': now,
+                    'last_seen_at': now,
+                }
+
+                resp = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+                    headers=supabase_headers(),
+                    json=insert_data,
+                    timeout=TIMEOUT
+                )
+                if resp.ok or resp.status_code == 201:
+                    saved += 1
+
+            return jsonify({
+                'articles': [],
+                'count': saved,
+                'lastUpdated': now,
+                'message': f'Scanned {len(unique)} articles, saved {saved} new'
+            })
+
+        except Exception as e:
+            logger.error(f'HOA News scan error: {str(e)}')
+            return jsonify({'error': 'Failed to scan news', 'message': str(e)}), 500
+
     # Handle PATCH for updating article status
     if request.method == 'PATCH':
         try:
             data = request.get_json() or {}
+
+            # Support { id, status } format (from Intel service)
+            if data.get('id') and data.get('status'):
+                article_id = data['id']
+                status = data['status']
+                if status not in ('new', 'reviewed', 'archived'):
+                    return jsonify({'error': 'Invalid status'}), 400
+
+                update_data = {'status': status}
+                if status == 'archived':
+                    update_data['dismissed'] = True
+
+                response = requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+                    params={'id': f'eq.{article_id}'},
+                    headers=supabase_headers(),
+                    json=update_data,
+                    timeout=TIMEOUT
+                )
+                if not response.ok:
+                    raise Exception(f'Failed to update article: {response.text}')
+
+                return jsonify({'success': True, 'article': {'id': article_id, 'status': status}})
+
+            # Support { articleId, action } format (from News service)
             article_id = data.get('articleId')
             action = data.get('action')
 
             if not article_id or not action:
-                return jsonify({'error': 'Missing articleId or action'}), 400
+                return jsonify({'error': 'Missing articleId/action or id/status'}), 400
 
             update_data = {}
             if action == 'bookmark':
@@ -1661,9 +1819,9 @@ def handle_hoa_news():
             elif action == 'unbookmark':
                 update_data = {'bookmarked': False}
             elif action == 'dismiss':
-                update_data = {'dismissed': True}
+                update_data = {'dismissed': True, 'status': 'archived'}
             elif action == 'undismiss':
-                update_data = {'dismissed': False}
+                update_data = {'dismissed': False, 'status': 'new'}
             elif action == 'markUsed':
                 update_data = {'used_for_content': True}
             elif action == 'unmarkUsed':
@@ -1692,6 +1850,8 @@ def handle_hoa_news():
     try:
         include_dismissed = request.args.get('includeDismissed') == 'true'
         bookmarked_only = request.args.get('bookmarked') == 'true'
+        filter_status = request.args.get('status', '')
+        filter_category = request.args.get('category', '')
 
         # Fetch articles from database
         params = {
@@ -1701,6 +1861,10 @@ def handle_hoa_news():
         }
         if not include_dismissed:
             params['dismissed'] = 'eq.false'
+        if filter_status:
+            params['status'] = f'eq.{filter_status}'
+        if filter_category:
+            params['category'] = f'eq.{filter_category}'
 
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
@@ -1730,6 +1894,7 @@ def handle_hoa_news():
                 'fetchedFrom': a.get('fetched_from'),
                 'category': a.get('category'),
                 'priority': a.get('priority'),
+                'status': a.get('status', 'new'),
                 'timestamp': a.get('pub_date') or a.get('created_at'),
                 'bookmarked': a.get('bookmarked', False),
                 'usedForContent': a.get('used_for_content', False),
