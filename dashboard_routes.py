@@ -641,7 +641,6 @@ def get_klaviyo_data():
                                     },
                                     'statistics': [
                                         'recipients',
-                                        'deliveries',
                                         'opens',
                                         'opens_unique',
                                         'clicks',
@@ -678,6 +677,8 @@ def get_klaviyo_data():
                     logger.warning(f'Failed to fetch flow stats for {flow_name}: {e}')
 
             flow_stats.append(stats)
+            if flow_id:
+                time.sleep(0.5)  # Avoid Klaviyo rate limits
 
         total_emails_in_flow = full_preview_count + quick_preview_count
 
