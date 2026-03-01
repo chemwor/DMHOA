@@ -3335,7 +3335,7 @@ def seed_checklists():
         data = request.get_json() or {}
         documents = data.get('documents')
 
-        # If no documents provided, auto-fetch summaries from doc_references
+        # If no documents provided, auto-fetch from doc_references
         if not documents:
             doc_refs_resp = requests.get(
                 f"{SUPABASE_URL}/rest/v1/dmhoa_doc_references",
@@ -3351,11 +3351,10 @@ def seed_checklists():
                         content_parts.append(f"Summary: {ref['summary_text']}")
                     if ref.get('key_points'):
                         content_parts.append("Key Points:\n" + "\n".join(f"- {p}" for p in ref['key_points']))
-                    if len(content_parts) > 1:
-                        documents[ref['doc_key']] = "\n\n".join(content_parts)
+                    documents[ref['doc_key']] = "\n\n".join(content_parts)
 
         if not documents:
-            return jsonify({'error': 'No document content available. Ensure doc references have summaries.'}), 400
+            return jsonify({'error': 'No document references found.'}), 400
 
         # Check which docs already have checklists
         existing_response = requests.get(
@@ -3383,13 +3382,15 @@ def seed_checklists():
                 continue
 
             # Call Claude Haiku to extract tasks
-            prompt = f"""Extract every actionable task from this document. For each task, return a JSON object with:
+            prompt = f"""You are generating actionable checklist tasks for DisputeMyHOA.com, a SaaS product that helps homeowners fight HOA violations using AI-powered legal analysis. The product has a funnel: quick preview → full preview → paid analysis.
+
+Based on the document information below, generate 5-8 specific, actionable tasks. For each task, return a JSON object with:
 - "title": Short task name (max 80 chars)
 - "description": What specifically needs to be done (1-2 sentences)
 - "category": One of ["google_ads", "content_seo", "social", "media", "product", "email", "ops", "finance", "legal"]
-- "month": Integer 1-6 if the task is time-bound to a specific month in the plan, null if it's evergreen
-- "priority": "high", "medium", or "low" based on how much the document emphasizes it
-- "due_date": "YYYY-MM-DD" if a specific date is mentioned or can be inferred, null otherwise
+- "month": Integer 1-6 if the task is time-bound to a specific month in a 6-month plan, null if it's evergreen
+- "priority": "high", "medium", or "low" based on business impact
+- "due_date": null
 
 Return ONLY a valid JSON array. No markdown, no commentary, no code fences.
 
