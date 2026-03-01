@@ -1709,9 +1709,15 @@ def handle_hoa_news():
     # Handle POST for scanning new articles from RSS
     if request.method == 'POST':
         try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             all_articles = []
-            for query in HOA_QUERIES:
-                all_articles.extend(_fetch_google_news_rss(query))
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {executor.submit(_fetch_google_news_rss, q): q for q in HOA_QUERIES}
+                for future in as_completed(futures, timeout=20):
+                    try:
+                        all_articles.extend(future.result())
+                    except Exception:
+                        pass
 
             # Deduplicate by normalized title
             seen = set()
