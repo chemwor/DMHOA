@@ -666,18 +666,22 @@ def get_klaviyo_data():
                             total_sends = 0
                             total_opens = 0
                             total_clicks = 0
+                            weighted_delivery = 0  # sum of (delivery_rate * recipients) per message
                             for row in results:
                                 row_stats = row.get('statistics', {})
-                                total_sends += int(row_stats.get('recipients', 0) or 0)
+                                recip = int(row_stats.get('recipients', 0) or 0)
+                                total_sends += recip
                                 total_opens += int(row_stats.get('opens_unique', 0) or 0)
                                 total_clicks += int(row_stats.get('clicks_unique', 0) or 0)
+                                dr = float(row_stats.get('delivery_rate', 0) or 0)
+                                weighted_delivery += dr * recip
                             stats['sends'] = total_sends
                             stats['opens'] = total_opens
                             stats['clicks'] = total_clicks
                             # Compute rates from aggregated totals
                             stats['openRate'] = round((total_opens / total_sends * 100), 1) if total_sends > 0 else 0
                             stats['clickRate'] = round((total_clicks / total_sends * 100), 1) if total_sends > 0 else 0
-                            stats['deliveryRate'] = 0  # Not available from this endpoint
+                            stats['deliveryRate'] = round((weighted_delivery / total_sends * 100), 1) if total_sends > 0 else 0
                     else:
                         logger.warning(f'Flow report API returned {report_response.status_code} for flow {flow_id}: {report_response.text[:200]}')
                 except Exception as e:
