@@ -2801,16 +2801,22 @@ If no terms meet all 4 criteria, return empty array [].
 
 ---
 
-RULE 2 — KEYWORD DEDUPLICATION (mandatory):
-The keyword_view data contains every active keyword in the account. Before recommending any ADD keyword action:
+RULE 2 — KEYWORD DEDUPLICATION — EXECUTE BEFORE EVERY SUGGESTION:
 
-  Step 1: List every keyword text in keyword_view internally
-  Step 2: For each keyword you want to suggest adding, compare it character-by-character against the list
-  Step 3: If it exists in the same match type → remove it from your suggestions entirely
-  Step 4: If it exists in a different match type → only include if there is a specific documented reason to add the new match type, and note the existing version in the rationale
-  Step 5: Only output keywords that passed Steps 1-4
+Step 1: Copy this exact list from keyword_view into your working memory before generating any suggestions:
+[every keyword text value from keyword_view, lowercased, trimmed, with match type noted]
 
-This check is not optional. A keyword ADD recommendation for a keyword already in the account is a hallucination.
+Step 2: For each keyword you are considering suggesting with action=ADD, do this check explicitly:
+  - Take the candidate keyword text, lowercase it, trim it
+  - Search the list from Step 1 for an exact text match
+  - If found in ANY match type: DO NOT include this keyword in keywordSuggestions. Remove it. Full stop.
+  - If not found in any match type: include it normally
+
+Step 3: Before writing your final JSON output, read back each keywordSuggestion you are about to output and verify its text does not appear in the keyword_view list.
+
+If after deduplication no valid ADD candidates remain, return an empty keywordSuggestions array [].
+
+An empty array is correct and acceptable output. Populating keywordSuggestions with keywords already in the account is the worst possible output — it is misinformation that wastes the operator's time.
 
 ---
 
