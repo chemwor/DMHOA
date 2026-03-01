@@ -2628,6 +2628,51 @@ def handle_ad_suggestions():
                     'dataQualityNote': '' if total_revenue > 0 else 'Revenue data not available for this period. Stripe charges may not directly correlate to Google Ads clicks within this date range.'
                 }
 
+                # Fetch Klaviyo email capture metrics for the analysis period
+                klaviyo_context_str = ''
+                try:
+                    if KLAVIYO_API_KEY:
+                        full_count = get_klaviyo_list_count(KLAVIYO_FULL_PREVIEW_LIST_ID)
+                        quick_count = get_klaviyo_list_count(KLAVIYO_QUICK_PREVIEW_LIST_ID)
+                        total_email_captures = full_count + quick_count
+
+                        # Get active flows
+                        flows_response = requests.get(
+                            'https://a.klaviyo.com/api/flows/',
+                            headers=klaviyo_headers(),
+                            timeout=TIMEOUT
+                        )
+                        active_flows = []
+                        if flows_response.ok:
+                            for f in flows_response.json().get('data', []):
+                                attrs = f.get('attributes', {})
+                                if attrs.get('status') == 'live':
+                                    active_flows.append(attrs.get('name', 'Unknown'))
+
+                        capture_rate = (total_email_captures / total_clicks * 100) if total_clicks > 0 else 0
+                        flow_breakdown = f"  Full Preview Abandonment: {full_count} captures\n  Quick Preview Abandonment: {quick_count} captures"
+
+                        klaviyo_context_str = f"""
+=== KLAVIYO METRICS ===
+Analysis Period: {start_date} to {end_date}
+Total Email Captures: {total_email_captures}
+Active Abandonment Flows: {', '.join(active_flows) if active_flows else 'None detected'}
+Flow Breakdown:
+{flow_breakdown}
+Email Capture Rate: {capture_rate:.1f}% (captures / ad clicks)
+========================"""
+                    else:
+                        klaviyo_context_str = """
+=== KLAVIYO METRICS ===
+Data unavailable — Klaviyo API key not configured
+========================"""
+                except Exception as e:
+                    logger.warning(f'Failed to fetch Klaviyo metrics for ad suggestions: {e}')
+                    klaviyo_context_str = """
+=== KLAVIYO METRICS ===
+Data unavailable for this period
+========================"""
+
                 # Build plan context if requested
                 plan_context_str = ''
                 plan_context_data = {}
@@ -2668,15 +2713,17 @@ Respond with ONLY valid JSON, no markdown, no explanation. Every array in the re
 The product helps DIY homeowners write responses to HOA fines and violations — NOT for people seeking attorneys.
 Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
 
-                # System prompt v2.1 — 2026-03-01
-                # Changes from v2.0:
+                # System prompt v2.2 — 2026-03-01
+                # Changes:
                 # 1. Negative keyword logic: require spend>0 AND clicks>0
-                # 2. Keyword dedup: cross-reference keyword_view before ADD
+                # 2. Keyword dedup: mandatory cross-reference vs keyword_view
                 # 3. Duplicate match type detection: flag phrase+exact conflicts
-                # 4. Email capture: surface Klaviyo captures as funnel signal
-                # 5. Ad copy constraints: no prevention/legal language, char limits
+                # 4. Email capture: surface Klaviyo data as funnel signal
+                # 5. Ad copy constraints: char limits + no legal/prevention language
                 # 6. Ad scheduling: flag overnight impression waste >10%
                 # 7. Citation enforcement: verbatim dataSource required
+                # 8. Budget phase awareness: no increase in first 14 days
+                # 9. Zero-spend keyword rule: never flag $0 spend keywords
 
                 # Build campaign brief JSON field if in campaign mode
                 campaign_brief_field = ''
@@ -2700,6 +2747,8 @@ Respond with ONLY valid JSON, no markdown, no explanation. Every array in the re
 === ACTIVE NEGATIVE KEYWORDS (currently excluded) ===
 {json.dumps(ads_data.get('activeNegativeKeywords', []), indent=2)}
 
+{klaviyo_context_str}
+
 Based on ALL the data above, respond with ONLY a JSON object (no markdown code fences). EVERY array MUST contain at least 2-3 items:
 
 {{
@@ -2715,135 +2764,190 @@ Based on ALL the data above, respond with ONLY a JSON object (no markdown code f
 ANALYSIS RULES — follow every rule below precisely.
 ===================================================================
 
-STEP 0 — DUPLICATE MATCH TYPE AUDIT — run first, before other analysis:
-Scan the keyword_view data for any keyword text that appears in more than one match type simultaneously with spend > $0 on both versions.
+BUSINESS CONTEXT — READ FIRST:
+DisputeMyHOA is a $49 self-serve SaaS tool that generates HOA violation response letters. It is NOT a law firm, NOT legal counsel, NOT a referral service.
+
+Target customer: a homeowner who already has an HOA violation, fine, notice, or collections threat in hand and wants to respond themselves without hiring an attorney.
+
+The funnel has two steps:
+  Step 1 — Free preview: user uploads notice, gets plain-English explanation, risk assessment, and response options
+  Step 2 — $49 payment: unlocks complete response letters, compliance checklist, statute citations, deadline reminders
+
+Email capture via abandonment flows is the intermediate conversion event between ad click and payment. It is meaningful funnel progress and must be treated as a positive signal, not ignored.
+
+---
+
+WRONG-INTENT WORDS — never recommend targeting these:
+lawyer, lawyers, attorney, attorneys, near me, pro bono, free consultation, legal advice, lawsuit, sue, court, mediators, template, templates, free, sample, investigate, investigated, prevention, prevent, stop violations
+
+RIGHT-INTENT SIGNALS — these indicate a buyer:
+respond, response, letter, dispute, fight, violation, notice, write, help, fine, appeal, collections, challenge
+
+---
+
+RULE 1 — NEGATIVE KEYWORD LOGIC:
+Only recommend EXCLUDE for a search term if ALL of these are true simultaneously:
+  1. spend > $0
+  2. clicks > 0
+  3. conversions = 0
+  4. Term contains at least one wrong-intent word from the list above
+
+NEVER recommend excluding:
+  - Any term where clicks = 0 AND cost = $0
+  - Broad informational words in isolation ("rules", "guidelines", "laws", "regulations") unless paired with wrong-intent words AND have real spend
+  - Terms you haven't seen in the provided search_term_view data — do not invent candidates
+
+If no terms meet all 4 criteria, return empty array [].
+
+---
+
+RULE 2 — KEYWORD DEDUPLICATION (mandatory):
+The keyword_view data contains every active keyword in the account. Before recommending any ADD keyword action:
+
+  Step 1: List every keyword text in keyword_view internally
+  Step 2: For each keyword you want to suggest adding, compare it character-by-character against the list
+  Step 3: If it exists in the same match type → remove it from your suggestions entirely
+  Step 4: If it exists in a different match type → only include if there is a specific documented reason to add the new match type, and note the existing version in the rationale
+  Step 5: Only output keywords that passed Steps 1-4
+
+This check is not optional. A keyword ADD recommendation for a keyword already in the account is a hallucination.
+
+---
+
+RULE 3 — DUPLICATE MATCH TYPE DETECTION:
+Before generating any other recommendations, scan keyword_view for keywords appearing in more than one match type simultaneously where BOTH versions have spend > $0.
 
 For each duplicate found, add to generalRecommendations:
 {{
-  "recommendation": "DUPLICATE KEYWORD — [keyword] is running as both [match type A] ($X.XX spent) and [match type B] ($X.XX spent) simultaneously. They are competing against each other in the same auctions, splitting bid signal and inflating your own CPC. Pause the PHRASE match version. Keep EXACT match for precise bid control.",
+  "recommendation": "DUPLICATE KEYWORD — '[keyword]' is running as both [MATCH TYPE A] ($X.XX spent, Y clicks) and [MATCH TYPE B] ($X.XX spent, Y clicks) simultaneously. They compete against each other in the same auctions, splitting bid signal and inflating your own CPC. Pause the PHRASE match. Keep EXACT match for bid control.",
   "category": "bidding",
   "priority": "high",
   "expectedImpact": "Consolidates bid signal, eliminates internal auction competition, reduces wasted spend",
-  "dataSource": "keyword_view: [keyword] PHRASE $X.XX | [keyword] EXACT $X.XX"
+  "dataSource": "keyword_view: [keyword] PHRASE spend=$X.XX clicks=Y | [keyword] EXACT spend=$X.XX clicks=Y"
 }}
 
-If no duplicates exist with spend > $0 on both versions, skip this check silently — do not mention it.
+If no duplicates exist with spend > $0 on both, skip silently.
 
 ---
 
-STEP 1 — KEYWORD DEDUPLICATION — REQUIRED BEFORE EVERY SUGGESTION:
-The data includes an existing keyword list from keyword_view. Before recommending any ADD keyword action, check whether that keyword text already exists in the keyword_view data in any match type (EXACT, PHRASE, BROAD).
+RULE 4 — ZERO SPEND KEYWORD RULE:
+Never recommend PAUSE, MODIFY, or any action for a keyword where clicks = 0 AND spend = $0, regardless of impressions.
 
-Rules:
-- If keyword exists in the same match type → skip it entirely, do not include it in keywordSuggestions
-- If keyword exists in a different match type AND there is a specific strategic reason to add the new match type → include it but note "already exists as [match type], adding [new match type] for [reason]"
-- If keyword does not exist in any match type → include normally
-
-Never recommend adding a keyword that is already active in the same match type in the account.
+Keywords with zero spend have zero impact on the account. Impressions alone do not justify action in a CPC campaign. Only flag keywords with actual spend > $0 and no conversion.
 
 ---
 
-STEP 2 — NEGATIVE KEYWORD RULES — CRITICAL:
-Only recommend EXCLUDE for a search term if ALL of the following are true:
-  1. spend > $0 — the term actually cost money
-  2. clicks > 0 — someone actually clicked on it
-  3. conversions = 0 — it did not convert
-  4. The term contains wrong-intent signals: attorney, lawyer, lawyers, attorneys, near me, free, pro bono, template, templates, legal advice, lawsuit, sue, court, mediators
+RULE 5 — EMAIL CAPTURE AS FUNNEL SIGNAL:
+The KLAVIYO METRICS section contains email captures from abandonment flows during the analysis period.
 
-NEVER recommend excluding a term where clicks = 0 and cost = $0. Impressions are free in CPC campaigns. Zero-click terms cost nothing and must not be flagged as waste.
+If total email captures > 0:
+  Calculate email_capture_rate = total_email_captures / total_clicks (if total_clicks > 0)
 
-Broad informational words like "rules", "guidelines", "laws", "regulations" are NOT negative keyword candidates on their own. They only become candidates if they appear in a clicked term that also contains wrong-intent signals.
+  Always include this in performanceSummary regardless of payment conversions:
+  "Email capture rate of [rate]% — [N] homeowner(s) entered the abandonment flow, confirming the free preview is compelling enough to generate leads. Abandonment flow is active and working."
 
-If no search terms meet all 4 criteria above, return an empty negativeKeywordSuggestions array. Never invent candidates.
+  In gradeImpact within campaignBrief, list email capture rate as a positive metric alongside CTR.
+
+  NEVER grade a period as purely negative when email captures exist. An email capture is a real person who saw value in the free preview. It is the most important leading indicator of future conversion.
+
+  A period with 1+ email captures and 0 payments is "early funnel working, payment conversion pending" — not "complete failure."
+
+If KLAVIYO METRICS shows data unavailable:
+  Note in performanceSummary: "Klaviyo capture data unavailable for this period — email funnel metrics excluded from analysis."
 
 ---
 
-STEP 3 — AD COPY CONSTRAINTS — enforce on every suggestion:
+RULE 6 — AD COPY CONSTRAINTS:
+Users ALREADY HAVE a violation. Never imply prevention.
 
-PRODUCT CONTEXT: Users already have an HOA violation, fine, notice, or collections threat. They need to RESPOND to something they already received. Never imply the product prevents violations or represents them legally.
+FORBIDDEN in any headline or description:
+  - Violation prevention: "Stop HOA Violations", "Prevent fines", "Avoid violations"
+  - Legal representation: "legal help", "legal service", "attorneys", "lawyers", "legal advice"
+  - Attorney replacement: "no attorney needed", "without a lawyer", "handle without an attorney", "without an attorney" in any form
 
-NEVER suggest copy containing:
-  - Violation prevention language: "Stop HOA Violations", "Prevent fines", "Avoid violations"
-  - Legal representation language: "legal help", "legal service", "attorney", "lawyer", "legal advice"
-  - Attorney replacement language: "no attorney needed", "without a lawyer", "handle without an attorney", "replaces legal counsel"
+ACCEPTABLE framing:
+  - "Handle it yourself" / "Fight it yourself"
+  - "Skip the attorney fees" (cost comparison, not legal claim)
+  - "Respond to your HOA violation"
+  - "Free preview first" / "See before you pay"
+  - "$49 flat fee" (price clarity)
 
-ALWAYS frame copy around:
-  - Responding to something already received
-  - Understanding what a notice or fine means
-  - Free preview as zero-risk first step
-  - $49 flat fee as cost clarity vs hourly legal fees
-  - Self-serve empowerment: "handle it yourself", "respond yourself", "fight it yourself"
-  - "Skip the attorney fees" is acceptable — cost comparison without implying legal equivalence
+CHARACTER LIMITS — these are hard limits, not guidelines:
+  Headlines: 30 characters maximum (count spaces + punctuation)
+  Descriptions: 90 characters maximum
+  Callouts: 25 characters maximum
 
-GOOGLE ADS CHARACTER LIMITS — hard limits, not guidelines:
-  Headlines: 30 characters maximum including spaces
-  Descriptions: 90 characters maximum including spaces
-  Callouts: 25 characters maximum including spaces
+Count every character in every suggestion before including it. If it exceeds the limit, rewrite until it fits. Never output a suggestion that exceeds these limits.
 
-Count every character before finalizing a suggestion. If a suggestion exceeds its limit, rewrite it until it fits. Never output a suggestion that violates these limits. A shorter accurate headline beats a longer one that gets truncated or rejected by Google.
+Also check existing ad copy in the RSA data for typos or broken text. Flag any headline or description where the text appears cut off, grammatically broken, or contains obvious errors.
 
 Use type "headline" or "description". Set current to the text being replaced (or null if brand new). Set suggested to the new text.
 
 ---
 
-STEP 4 — EMAIL CAPTURE AS FUNNEL SIGNAL — include when Klaviyo data is present:
-If total klaviyo captures > 0 during the analysis period:
-  Calculate email_capture_rate = klaviyo_captures / total_clicks
+RULE 7 — AD SCHEDULING AUDIT:
+When hour_of_day data is present, calculate:
 
-  If email_capture_rate >= 0.05 (5% or higher):
-    - Include as a POSITIVE signal in performanceSummary
-    - Phrase: "Email capture rate of X% from abandonment flows indicates the free preview is compelling. Leads are entering the funnel even without payment conversion."
-    - Add to periodInsights: emailCaptureRate (as decimal), emailCapturesTotal (integer), abandonmentFlowActive (bool)
+overnight_hours = [22, 23, 0, 1, 2, 3, 4, 5, 6]
+overnight_impressions = sum of impressions in those hours
+overnight_pct = overnight_impressions / total_impressions
 
-  Never grade a period as purely negative if email captures exist. Email capture is the intermediate conversion event between click and payment — it is meaningful funnel progress.
-
-  In gradeImpact within campaignBrief, note email capture rate alongside CTR as a positive contributing metric.
-
----
-
-STEP 5 — AD SCHEDULING AUDIT — run when hour_of_day data is present:
-Analyze impressions by hour.
-
-Define overnight hours as: 10PM, 11PM, 12AM, 1AM, 2AM, 3AM, 4AM, 5AM, 6AM
-
-Calculate:
-  overnight_impressions = sum of impressions in overnight hours
-  total_impressions = sum of all hourly impressions
-  overnight_pct = overnight_impressions / total_impressions
-
-If overnight_pct > 0.10 (more than 10% overnight):
+If overnight_pct > 0.10:
   Add to generalRecommendations:
   {{
-    "recommendation": "Set ad schedule to 7AM-9PM only. [X]% of impressions are occurring overnight (10PM-6AM). Homeowners making $49 decisions are asleep during these hours. These impressions accumulate low-engagement signals that reduce Quality Score without driving conversions. Peak impression hours are [list top 3 hours from data] - concentrate budget there.",
+    "recommendation": "Set ad schedule to 7AM-9PM only. [pct]% of impressions ([overnight_impressions] of [total]) occur overnight (10PM-6AM) when homeowners making $49 decisions are asleep. These accumulate low-engagement signals that reduce Quality Score without driving conversions. Peak hours are [top 3 hours by impression volume] — concentrate budget there.",
     "category": "targeting",
     "priority": "high",
-    "expectedImpact": "Redirect [X]% of wasted overnight budget to proven peak hours, improve Quality Score",
-    "dataSource": "hour_of_day data: overnight impressions [X] of [total] total"
+    "expectedImpact": "Redirect [pct]% of overnight budget to peak hours, improve Quality Score",
+    "dataSource": "hour_of_day: [overnight_impressions] overnight impressions of [total] total"
   }}
 
 ---
 
-STEP 6 — GENERAL RECOMMENDATIONS:
-Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items. Each must have a category.
+RULE 8 — BUDGET PHASE AWARENESS:
+The campaign uses a deliberate phased budget approach:
+  Days 1-14:  $5/day — traffic quality validation phase
+  Days 15-28: $10/day — scale only if traffic is clean
+  Reserve:    held back for negative keyword adjustments
+
+To determine campaign age, use the earliest date in the data where spend > $0 vs the analysis end date.
+
+If campaign_age_days < 14:
+  DO NOT recommend increasing daily budget. Underspend in the first 14 days is intentional strategy.
+
+  If a budget recommendation would otherwise be triggered, replace it with:
+  {{
+    "recommendation": "Campaign is in validation phase (day [campaign_age_days] of 14). Hold budget at $5/day. Budget increase trigger: day 14 reached AND search terms show <20% wrong-intent clicks AND at least 1 confirmed case start.",
+    "category": "budget",
+    "priority": "low",
+    "expectedImpact": "Prevents premature scaling before traffic quality is confirmed",
+    "dataSource": "campaign time_series: first spend date [first_date], analysis end [end_date], age [N] days"
+  }}
+
+If campaign_age_days >= 14 AND traffic is clean:
+  Then and only then evaluate whether budget increase is warranted based on conversion data.
 
 ---
 
-STEP 7 — CITATION ENFORCEMENT — non-negotiable:
-Every item in negativeKeywordSuggestions, keywordSuggestions, adCopySuggestions, and generalRecommendations must include a dataSource field populated with a specific verbatim value from the provided data.
+RULE 9 — CITATION ENFORCEMENT (non-negotiable):
+Every item in negativeKeywordSuggestions, keywordSuggestions, adCopySuggestions, and generalRecommendations MUST have a dataSource field containing specific verbatim values from the provided data.
 
-Acceptable dataSource formats:
-  - "search_term_view: term=[X], clicks=[Y], spend=$[Z]"
-  - "keyword_view: [keyword] [match type] clicks=[Y] spend=$[Z]"
-  - "hour_of_day: overnight=[X] impressions of [total] total"
-  - "campaign metrics: CTR=[X]%, CPC=$[Y], clicks=[Z]"
+Required format examples:
+  "search_term_view: term='hoa lawyers near me', clicks=3, spend=$8.15, conversions=0"
+  "keyword_view: 'fighting hoa violations' PHRASE spend=$8.15 clicks=3 | EXACT spend=$2.29 clicks=1"
+  "hour_of_day: overnight impressions 21 of 138 total (15.2%)"
+  "campaign metrics: CTR=5.71%, CPC=$2.87, clicks=8, impressions=140"
 
-NOT acceptable:
-  - "campaign data"
-  - "performance analysis"
-  - "based on account trends"
-  - Any vague reference without specific numbers
+NEVER use vague sources like:
+  "campaign data", "performance analysis", "account trends", "historical data"
 
-If you cannot populate dataSource with a real verbatim value from the data provided, remove the item entirely. Fewer accurate recommendations always beat more hallucinated ones. This rule applies even if the result is an empty array.'''
+If you cannot cite a specific number from the provided data, remove the recommendation entirely. Zero hallucinated recommendations is the goal. Fewer accurate items always beats more invented ones.
+
+---
+
+GENERAL RECOMMENDATIONS:
+Provide strategic advice on budget, bidding, targeting, or landing page based on the performance data. Must have at least 3 items. Each must have a category.'''
+
 
                 response_text = call_claude_api(prompt, system_prompt, 8192, model='claude-opus-4-6')
                 # Strip markdown fences if present, then find the JSON object
