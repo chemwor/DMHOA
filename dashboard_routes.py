@@ -651,7 +651,7 @@ def get_klaviyo_data():
                                         'click_rate',
                                     ],
                                     'filter': f'equals(flow_id,"{flow_id}")',
-                                    'group_by': ['flow_id'],
+                                    'group_by': ['flow_message_id', 'flow_id'],
                                 }
                             }
                         },
@@ -660,14 +660,24 @@ def get_klaviyo_data():
                     if report_response.ok:
                         report_data = report_response.json()
                         results = report_data.get('data', {}).get('attributes', {}).get('results', [])
+                        logger.info(f'Flow {flow_name} ({flow_id}): got {len(results)} result rows')
                         if results:
-                            row = results[0].get('statistics', {})
-                            stats['sends'] = row.get('recipients', 0) or 0
-                            stats['opens'] = row.get('opens_unique', 0) or 0
-                            stats['clicks'] = row.get('clicks_unique', 0) or 0
-                            stats['deliveryRate'] = round((row.get('delivery_rate', 0) or 0) * 100, 1)
-                            stats['openRate'] = round((row.get('open_rate', 0) or 0) * 100, 1)
-                            stats['clickRate'] = round((row.get('click_rate', 0) or 0) * 100, 1)
+                            # Aggregate across all flow messages
+                            total_sends = 0
+                            total_opens = 0
+                            total_clicks = 0
+                            for row in results:
+                                row_stats = row.get('statistics', {})
+                                total_sends += int(row_stats.get('recipients', 0) or 0)
+                                total_opens += int(row_stats.get('opens_unique', 0) or 0)
+                                total_clicks += int(row_stats.get('clicks_unique', 0) or 0)
+                            stats['sends'] = total_sends
+                            stats['opens'] = total_opens
+                            stats['clicks'] = total_clicks
+                            # Compute rates from aggregated totals
+                            stats['openRate'] = round((total_opens / total_sends * 100), 1) if total_sends > 0 else 0
+                            stats['clickRate'] = round((total_clicks / total_sends * 100), 1) if total_sends > 0 else 0
+                            stats['deliveryRate'] = 0  # Not available from this endpoint
                     else:
                         logger.warning(f'Flow report API returned {report_response.status_code} for flow {flow_id}: {report_response.text[:200]}')
                 except Exception as e:
