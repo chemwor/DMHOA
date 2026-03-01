@@ -797,8 +797,9 @@ def get_google_ads_data():
                     metrics.search_top_impression_share
                 FROM keyword_view
                 WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
-                    AND campaign.status != 'REMOVED'
+                    AND campaign.status = 'ENABLED'
                     AND ad_group_criterion.status != 'REMOVED'
+                    AND metrics.impressions > 0
                 ORDER BY metrics.clicks DESC
                 LIMIT 50
             """
@@ -855,7 +856,8 @@ def get_google_ads_data():
                     metrics.conversions
                 FROM search_term_view
                 WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
-                    AND campaign.status != 'REMOVED'
+                    AND campaign.status = 'ENABLED'
+                    AND metrics.impressions > 0
                 ORDER BY metrics.clicks DESC
                 LIMIT 50
             """
@@ -899,9 +901,10 @@ def get_google_ads_data():
                     metrics.conversions
                 FROM ad_group_ad
                 WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
-                    AND campaign.status != 'REMOVED'
+                    AND campaign.status = 'ENABLED'
                     AND ad_group_ad.status != 'REMOVED'
                     AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+                    AND metrics.impressions > 0
                 ORDER BY metrics.clicks DESC
                 LIMIT 20
             """
