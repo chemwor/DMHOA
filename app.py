@@ -2194,7 +2194,7 @@ def save_case():
         case_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
         case_params = {
             'token': f'eq.{token}',
-            'select': 'id,payload,created_at'
+            'select': 'id,payload,created_at,status'
         }
         case_headers = supabase_headers()
 
@@ -2210,6 +2210,12 @@ def save_case():
 
         result = None
 
+        # Determine case status from payload
+        def _derive_case_status(p):
+            if p.get('completionPhase') == 'simple':
+                return 'quick_preview'
+            return 'full_preview'
+
         if existing_case:
             # Case exists - update with merged payload
             existing_payload = existing_case.get('payload') or {}
@@ -2221,10 +2227,18 @@ def save_case():
 
             merged_payload = {**existing_payload, **payload}
 
+            # Derive status from merged payload — don't overwrite 'paid' or 'pending_payment'
+            current_status = existing_case.get('status', '')
+            if current_status not in ('paid', 'pending_payment'):
+                new_status = _derive_case_status(merged_payload)
+            else:
+                new_status = current_status
+
             update_url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
             update_params = {'token': f'eq.{token}'}
             update_data = {
                 'payload': merged_payload,
+                'status': new_status,
                 'updated_at': datetime.utcnow().isoformat()
             }
             update_headers = supabase_headers()
@@ -2247,7 +2261,7 @@ def save_case():
             insert_data = {
                 'token': token,
                 'payload': payload,
-                'status': 'new',
+                'status': _derive_case_status(payload),
                 'unlocked': False,
                 'created_at': datetime.utcnow().isoformat(),
                 'updated_at': datetime.utcnow().isoformat()
