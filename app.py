@@ -2077,9 +2077,11 @@ def create_case_in_supabase(case_data: Dict) -> Tuple[bool, Optional[str], Optio
                  case_data.get('user_email'))
 
         # Prepare case data according to the actual table structure
+        gclid = case_data.get('gclid')
         case_payload = {
             'token': token,
             'email': email,
+            'gclid': gclid,
             'payload': case_data,  # Store the entire case data as JSONB in payload column
             'status': 'preview'  # Set default status
         }

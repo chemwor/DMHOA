@@ -3,6 +3,7 @@
 
 import os
 import json
+import hashlib
 import logging
 import math
 import time
@@ -1117,6 +1118,333 @@ def get_google_ads_data():
             'message': str(e),
             'isMockData': True,
         }), 500
+
+
+# ============================================================================
+# GOOGLE ADS — CUSTOMER MATCH (Similar Audiences)
+# ============================================================================
+
+def _google_ads_api_headers(access_token: str) -> Dict[str, str]:
+    """Common headers for Google Ads API mutate requests."""
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN,
+        'Content-Type': 'application/json',
+    }
+    if GOOGLE_ADS_LOGIN_CUSTOMER_ID:
+        headers['login-customer-id'] = GOOGLE_ADS_LOGIN_CUSTOMER_ID
+    return headers
+
+
+def _hash_email(email: str) -> str:
+    """Normalize and SHA-256 hash an email for Google Ads."""
+    return hashlib.sha256(email.strip().lower().encode('utf-8')).hexdigest()
+
+
+@dashboard_bp.route('/api/dashboard/google-ads/customer-match', methods=['POST', 'OPTIONS'])
+def google_ads_customer_match():
+    """Upload lead emails to Google Ads as a Customer Match list for Similar Audiences."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    has_credentials = all([
+        GOOGLE_ADS_DEVELOPER_TOKEN, GOOGLE_ADS_CUSTOMER_ID,
+        GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_REFRESH_TOKEN
+    ])
+    if not has_credentials:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 400
+
+    try:
+        access_token = get_google_ads_access_token()
+        if not access_token:
+            raise Exception('Failed to get Google Ads access token')
+
+        headers = _google_ads_api_headers(access_token)
+        customer_id = GOOGLE_ADS_CUSTOMER_ID.replace('-', '')
+
+        # 1. Fetch all lead emails from Supabase
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        params = {'select': 'email', 'email': 'neq.null', 'order': 'created_at.desc'}
+        resp = requests.get(url, params=params, headers=supabase_headers(), timeout=TIMEOUT)
+
+        if not resp.ok:
+            raise Exception(f'Failed to fetch emails from Supabase: {resp.text}')
+
+        cases = resp.json() or []
+        emails = list({c['email'].strip().lower() for c in cases
+                       if c.get('email') and c['email'].strip().lower() not in
+                       [e.lower() for e in EXCLUDED_EMAILS]})
+
+        if not emails:
+            return jsonify({'error': 'No emails found to upload', 'count': 0}), 400
+
+        # 2. Check if user list already exists (search by name)
+        list_name = 'DMHOA Lead Signups'
+        search_query = f"""
+            SELECT user_list.id, user_list.name, user_list.size_for_display
+            FROM user_list
+            WHERE user_list.name = '{list_name}'
+        """
+        try:
+            existing = query_google_ads(customer_id, access_token, search_query)
+            user_list_resource = None
+            if existing:
+                user_list_id = existing[0].get('userList', {}).get('id')
+                if user_list_id:
+                    user_list_resource = f'customers/{customer_id}/userLists/{user_list_id}'
+        except Exception:
+            user_list_resource = None
+
+        # 3. Create user list if it doesn't exist
+        if not user_list_resource:
+            create_url = f'{GOOGLE_ADS_API_BASE}/customers/{customer_id}/userLists:mutate'
+            create_payload = {
+                'operations': [{
+                    'create': {
+                        'name': list_name,
+                        'description': 'DisputeMyHOA lead signups for Similar Audiences targeting',
+                        'membershipLifeSpan': 540,
+                        'crmBasedUserList': {
+                            'uploadKeyType': 'CONTACT_INFO',
+                            'dataSourceType': 'FIRST_PARTY'
+                        }
+                    }
+                }]
+            }
+            create_resp = requests.post(create_url, headers=headers, json=create_payload, timeout=TIMEOUT)
+            if not create_resp.ok:
+                raise Exception(f'Failed to create user list: {create_resp.text}')
+
+            result = create_resp.json()
+            user_list_resource = result['results'][0]['resourceName']
+            logger.info(f'Created Customer Match list: {user_list_resource}')
+
+        # 4. Create offline user data job
+        job_url = f'{GOOGLE_ADS_API_BASE}/customers/{customer_id}/offlineUserDataJobs:create'
+        job_payload = {
+            'job': {
+                'type': 'CUSTOMER_MATCH_USER_LIST',
+                'customerMatchUserListMetadata': {
+                    'userList': user_list_resource
+                }
+            }
+        }
+        job_resp = requests.post(job_url, headers=headers, json=job_payload, timeout=TIMEOUT)
+        if not job_resp.ok:
+            raise Exception(f'Failed to create data job: {job_resp.text}')
+
+        job_resource = job_resp.json()['resourceName']
+
+        # 5. Add hashed emails in batches of 100
+        batch_size = 100
+        total_uploaded = 0
+
+        for i in range(0, len(emails), batch_size):
+            batch = emails[i:i + batch_size]
+            operations = [{
+                'create': {
+                    'userIdentifiers': [{
+                        'hashedEmail': _hash_email(email)
+                    }]
+                }
+            } for email in batch]
+
+            add_url = f'{GOOGLE_ADS_API_BASE}/{job_resource}:addOperations'
+            add_payload = {'operations': operations}
+            add_resp = requests.post(add_url, headers=headers, json=add_payload, timeout=TIMEOUT)
+
+            if not add_resp.ok:
+                logger.error(f'Failed to add batch {i}: {add_resp.text}')
+                continue
+
+            total_uploaded += len(batch)
+
+        # 6. Run the job
+        run_url = f'{GOOGLE_ADS_API_BASE}/{job_resource}:run'
+        run_resp = requests.post(run_url, headers=headers, timeout=TIMEOUT)
+
+        if not run_resp.ok:
+            raise Exception(f'Failed to run data job: {run_resp.text}')
+
+        logger.info(f'Customer Match: uploaded {total_uploaded} emails, job running')
+
+        return jsonify({
+            'success': True,
+            'emailsUploaded': total_uploaded,
+            'totalEmails': len(emails),
+            'listName': list_name,
+            'userListResource': user_list_resource,
+            'jobResource': job_resource,
+            'message': f'Uploaded {total_uploaded} lead emails to Google Ads. '
+                       f'Similar Audiences will be available within 24-48 hours.'
+        })
+
+    except Exception as e:
+        logger.error(f'Customer Match error: {str(e)}')
+        return jsonify({'error': 'Failed to upload customer match list', 'message': str(e)}), 500
+
+
+# ============================================================================
+# GOOGLE ADS — OFFLINE CONVERSION IMPORT
+# ============================================================================
+
+@dashboard_bp.route('/api/dashboard/google-ads/offline-conversions', methods=['POST', 'OPTIONS'])
+def google_ads_offline_conversions():
+    """Upload paid cases as offline conversions to Google Ads for bidding optimization."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    has_credentials = all([
+        GOOGLE_ADS_DEVELOPER_TOKEN, GOOGLE_ADS_CUSTOMER_ID,
+        GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_REFRESH_TOKEN
+    ])
+    if not has_credentials:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 400
+
+    try:
+        access_token = get_google_ads_access_token()
+        if not access_token:
+            raise Exception('Failed to get Google Ads access token')
+
+        headers = _google_ads_api_headers(access_token)
+        customer_id = GOOGLE_ADS_CUSTOMER_ID.replace('-', '')
+
+        # 1. Fetch paid cases from Supabase
+        url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
+        params = {
+            'select': 'id,token,email,created_at,updated_at,amount_total,gclid',
+            'status': 'eq.paid',
+            'email': 'neq.null',
+            'order': 'created_at.desc',
+            'limit': '1000'
+        }
+        resp = requests.get(url, params=params, headers=supabase_headers(), timeout=TIMEOUT)
+
+        if not resp.ok:
+            raise Exception(f'Failed to fetch paid cases: {resp.text}')
+
+        cases = resp.json() or []
+        cases = [c for c in cases if c.get('email') and
+                 c['email'].strip().lower() not in [e.lower() for e in EXCLUDED_EMAILS]]
+
+        if not cases:
+            return jsonify({'error': 'No paid cases found to upload', 'count': 0}), 400
+
+        # 2. Ensure the conversion action exists — search for it
+        conversion_action_name = 'Paid Case - Offline Import'
+        search_query = f"""
+            SELECT conversion_action.id, conversion_action.name
+            FROM conversion_action
+            WHERE conversion_action.name = '{conversion_action_name}'
+        """
+        conversion_action_resource = None
+        try:
+            results = query_google_ads(customer_id, access_token, search_query)
+            if results:
+                ca_id = results[0].get('conversionAction', {}).get('id')
+                if ca_id:
+                    conversion_action_resource = f'customers/{customer_id}/conversionActions/{ca_id}'
+        except Exception:
+            pass
+
+        # 3. Create conversion action if it doesn't exist
+        if not conversion_action_resource:
+            create_url = f'{GOOGLE_ADS_API_BASE}/customers/{customer_id}/conversionActions:mutate'
+            create_payload = {
+                'operations': [{
+                    'create': {
+                        'name': conversion_action_name,
+                        'type': 'UPLOAD_CLICKS',
+                        'category': 'PURCHASE',
+                        'status': 'ENABLED',
+                        'valueSettings': {
+                            'defaultValue': 49.0,
+                            'defaultCurrencyCode': 'USD',
+                            'alwaysUseDefaultValue': False
+                        }
+                    }
+                }]
+            }
+            create_resp = requests.post(create_url, headers=headers, json=create_payload, timeout=TIMEOUT)
+            if not create_resp.ok:
+                raise Exception(f'Failed to create conversion action: {create_resp.text}')
+
+            result = create_resp.json()
+            conversion_action_resource = result['results'][0]['resourceName']
+            logger.info(f'Created conversion action: {conversion_action_resource}')
+
+        # 4. Build conversion list
+        conversions = []
+        for case in cases:
+            email = case['email'].strip().lower()
+            # Use updated_at (payment time) or created_at
+            conversion_time = case.get('updated_at') or case['created_at']
+            # Google Ads needs format: yyyy-mm-dd hh:mm:ss+|-hh:mm
+            try:
+                dt = datetime.fromisoformat(conversion_time.replace('Z', '+00:00'))
+                formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S+00:00')
+            except Exception:
+                formatted_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S+00:00')
+
+            amount_cents = case.get('amount_total') or 4900
+            amount_dollars = amount_cents / 100.0
+
+            conversion = {
+                'conversionAction': conversion_action_resource,
+                'conversionDateTime': formatted_time,
+                'conversionValue': amount_dollars,
+                'currencyCode': 'USD',
+                'orderId': case.get('token', f"case_{case['id']}"),
+            }
+
+            # Prefer gclid if available, otherwise use email for enhanced conversions
+            if case.get('gclid'):
+                conversion['gclid'] = case['gclid']
+            else:
+                conversion['userIdentifiers'] = [{
+                    'hashedEmail': _hash_email(email)
+                }]
+
+            conversions.append(conversion)
+
+        # 5. Upload conversions
+        upload_url = f'{GOOGLE_ADS_API_BASE}/customers/{customer_id}:uploadClickConversions'
+        upload_payload = {
+            'conversions': conversions,
+            'partialFailure': True
+        }
+        upload_resp = requests.post(upload_url, headers=headers, json=upload_payload, timeout=(5, 120))
+
+        if not upload_resp.ok:
+            raise Exception(f'Failed to upload conversions: {upload_resp.text}')
+
+        result = upload_resp.json()
+        partial_errors = result.get('partialFailureError')
+        uploaded_count = len(conversions)
+        error_count = 0
+
+        if partial_errors:
+            error_details = partial_errors.get('details', [])
+            error_count = len(error_details)
+            uploaded_count -= error_count
+            logger.warning(f'Offline conversions: {error_count} partial failures')
+
+        logger.info(f'Offline conversions: uploaded {uploaded_count} of {len(conversions)}')
+
+        return jsonify({
+            'success': True,
+            'conversionsUploaded': uploaded_count,
+            'totalCases': len(cases),
+            'errors': error_count,
+            'conversionAction': conversion_action_name,
+            'conversionActionResource': conversion_action_resource,
+            'message': f'Uploaded {uploaded_count} paid case conversions to Google Ads. '
+                       f'Attribution data will be available within 24 hours.'
+        })
+
+    except Exception as e:
+        logger.error(f'Offline conversion import error: {str(e)}')
+        return jsonify({'error': 'Failed to upload offline conversions', 'message': str(e)}), 500
 
 
 # ============================================================================
