@@ -4277,21 +4277,29 @@ def _fetch_openai_usage_metrics() -> Optional[Dict]:
         return None
 
 
-def _fetch_claude_usage_metrics() -> Optional[Dict]:
-    """Fetch MTD Claude usage from Supabase dmhoa_claude_usage table."""
+def _fetch_claude_usage_metrics(period: str = 'month') -> Optional[Dict]:
+    """Fetch Claude usage from Supabase dmhoa_claude_usage table for a given period."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return None
 
     try:
-        # Get first day of current month
         now = datetime.now()
-        month_start = now.replace(day=1).strftime('%Y-%m-%dT00:00:00')
+        if period == 'today':
+            period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == 'week':
+            period_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:  # month
+            period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        start_str = period_start.strftime('%Y-%m-%dT%H:%M:%S')
 
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/dmhoa_claude_usage",
             params={
-                'select': 'model,input_tokens,output_tokens,cost',
-                'created_at': f'gte.{month_start}',
+                'select': 'model,input_tokens,output_tokens,cost,created_at',
+                'created_at': f'gte.{start_str}',
+                'order': 'created_at.desc',
+                'limit': '5000',
             },
             headers=supabase_headers(),
             timeout=TIMEOUT
@@ -4302,34 +4310,24 @@ def _fetch_claude_usage_metrics() -> Optional[Dict]:
             return None
 
         rows = response.json()
-        total_cost = 0
-        total_input = 0
-        total_output = 0
+        total_cost = sum(r.get('cost', 0) for r in rows)
+        total_input = sum(r.get('input_tokens', 0) for r in rows)
+        total_output = sum(r.get('output_tokens', 0) for r in rows)
         calls = len(rows)
-        today_cost = 0
+
+        # Today's cost
         today_str = now.strftime('%Y-%m-%d')
+        today_cost = sum(r.get('cost', 0) for r in rows
+                         if r.get('created_at', '').startswith(today_str))
 
-        for row in rows:
-            total_cost += row.get('cost', 0)
-            total_input += row.get('input_tokens', 0)
-            total_output += row.get('output_tokens', 0)
-
-        # Get today's cost separately
-        today_response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/dmhoa_claude_usage",
-            params={
-                'select': 'cost',
-                'created_at': f'gte.{today_str}T00:00:00',
-            },
-            headers=supabase_headers(),
-            timeout=TIMEOUT
-        )
-        if today_response.ok:
-            today_rows = today_response.json()
-            today_cost = sum(r.get('cost', 0) for r in today_rows)
-
-        days_in_month = max(now.day, 1)
-        avg_daily = total_cost / days_in_month if days_in_month > 0 else 0
+        # Average daily
+        if period == 'today':
+            num_days = 1
+        elif period == 'week':
+            num_days = 7
+        else:
+            num_days = max(now.day, 1)
+        avg_daily = total_cost / num_days if num_days > 0 else 0
 
         return {
             'mtd_cost': round(total_cost, 4),
@@ -5928,60 +5926,83 @@ def get_six_month_plan():
 
 @dashboard_bp.route('/api/dashboard/costs', methods=['GET', 'OPTIONS'])
 def get_costs():
-    """Aggregated cost tracking across all services."""
+    """Aggregated cost tracking across all services. Accepts ?period=today|week|month (default: month)."""
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
     try:
-        period = datetime.now().strftime('%Y-%m')
+        period = request.args.get('period', 'month')
+        if period not in ('today', 'week', 'month'):
+            period = 'month'
+
+        now = datetime.now()
+        if period == 'today':
+            num_days = 1
+            period_label = now.strftime('%Y-%m-%d')
+        elif period == 'week':
+            num_days = 7
+            start = now - timedelta(days=7)
+            period_label = f'{start.strftime("%m/%d")} - {now.strftime("%m/%d")}'
+        else:
+            num_days = max(now.day, 1)
+            period_label = now.strftime('%Y-%m')
 
         # Stripe revenue + fees
-        stripe_month = _fetch_stripe_metrics('month')
-        gross_revenue = stripe_month.get('revenue', 0)
-        txn_count = stripe_month.get('transactions', 0)
+        stripe_data = _fetch_stripe_metrics(period)
+        gross_revenue = stripe_data.get('revenue', 0)
+        txn_count = stripe_data.get('transactions', 0)
         stripe_fees = round(txn_count * 0.30 + gross_revenue * 0.029, 2)
         net_revenue = round(gross_revenue - stripe_fees, 2)
 
-        # Google Ads — month to date
-        ads = _fetch_google_ads_metrics('month') or {}
-        ads_mtd = ads.get('spend', 0)
+        # Google Ads
+        ads = _fetch_google_ads_metrics(period) or {}
+        ads_spend = ads.get('spend', 0)
 
         # OpenAI
         openai = _fetch_openai_usage_metrics() or {}
         openai_today = openai.get('today_cost', 0)
         openai_avg = openai.get('avg_daily_7d', 0)
-        days_in_month = datetime.now().day
-        openai_mtd = round(openai_avg * days_in_month, 2)
+        if period == 'today':
+            openai_spend = openai_today
+        elif period == 'week':
+            openai_spend = round(openai_avg * 7, 2)
+        else:
+            openai_spend = round(openai_avg * num_days, 2)
 
         # Claude / Anthropic
-        claude = _fetch_claude_usage_metrics() or {}
-        claude_mtd = claude.get('mtd_cost', 0)
+        claude = _fetch_claude_usage_metrics(period) or {}
+        claude_spend = claude.get('mtd_cost', 0)
         claude_today = claude.get('today_cost', 0)
 
-        # Fixed costs (estimates)
-        heroku_mtd = 7
-        supabase_mtd = 0
-        tools_mtd = 42  # domain, email, misc tools
+        # Fixed costs — pro-rate by period
+        heroku_monthly = 7
+        supabase_monthly = 0
+        tools_monthly = 42  # domain, email, misc tools
+        daily_fixed = (heroku_monthly + supabase_monthly + tools_monthly) / 30
+        heroku_spend = round(heroku_monthly * num_days / 30, 2)
+        supabase_spend = round(supabase_monthly * num_days / 30, 2)
+        tools_spend = round(tools_monthly * num_days / 30, 2)
 
-        total_costs = round(ads_mtd + openai_mtd + claude_mtd + heroku_mtd + supabase_mtd + tools_mtd + stripe_fees, 2)
+        total_costs = round(ads_spend + openai_spend + claude_spend + heroku_spend + supabase_spend + tools_spend + stripe_fees, 2)
         profit = round(net_revenue - total_costs + stripe_fees, 2)  # stripe fees already deducted from net
         margin_pct = round(profit / gross_revenue, 3) if gross_revenue > 0 else 0
-        burn_rate_daily = round(total_costs / max(days_in_month, 1), 2)
+        burn_rate_daily = round(total_costs / max(num_days, 1), 2)
 
         return jsonify({
-            'period': period,
+            'period': period_label,
+            'periodType': period,
             'revenue': {
                 'gross': gross_revenue,
                 'stripe_fees': stripe_fees,
                 'net': net_revenue,
             },
             'costs': {
-                'google_ads': {'mtd': ads_mtd, 'daily_avg': round(ads_mtd / max(days_in_month, 1), 2)},
-                'openai_api': {'mtd': openai_mtd, 'today': openai_today},
-                'claude_api': {'mtd': claude_mtd, 'today': claude_today, 'total_calls': claude.get('total_calls', 0)},
-                'heroku': {'mtd': heroku_mtd},
-                'supabase': {'mtd': supabase_mtd},
-                'tools': {'mtd': tools_mtd},
+                'google_ads': {'mtd': ads_spend, 'daily_avg': round(ads_spend / max(num_days, 1), 2)},
+                'openai_api': {'mtd': openai_spend, 'today': openai_today},
+                'claude_api': {'mtd': claude_spend, 'today': claude_today, 'total_calls': claude.get('total_calls', 0)},
+                'heroku': {'mtd': heroku_spend},
+                'supabase': {'mtd': supabase_spend},
+                'tools': {'mtd': tools_spend},
                 'total': total_costs,
             },
             'margin': {
