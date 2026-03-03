@@ -5186,6 +5186,7 @@ def call_claude_sonnet(prompt, system_prompt='', max_retries=3):
             content = result.get('content', [])
             usage = result.get('usage', {})
             text = content[0]['text'] if content and content[0].get('type') == 'text' else ''
+            _log_claude_usage('claude-sonnet-4-5-20250929', usage.get('input_tokens', 0), usage.get('output_tokens', 0), 'call_claude_sonnet')
             return text, usage
 
         except requests.exceptions.Timeout:
@@ -5229,6 +5230,7 @@ def call_claude_sonnet_chat(messages, system_prompt='', max_retries=3):
             content = result.get('content', [])
             usage = result.get('usage', {})
             text = content[0]['text'] if content and content[0].get('type') == 'text' else ''
+            _log_claude_usage('claude-sonnet-4-5-20250929', usage.get('input_tokens', 0), usage.get('output_tokens', 0), 'call_claude_sonnet_chat')
             return text, usage
 
         except requests.exceptions.Timeout:
