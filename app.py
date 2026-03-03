@@ -104,6 +104,38 @@ def supabase_headers() -> Dict[str, str]:
     }
 
 
+CLAUDE_PRICING = {
+    'claude-sonnet-4-6': {'input': 0.003, 'output': 0.015},
+    'claude-sonnet-4-20250514': {'input': 0.003, 'output': 0.015},
+    'claude-sonnet-4-5-20250929': {'input': 0.003, 'output': 0.015},
+    'claude-haiku-4-5-20251001': {'input': 0.001, 'output': 0.005},
+    'default': {'input': 0.003, 'output': 0.015},
+}
+
+
+def _log_claude_usage(model: str, input_tokens: int, output_tokens: int, endpoint: str = ''):
+    """Log Claude API usage to Supabase for cost tracking."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    try:
+        pricing = CLAUDE_PRICING.get(model, CLAUDE_PRICING['default'])
+        cost = (input_tokens / 1000) * pricing['input'] + (output_tokens / 1000) * pricing['output']
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_claude_usage",
+            headers=supabase_headers(),
+            json={
+                'model': model,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'cost': round(cost, 6),
+                'endpoint': endpoint,
+            },
+            timeout=5
+        )
+    except Exception as e:
+        logger.warning(f'Failed to log Claude usage: {str(e)}')
+
+
 # ============================================================================
 # RECIPIENT EXTRACTION HELPERS
 # ============================================================================
@@ -154,6 +186,11 @@ Document: {clipped_text}"""
             return {}
 
         haiku_json = response.json()
+
+        # Log Claude usage
+        usage = haiku_json.get('usage', {})
+        _log_claude_usage('claude-haiku-4-5-20251001', usage.get('input_tokens', 0), usage.get('output_tokens', 0), 'recipient_extraction')
+
         content = haiku_json.get('content', [])
         if not content or content[0].get('type') != 'text':
             return {}
@@ -4143,6 +4180,11 @@ Do not include any text before or after the JSON. The response must be parseable
 
             # Parse Claude response
             claude_json = anthropic_response.json()
+
+            # Log Claude usage
+            usage = claude_json.get('usage', {})
+            _log_claude_usage('claude-sonnet-4-6', usage.get('input_tokens', 0), usage.get('output_tokens', 0), 'case_analysis')
+
             content = claude_json.get('content', [])
             if content and content[0].get('type') == 'text':
                 response_text = content[0].get('text', '')
@@ -4276,6 +4318,11 @@ Case analysis text:
 
                     if haiku_response and haiku_response.ok:
                         haiku_json = haiku_response.json()
+
+                        # Log Claude usage
+                        fine_usage = haiku_json.get('usage', {})
+                        _log_claude_usage('claude-haiku-4-5-20251001', fine_usage.get('input_tokens', 0), fine_usage.get('output_tokens', 0), 'fine_extraction')
+
                         haiku_content = haiku_json.get('content', [])
                         if haiku_content and haiku_content[0].get('type') == 'text':
                             fine_text = haiku_content[0].get('text', '').strip()
@@ -5078,6 +5125,11 @@ Generate a specific counter-letter responding directly to this HOA message. Addr
 
         # Parse response
         claude_json = anthropic_response.json()
+
+        # Log Claude usage
+        usage = claude_json.get('usage', {})
+        _log_claude_usage('claude-sonnet-4-6', usage.get('input_tokens', 0), usage.get('output_tokens', 0), 'email_exchange')
+
         content = claude_json.get('content', [])
         if content and content[0].get('type') == 'text':
             generated_response = content[0].get('text', '').strip()

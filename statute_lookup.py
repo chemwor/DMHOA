@@ -25,6 +25,38 @@ ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 # Request timeout
 TIMEOUT = (5, 30)
 
+# Claude pricing per 1K tokens (USD)
+CLAUDE_PRICING = {
+    'claude-haiku-4-5-20251001': {'input': 0.001, 'output': 0.005},
+    'default': {'input': 0.003, 'output': 0.015},
+}
+
+def _log_claude_usage(model, input_tokens, output_tokens, endpoint=''):
+    """Log Claude API usage to Supabase for cost tracking."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    try:
+        pricing = CLAUDE_PRICING.get(model, CLAUDE_PRICING['default'])
+        cost = (input_tokens / 1000) * pricing['input'] + (output_tokens / 1000) * pricing['output']
+        requests.post(
+            f'{SUPABASE_URL}/rest/v1/dmhoa_claude_usage',
+            headers={
+                'apikey': SUPABASE_SERVICE_ROLE_KEY,
+                'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+                'Content-Type': 'application/json',
+            },
+            json={
+                'model': model,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'cost': round(cost, 6),
+                'endpoint': endpoint,
+            },
+            timeout=5
+        )
+    except Exception as e:
+        logger.warning(f'Failed to log Claude usage: {str(e)}')
+
 # Valid violation categories
 VALID_CATEGORIES = {'violation', 'fine', 'lien', 'architectural'}
 
@@ -235,6 +267,11 @@ IMPORTANT:
         response.raise_for_status()
 
         result = response.json()
+
+        # Log Claude usage
+        usage = result.get('usage', {})
+        _log_claude_usage('claude-haiku-4-5-20251001', usage.get('input_tokens', 0), usage.get('output_tokens', 0), 'statute_lookup')
+
         content = result.get('content', [])
 
         if not content:
