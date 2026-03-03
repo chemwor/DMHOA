@@ -1933,10 +1933,31 @@ def get_lighthouse_data():
             'key': GOOGLE_PAGESPEED_API_KEY,
         }
 
-        response = requests.get(PAGESPEED_API_URL, params=params, timeout=(10, 60))
+        try:
+            response = requests.get(PAGESPEED_API_URL, params=params, timeout=(10, 60))
+        except requests.exceptions.RequestException as req_err:
+            logger.warning(f'PageSpeed API request failed: {req_err}')
+            response = None
 
-        if not response.ok:
-            raise Exception(f'PageSpeed API error: {response.status_code}')
+        if not response or not response.ok:
+            status = response.status_code if response else 'timeout'
+            logger.warning(f'PageSpeed API returned {status}, returning stale cache or empty data')
+            # Try returning stale cache regardless of age
+            if SUPABASE_URL:
+                stale = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/api_cache",
+                    params={'cache_key': f'eq.{cache_key}', 'select': 'data,updated_at'},
+                    headers=supabase_headers(), timeout=TIMEOUT
+                )
+                if stale.ok and stale.json():
+                    stale_data = stale.json()[0]['data']
+                    updated_at = datetime.fromisoformat(stale_data.get('lastTested', datetime.now().isoformat()).replace('Z', '+00:00'))
+                    return jsonify({**stale_data, 'fromCache': True, 'stale': True,
+                                    'message': f'PageSpeed API unavailable ({status}). Showing last cached data.'})
+            return jsonify({
+                'performanceScore': 0, 'seoScore': 0, 'accessibilityScore': 0, 'bestPracticesScore': 0,
+                'isMockData': True, 'message': f'PageSpeed API unavailable ({status}). Try again later.',
+            })
 
         api_data = response.json()
         lighthouse = api_data.get('lighthouseResult', {})
@@ -1987,10 +2008,11 @@ def get_lighthouse_data():
     except Exception as e:
         logger.error(f'Lighthouse API error: {str(e)}')
         return jsonify({
+            'performanceScore': 0, 'seoScore': 0, 'accessibilityScore': 0, 'bestPracticesScore': 0,
             'error': 'Failed to fetch Lighthouse data',
             'message': str(e),
             'isMockData': True,
-        }), 500
+        })
 
 
 # ============================================================================
