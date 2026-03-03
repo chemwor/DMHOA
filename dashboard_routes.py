@@ -1162,18 +1162,31 @@ def google_ads_customer_match():
         headers = _google_ads_api_headers(access_token)
         customer_id = GOOGLE_ADS_CUSTOMER_ID.replace('-', '')
 
-        # 1. Fetch all lead emails from Supabase
+        # 1. Fetch all lead emails from Supabase (top-level + payload fallback)
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
-        params = {'select': 'email', 'email': 'neq.null', 'order': 'created_at.desc'}
+        params = {'select': 'email,payload', 'order': 'created_at.desc', 'limit': '5000'}
         resp = requests.get(url, params=params, headers=supabase_headers(), timeout=TIMEOUT)
 
         if not resp.ok:
             raise Exception(f'Failed to fetch emails from Supabase: {resp.text}')
 
         cases = resp.json() or []
-        emails = list({c['email'].strip().lower() for c in cases
-                       if c.get('email') and c['email'].strip().lower() not in
-                       [e.lower() for e in EXCLUDED_EMAILS]})
+        excluded = {e.lower() for e in EXCLUDED_EMAILS}
+        emails_set = set()
+        for c in cases:
+            email = (c.get('email') or '').strip()
+            if not email:
+                # Fallback: extract from payload JSONB
+                payload = c.get('payload') or {}
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except Exception:
+                        payload = {}
+                email = (payload.get('email') or payload.get('ownerEmail') or '').strip()
+            if email and email.lower() not in excluded:
+                emails_set.add(email.lower())
+        emails = list(emails_set)
 
         if not emails:
             return jsonify({'error': 'No emails found to upload', 'count': 0}), 400
@@ -1309,12 +1322,11 @@ def google_ads_offline_conversions():
         headers = _google_ads_api_headers(access_token)
         customer_id = GOOGLE_ADS_CUSTOMER_ID.replace('-', '')
 
-        # 1. Fetch paid cases from Supabase
+        # 1. Fetch paid cases from Supabase (with payload fallback for email)
         url = f"{SUPABASE_URL}/rest/v1/dmhoa_cases"
         params = {
-            'select': 'id,token,email,created_at,updated_at,amount_total,gclid',
+            'select': 'id,token,email,payload,created_at,updated_at,amount_total,gclid',
             'status': 'eq.paid',
-            'email': 'neq.null',
             'order': 'created_at.desc',
             'limit': '1000'
         }
@@ -1323,9 +1335,22 @@ def google_ads_offline_conversions():
         if not resp.ok:
             raise Exception(f'Failed to fetch paid cases: {resp.text}')
 
-        cases = resp.json() or []
-        cases = [c for c in cases if c.get('email') and
-                 c['email'].strip().lower() not in [e.lower() for e in EXCLUDED_EMAILS]]
+        excluded = {e.lower() for e in EXCLUDED_EMAILS}
+        raw_cases = resp.json() or []
+        cases = []
+        for c in raw_cases:
+            email = (c.get('email') or '').strip()
+            if not email:
+                payload = c.get('payload') or {}
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except Exception:
+                        payload = {}
+                email = (payload.get('email') or payload.get('ownerEmail') or '').strip()
+            if email and email.lower() not in excluded:
+                c['email'] = email
+                cases.append(c)
 
         if not cases:
             return jsonify({'error': 'No paid cases found to upload', 'count': 0}), 400
