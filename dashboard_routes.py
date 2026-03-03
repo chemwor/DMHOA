@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
 from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Blueprint, request, jsonify
@@ -1485,23 +1486,17 @@ def get_posthog_data():
     if not POSTHOG_PERSONAL_API_KEY or not POSTHOG_PROJECT_ID:
         # Return mock data
         return jsonify({
-            'totalSessions': 0,
-            'totalPageViews': 0,
-            'pagesPerSession': 0,
-            'avgScrollDepth': 0,
-            'avgTimeOnPage': 0,
-            'bounceRate': 0,
-            'totalVisits': 0,
-            'uniqueVisitors': 0,
-            'returningVisitors': 0,
-            'rageClicks': 0,
-            'deadClicks': 0,
-            'quickBacks': 0,
-            'excessiveScrolling': 0,
-            'jsErrors': 0,
-            'slowPageLoads': 0,
-            'isMockData': True,
-            'message': 'PostHog not configured.',
+            'totalSessions': 0, 'totalPageViews': 0, 'pagesPerSession': 0,
+            'avgScrollDepth': 0, 'avgTimeOnPage': 0, 'bounceRate': 0,
+            'totalVisits': 0, 'uniqueVisitors': 0, 'returningVisitors': 0,
+            'rageClicks': 0, 'deadClicks': 0, 'quickBacks': 0, 'excessiveScrolling': 0,
+            'jsErrors': 0, 'slowPageLoads': 0,
+            'dailyVisits': [], 'pagesWithIssues': [], 'topPages': [],
+            'webVitals': {'fcp': {'p75': 0, 'p90': 0}, 'lcp': {'p75': 0, 'p90': 0},
+                          'cls': {'p75': 0, 'p90': 0}, 'inp': {'p75': 0, 'p90': 0}, 'sampleCount': 0},
+            'funnel': {'landing': 0, 'preview': 0, 'purchase': 0},
+            'suggestions': [], 'compositeGrade': {'rumScore': 0, 'uxScore': 0, 'engagementScore': 0},
+            'isMockData': True, 'message': 'PostHog not configured.',
         })
 
     try:
@@ -1533,38 +1528,136 @@ def get_posthog_data():
             'Content-Type': 'application/json',
         }
 
-        # Query 1: Sessions — total sessions, unique users, avg duration, pageviews, pages/session, bounce rate
-        sessions_query = {
-            'query': {
-                'kind': 'HogQLQuery',
-                'query': """
-                    SELECT
-                        count(DISTINCT $session_id) as total_sessions,
-                        count(DISTINCT person_id) as unique_users,
-                        avg(session.$session_duration) as avg_session_duration,
-                        count(*) as total_pageviews,
-                        count(*) / greatest(count(DISTINCT $session_id), 1) as pages_per_session,
-                        countIf(session.$session_duration < 10) * 100.0 / greatest(count(DISTINCT $session_id), 1) as bounce_rate
-                    FROM events
-                    WHERE event = '$pageview'
-                      AND timestamp > now() - INTERVAL 3 DAY
-                """
-            }
+        posthog_query_url = f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/'
+
+        def run_hogql(query_str):
+            """Execute a single HogQL query and return the response."""
+            return requests.post(
+                posthog_query_url,
+                headers=posthog_headers,
+                json={'query': {'kind': 'HogQLQuery', 'query': query_str}},
+                timeout=(10, 30)
+            )
+
+        # Define all 10 HogQL queries
+        hogql_queries = {
+            'sessions': """
+                SELECT
+                    count(DISTINCT $session_id) as total_sessions,
+                    count(DISTINCT person_id) as unique_users,
+                    avg(session.$session_duration) as avg_session_duration,
+                    count(*) as total_pageviews,
+                    count(*) / greatest(count(DISTINCT $session_id), 1) as pages_per_session,
+                    countIf(session.$session_duration < 10) * 100.0 / greatest(count(DISTINCT $session_id), 1) as bounce_rate
+                FROM events
+                WHERE event = '$pageview'
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
+            'rage': """
+                SELECT count(*) as rage_clicks
+                FROM events
+                WHERE event = '$rageclick'
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
+            'dead': """
+                SELECT count(*) as dead_clicks
+                FROM events
+                WHERE event = '$dead_click'
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
+            'js_errors': """
+                SELECT count(*) as js_errors
+                FROM events
+                WHERE event = '$exception'
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
+            'slow_loads': """
+                SELECT count(DISTINCT $session_id) as slow_loads
+                FROM events
+                WHERE event = '$web_vitals'
+                  AND properties.$web_vitals_LCP_value > 3000
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
+            'daily_visits': """
+                SELECT
+                    toDate(timestamp) as day,
+                    count(*) as pageviews,
+                    count(DISTINCT $session_id) as sessions
+                FROM events
+                WHERE event = '$pageview'
+                  AND timestamp > now() - INTERVAL 3 DAY
+                GROUP BY day
+                ORDER BY day ASC
+            """,
+            'pages_issues': """
+                SELECT
+                    properties.$current_url as page_url,
+                    countIf(event = '$rageclick') as rage_clicks,
+                    countIf(event = '$dead_click') as dead_clicks
+                FROM events
+                WHERE event IN ('$rageclick', '$dead_click')
+                  AND timestamp > now() - INTERVAL 3 DAY
+                GROUP BY page_url
+                ORDER BY rage_clicks + dead_clicks DESC
+                LIMIT 10
+            """,
+            'web_vitals': """
+                SELECT
+                    quantile(0.75)(properties.$web_vitals_FCP_value) as fcp_p75,
+                    quantile(0.90)(properties.$web_vitals_FCP_value) as fcp_p90,
+                    quantile(0.75)(properties.$web_vitals_LCP_value) as lcp_p75,
+                    quantile(0.90)(properties.$web_vitals_LCP_value) as lcp_p90,
+                    quantile(0.75)(properties.$web_vitals_CLS_value) as cls_p75,
+                    quantile(0.90)(properties.$web_vitals_CLS_value) as cls_p90,
+                    quantile(0.75)(properties.$web_vitals_INP_value) as inp_p75,
+                    quantile(0.90)(properties.$web_vitals_INP_value) as inp_p90,
+                    count(*) as sample_count
+                FROM events
+                WHERE event = '$web_vitals'
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
+            'top_pages': """
+                SELECT
+                    properties.$current_url as page_url,
+                    count(*) as views
+                FROM events
+                WHERE event = '$pageview'
+                  AND timestamp > now() - INTERVAL 3 DAY
+                GROUP BY page_url
+                ORDER BY views DESC
+                LIMIT 5
+            """,
+            'funnel': """
+                SELECT
+                    count(DISTINCT $session_id) as landing,
+                    count(DISTINCT CASE WHEN properties.$current_url LIKE '%/preview%' OR properties.$current_url LIKE '%/quick-preview%' THEN $session_id END) as preview,
+                    count(DISTINCT CASE WHEN properties.$current_url LIKE '%/checkout%' OR properties.$current_url LIKE '%/purchase%' OR properties.$current_url LIKE '%/payment%' THEN $session_id END) as purchase
+                FROM events
+                WHERE event = '$pageview'
+                  AND timestamp > now() - INTERVAL 3 DAY
+            """,
         }
 
-        sessions_response = requests.post(
-            f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/',
-            headers=posthog_headers,
-            json=sessions_query,
-            timeout=TIMEOUT
-        )
+        # Execute all queries in parallel
+        responses = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_key = {executor.submit(run_hogql, q): k for k, q in hogql_queries.items()}
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    responses[key] = future.result()
+                except Exception as e:
+                    logger.warning(f'PostHog query "{key}" failed: {e}')
+                    responses[key] = None
 
+        # --- Parse results ---
+
+        # Sessions
         sessions_data = {'total_sessions': 0, 'unique_users': 0, 'avg_session_duration': 0,
                          'total_pageviews': 0, 'pages_per_session': 0, 'bounce_rate': 0}
-
-        if sessions_response.ok:
-            result = sessions_response.json()
-            rows = result.get('results', [])
+        resp = responses.get('sessions')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
             if rows and len(rows) > 0:
                 row = rows[0]
                 sessions_data = {
@@ -1575,62 +1668,162 @@ def get_posthog_data():
                     'pages_per_session': round(float(row[4] or 0), 1),
                     'bounce_rate': round(float(row[5] or 0), 1),
                 }
-        else:
-            logger.warning(f'PostHog sessions query failed: {sessions_response.status_code} {sessions_response.text}')
 
-        # Query 2: Rage clicks (last 3 days)
-        rage_query = {
-            'query': {
-                'kind': 'HogQLQuery',
-                'query': """
-                    SELECT count(*) as rage_clicks
-                    FROM events
-                    WHERE event = '$rageclick'
-                      AND timestamp > now() - INTERVAL 3 DAY
-                """
-            }
-        }
-
-        rage_response = requests.post(
-            f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/',
-            headers=posthog_headers,
-            json=rage_query,
-            timeout=TIMEOUT
-        )
-
+        # Rage clicks
         rage_clicks = 0
-        if rage_response.ok:
-            result = rage_response.json()
-            rows = result.get('results', [])
+        resp = responses.get('rage')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
             if rows and len(rows) > 0:
                 rage_clicks = int(rows[0][0] or 0)
 
-        # Query 3: Dead clicks (last 3 days)
-        dead_query = {
-            'query': {
-                'kind': 'HogQLQuery',
-                'query': """
-                    SELECT count(*) as dead_clicks
-                    FROM events
-                    WHERE event = '$dead_click'
-                      AND timestamp > now() - INTERVAL 3 DAY
-                """
-            }
-        }
-
-        dead_response = requests.post(
-            f'{POSTHOG_API_URL}/api/projects/{POSTHOG_PROJECT_ID}/query/',
-            headers=posthog_headers,
-            json=dead_query,
-            timeout=TIMEOUT
-        )
-
+        # Dead clicks
         dead_clicks = 0
-        if dead_response.ok:
-            result = dead_response.json()
-            rows = result.get('results', [])
+        resp = responses.get('dead')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
             if rows and len(rows) > 0:
                 dead_clicks = int(rows[0][0] or 0)
+
+        # JS errors
+        js_errors = 0
+        resp = responses.get('js_errors')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            if rows and len(rows) > 0:
+                js_errors = int(rows[0][0] or 0)
+
+        # Slow page loads
+        slow_page_loads = 0
+        resp = responses.get('slow_loads')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            if rows and len(rows) > 0:
+                slow_page_loads = int(rows[0][0] or 0)
+
+        # Daily visits
+        daily_visits = []
+        resp = responses.get('daily_visits')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            for row in rows:
+                daily_visits.append({
+                    'date': str(row[0]),
+                    'visits': int(row[1] or 0),
+                    'sessions': int(row[2] or 0),
+                })
+
+        # Pages with issues
+        pages_with_issues = []
+        resp = responses.get('pages_issues')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            for row in rows:
+                url = str(row[0] or '')
+                page = url.replace('https://disputemyhoa.com', '').replace('http://disputemyhoa.com', '') or '/'
+                pages_with_issues.append({
+                    'page': page,
+                    'rageClicks': int(row[1] or 0),
+                    'deadClicks': int(row[2] or 0),
+                })
+
+        # Real User Web Vitals
+        web_vitals = {
+            'fcp': {'p75': 0, 'p90': 0}, 'lcp': {'p75': 0, 'p90': 0},
+            'cls': {'p75': 0, 'p90': 0}, 'inp': {'p75': 0, 'p90': 0},
+            'sampleCount': 0,
+        }
+        resp = responses.get('web_vitals')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            if rows and len(rows) > 0:
+                row = rows[0]
+                web_vitals = {
+                    'fcp': {'p75': round(float(row[0] or 0)), 'p90': round(float(row[1] or 0))},
+                    'lcp': {'p75': round(float(row[2] or 0)), 'p90': round(float(row[3] or 0))},
+                    'cls': {'p75': round(float(row[4] or 0), 3), 'p90': round(float(row[5] or 0), 3)},
+                    'inp': {'p75': round(float(row[6] or 0)), 'p90': round(float(row[7] or 0))},
+                    'sampleCount': int(row[8] or 0),
+                }
+
+        # Top pages
+        top_pages = []
+        resp = responses.get('top_pages')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            for row in rows:
+                url = str(row[0] or '')
+                page = url.replace('https://disputemyhoa.com', '').replace('http://disputemyhoa.com', '') or '/'
+                top_pages.append({'page': page, 'views': int(row[1] or 0)})
+
+        # Conversion funnel
+        funnel = {'landing': 0, 'preview': 0, 'purchase': 0}
+        resp = responses.get('funnel')
+        if resp and resp.ok:
+            rows = resp.json().get('results', [])
+            if rows and len(rows) > 0:
+                row = rows[0]
+                funnel = {
+                    'landing': int(row[0] or 0),
+                    'preview': int(row[1] or 0),
+                    'purchase': int(row[2] or 0),
+                }
+
+        # --- Performance suggestions ---
+        suggestions = []
+
+        if web_vitals['sampleCount'] > 0:
+            if web_vitals['lcp']['p75'] > 2500:
+                suggestions.append({'type': 'warning', 'category': 'Web Vitals', 'title': 'Optimize Largest Contentful Paint',
+                    'description': f"LCP p75 is {web_vitals['lcp']['p75']}ms (target: <2500ms). Consider optimizing images, preloading key resources, and reducing server response time."})
+            if web_vitals['cls']['p75'] > 0.1:
+                suggestions.append({'type': 'warning', 'category': 'Web Vitals', 'title': 'Fix Layout Shifts',
+                    'description': f"CLS p75 is {web_vitals['cls']['p75']} (target: <0.1). Set explicit dimensions on images/videos and avoid dynamic content insertion above the fold."})
+            if web_vitals['inp']['p75'] > 200:
+                suggestions.append({'type': 'warning', 'category': 'Web Vitals', 'title': 'Improve Interaction Responsiveness',
+                    'description': f"INP p75 is {web_vitals['inp']['p75']}ms (target: <200ms). Reduce JavaScript execution time and break up long tasks."})
+            if web_vitals['fcp']['p75'] > 1800:
+                suggestions.append({'type': 'info', 'category': 'Web Vitals', 'title': 'Optimize First Contentful Paint',
+                    'description': f"FCP p75 is {web_vitals['fcp']['p75']}ms (target: <1800ms). Consider inlining critical CSS and deferring non-essential scripts."})
+
+        if rage_clicks > 5:
+            suggestions.append({'type': 'warning', 'category': 'User Experience', 'title': 'Investigate Rage Clicks',
+                'description': f"{rage_clicks} rage clicks detected in 3 days. Users are repeatedly clicking on non-responsive elements."})
+        if sessions_data['bounce_rate'] > 70:
+            suggestions.append({'type': 'warning', 'category': 'Engagement', 'title': 'High Bounce Rate',
+                'description': f"Bounce rate is {sessions_data['bounce_rate']}% (target: <70%). Review landing page content, load speed, and above-the-fold messaging."})
+        if js_errors > 3:
+            suggestions.append({'type': 'error', 'category': 'Technical', 'title': 'Fix JavaScript Errors',
+                'description': f"{js_errors} JS errors in 3 days. Check PostHog error tracking for stack traces and fix the root causes."})
+        if slow_page_loads > 3:
+            suggestions.append({'type': 'warning', 'category': 'Performance', 'title': 'Address Slow Page Loads',
+                'description': f"{slow_page_loads} sessions experienced LCP > 3s. Optimize images, reduce JS bundles, and enable caching."})
+
+        if not suggestions:
+            suggestions.append({'type': 'success', 'category': 'Overall', 'title': 'Site Performing Well',
+                'description': 'No major performance or UX issues detected in the last 3 days. Keep monitoring.'})
+
+        # --- Composite grade components ---
+        def _web_vital_score(lcp, cls_val, fcp, inp):
+            score = 0
+            score += 25 if lcp <= 2500 else (15 if lcp <= 4000 else 5)
+            score += 25 if cls_val <= 0.1 else (15 if cls_val <= 0.25 else 5)
+            score += 25 if fcp <= 1800 else (15 if fcp <= 3000 else 5)
+            score += 25 if inp <= 200 else (15 if inp <= 500 else 5)
+            return score
+
+        rum_score = _web_vital_score(
+            web_vitals['lcp']['p75'], web_vitals['cls']['p75'],
+            web_vitals['fcp']['p75'], web_vitals['inp']['p75']
+        ) if web_vitals['sampleCount'] > 0 else 50
+
+        frustration_total = rage_clicks + dead_clicks
+        ux_score = max(0, min(100, 100 - (frustration_total * 2) - (js_errors * 5)))
+
+        bounce_penalty = max(0, sessions_data['bounce_rate'] - 40) * 1.5
+        pages_bonus = min(sessions_data['pages_per_session'] * 15, 50)
+        time_bonus = min(sessions_data['avg_session_duration'] * 0.5, 50)
+        engagement_score = max(0, min(100, pages_bonus + time_bonus - bounce_penalty))
 
         data = {
             'totalSessions': sessions_data['total_sessions'],
@@ -1646,8 +1839,19 @@ def get_posthog_data():
             'deadClicks': dead_clicks,
             'quickBacks': 0,
             'excessiveScrolling': 0,
-            'jsErrors': 0,
-            'slowPageLoads': 0,
+            'jsErrors': js_errors,
+            'slowPageLoads': slow_page_loads,
+            'dailyVisits': daily_visits,
+            'pagesWithIssues': pages_with_issues,
+            'webVitals': web_vitals,
+            'topPages': top_pages,
+            'funnel': funnel,
+            'suggestions': suggestions,
+            'compositeGrade': {
+                'rumScore': rum_score,
+                'uxScore': round(ux_score),
+                'engagementScore': round(engagement_score),
+            },
             'isMockData': False,
             'dataRange': 'Last 3 days',
             'lastFetched': datetime.now().isoformat(),
