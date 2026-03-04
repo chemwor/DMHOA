@@ -3499,8 +3499,10 @@ Be specific and data-driven. Reference actual numbers. For recommendations, cite
         })
 
     except Exception as e:
-        logger.error(f'Legality scorecard error: {str(e)}')
-        return jsonify({'error': 'Internal server error', 'message': str(e)}), 500
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f'Legality scorecard error: {str(e)}\n{tb}')
+        return jsonify({'error': 'Internal server error', 'message': str(e), 'traceback': tb}), 500
 
 
 # ============================================================================
