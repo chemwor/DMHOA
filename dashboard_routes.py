@@ -6427,6 +6427,14 @@ def generate_feature_prompt(feature_id):
 
         feature = response.json()[0]
 
+        # Fetch technical documentation for richer context
+        doc_summaries = _fetch_doc_summaries()
+        docs_context = ''
+        if doc_summaries:
+            docs_context = '\n\nTECHNICAL DOCUMENTATION:\n'
+            for key, summary in doc_summaries.items():
+                docs_context += f'\n[{key}]\n{summary}\n'
+
         prompt = f"""You are a senior full-stack engineer writing implementation prompts for Claude Code.
 
 DMHOA TECH STACK:
@@ -6435,7 +6443,7 @@ DMHOA TECH STACK:
 - Dashboard: Angular 17.3.0 (standalone components) + Tailwind CSS 3.4.1 + TypeScript. 13 services, each calling /api/dashboard/*. Hosted on Netlify.
 - Database: Supabase — tables: dmhoa_cases, dmhoa_documents, dmhoa_case_previews, dmhoa_case_outputs, dmhoa_messages, dmhoa_events, hoa_statutes
 - AI: Claude Sonnet 4.6 (case analysis), Claude Haiku 4.5 (lightweight tasks), GPT-4o-mini (chat, previews, blog)
-
+{docs_context}
 FEATURE TO IMPLEMENT:
 Title: {feature.get('title', '')}
 Description: {feature.get('description', '')}
