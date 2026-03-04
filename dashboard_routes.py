@@ -3189,23 +3189,219 @@ def handle_legality_scorecard():
         top_types = sorted(by_type.items(), key=lambda x: x[1]['count'], reverse=True)[:8]
         top_states = sorted(by_state.items(), key=lambda x: x[1]['count'], reverse=True)[:5]
 
-        system_prompt = 'You are an HOA legal tech analyst. Respond with valid JSON only, no markdown.'
+        # --- Gather additional data sources ---
 
-        prompt = f'''Analyze this HOA dispute platform data and provide insights.
+        # 1. Case Previews
+        preview_insights = {'headlines': [], 'risks': [], 'deadlines': [], 'unlock_items': [], 'total_previews': 0}
+        try:
+            previews_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews",
+                params={
+                    'select': 'preview_content,created_at',
+                    'is_active': 'eq.true',
+                    'order': 'created_at.desc',
+                    'limit': '200'
+                },
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if previews_resp.ok:
+                previews = previews_resp.json()
+                preview_insights['total_previews'] = len(previews)
+                for p in previews:
+                    content = p.get('preview_content', {})
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except:
+                            content = {}
+                    pj = content.get('preview_json', {})
+                    if not pj:
+                        continue
+                    headline = pj.get('headline', '')
+                    if headline:
+                        preview_insights['headlines'].append(headline)
+                    risks = pj.get('risk_if_wrong', [])
+                    if isinstance(risks, list):
+                        preview_insights['risks'].extend(risks[:2])
+                    situation = pj.get('your_situation', {})
+                    if isinstance(situation, dict):
+                        deadline = situation.get('deadline', '')
+                        if deadline and str(deadline).lower() not in ('not stated', 'unknown', ''):
+                            preview_insights['deadlines'].append(str(deadline))
+                    unlock = pj.get('what_you_get_when_you_unlock', [])
+                    if isinstance(unlock, list):
+                        preview_insights['unlock_items'].extend(unlock[:2])
+                # Deduplicate and limit
+                preview_insights['headlines'] = list(set(preview_insights['headlines']))[:20]
+                preview_insights['risks'] = list(set(preview_insights['risks']))[:15]
+                preview_insights['deadlines'] = list(set(preview_insights['deadlines']))[:10]
+                preview_insights['unlock_items'] = list(set(preview_insights['unlock_items']))[:10]
+        except Exception as e:
+            logger.warning(f'Scorecard - preview fetch failed: {e}')
 
-VIOLATIONS (top 8): {json.dumps([{"type": t, **d} for t, d in top_types])}
+        # 2. Live Business Snapshot
+        business_snapshot = {}
+        try:
+            business_snapshot = _build_live_data_snapshot()
+        except Exception as e:
+            logger.warning(f'Scorecard - live snapshot failed: {e}')
 
-CONVERSION: Total={len(cases)}, Paid={total_paid}, Rate={round(total_paid/len(cases)*100, 1) if cases else 0}%
+        # 3. PostHog Analytics
+        posthog_data = {}
+        try:
+            posthog_data = _read_api_cache('posthog_data') or {}
+        except Exception as e:
+            logger.warning(f'Scorecard - posthog cache read failed: {e}')
 
-TOP STATES: {", ".join([f"{s}({d['count']})" for s, d in top_states])}
+        # 4. HOA News
+        news_articles = []
+        try:
+            news_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+                params={
+                    'select': 'title,category,priority,pub_date',
+                    'order': 'pub_date.desc',
+                    'limit': '20',
+                    'dismissed': 'eq.false'
+                },
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if news_resp.ok:
+                news_articles = news_resp.json()
+        except Exception as e:
+            logger.warning(f'Scorecard - news fetch failed: {e}')
 
-Respond with this JSON:
-{{"trends_summary":{{"most_common_violations":[],"highest_converting_cases":[]}},"conversion_analysis":{{"overall_rate":0,"best_performing_segment":"","improvement_opportunities":[]}},"feature_suggestions":[],"risk_assessment":{{"categories":[],"highest_risk_category":"","most_profitable_category":""}},"strategic_recommendations":[],"executive_summary":""}}
+        # 5. Lighthouse
+        lighthouse_data = {}
+        try:
+            lighthouse_data = _read_api_cache('lighthouse_data') or {}
+        except Exception as e:
+            logger.warning(f'Scorecard - lighthouse cache read failed: {e}')
 
-Fill in real values based on the data. Be concise.'''
+        # --- Build enriched Claude prompt ---
+        snapshot_summary = {}
+        if business_snapshot:
+            snapshot_summary = {
+                'revenue': {
+                    'today': business_snapshot.get('stripe', {}).get('revenue_today', 0),
+                    'week': business_snapshot.get('stripe', {}).get('revenue_week', 0),
+                    'month': business_snapshot.get('stripe', {}).get('revenue_month', 0),
+                },
+                'cases_today': business_snapshot.get('cases', {}).get('new_today', 0),
+                'paid_today': business_snapshot.get('cases', {}).get('paid_today', 0),
+                'monthly_conversion': business_snapshot.get('cases', {}).get('conversion_rate', 0),
+                'ads': {
+                    'impressions': business_snapshot.get('google_ads', {}).get('impressions', 0),
+                    'clicks': business_snapshot.get('google_ads', {}).get('clicks', 0),
+                    'cpa': business_snapshot.get('google_ads', {}).get('cpa', 0),
+                    'ctr_pct': business_snapshot.get('google_ads', {}).get('ctr_pct', 0),
+                },
+                'email_profiles': business_snapshot.get('klaviyo', {}).get('total_profiles', 0),
+            }
+
+        posthog_summary = {}
+        if posthog_data:
+            posthog_summary = {
+                'bounce_rate': posthog_data.get('bounceRate', 0),
+                'avg_time_on_page': posthog_data.get('avgTimeOnPage', 0),
+                'pages_per_session': posthog_data.get('pagesPerSession', 0),
+                'rage_clicks': posthog_data.get('rageClicks', 0),
+                'dead_clicks': posthog_data.get('deadClicks', 0),
+                'funnel': posthog_data.get('funnel', {}),
+                'web_vitals': posthog_data.get('webVitals', {}),
+            }
+
+        lighthouse_summary = {}
+        if lighthouse_data:
+            lighthouse_summary = {
+                'performance': lighthouse_data.get('performanceScore', 0),
+                'seo': lighthouse_data.get('seoScore', 0),
+                'accessibility': lighthouse_data.get('accessibilityScore', 0),
+            }
+
+        news_titles = [a.get('title', '') for a in news_articles[:10]]
+
+        system_prompt = 'You are an HOA legal tech analyst for DisputeMyHOA, a $49 self-service SaaS helping homeowners respond to HOA violation notices. Analyze real business data to produce actionable insights. Respond with valid JSON only, no markdown code fences.'
+
+        conversion_rate = round(total_paid / len(cases) * 100, 1) if cases else 0
+        prompt = f'''Analyze this HOA dispute platform data comprehensively.
+
+=== CASE DATA ===
+VIOLATIONS (top 8 by count): {json.dumps([{{"type": t, **d}} for t, d in top_types])}
+CONVERSION: Total={len(cases)}, Paid={total_paid}, Rate={conversion_rate}%, Revenue=${round(total_revenue, 2)}
+TOP STATES: {", ".join([f"{s}({d['count']} cases, ${round(d['revenue'],0)} rev)" for s, d in top_states])}
+
+=== CASE PREVIEW INSIGHTS (from {preview_insights['total_previews']} analyzed previews) ===
+SAMPLE HEADLINES: {json.dumps(preview_insights['headlines'][:10])}
+COMMON RISKS CUSTOMERS FACE: {json.dumps(preview_insights['risks'][:10])}
+DEADLINE PATTERNS: {json.dumps(preview_insights['deadlines'][:8])}
+VALUED UNLOCK ITEMS: {json.dumps(preview_insights['unlock_items'][:8])}
+
+=== LIVE BUSINESS METRICS ===
+{json.dumps(snapshot_summary, default=str) if snapshot_summary else 'Not available'}
+
+=== USER ENGAGEMENT (PostHog) ===
+{json.dumps(posthog_summary, default=str) if posthog_summary else 'Not available'}
+
+=== SITE PERFORMANCE (Lighthouse) ===
+{json.dumps(lighthouse_summary, default=str) if lighthouse_summary else 'Not available'}
+
+=== HOA INDUSTRY NEWS (recent) ===
+{json.dumps(news_titles) if news_titles else 'No recent news'}
+
+Respond with this JSON structure. Fill ALL fields with real analysis based on the data:
+{{
+  "trends_summary": {{
+    "most_common_violations": [{{"type":"","count":0,"percentage":0,"insight":""}}],
+    "highest_converting_cases": [{{"type":"","conversion_rate":0,"avg_revenue":0,"insight":""}}],
+    "seasonal_patterns": {{"peak_month":"","peak_day":"","peak_time":"","insight":""}},
+    "geographic_insights": {{"top_states":[],"underserved_markets":[],"expansion_opportunities":""}},
+    "preview_themes": {{"dominant_risk_patterns":[],"urgency_indicators":[],"most_valued_features":[]}}
+  }},
+  "conversion_analysis": {{
+    "overall_rate":0,
+    "best_performing_segment":"",
+    "worst_performing_segment":"",
+    "improvement_opportunities":[],
+    "funnel_health": {{"landing_to_preview":"","preview_to_purchase":"","biggest_drop_off":"","recommended_fix":""}},
+    "ad_efficiency": {{"cpa_assessment":"","ctr_assessment":"","recommendation":""}}
+  }},
+  "feature_suggestions": [{{"feature":"","rationale":"","priority":"high","expected_impact":""}}],
+  "product_research_insights": {{
+    "customer_pain_points":[],
+    "unmet_needs":[],
+    "content_opportunities":[],
+    "partnership_opportunities":[],
+    "case_theme_analysis": {{"top_themes":[],"emerging_patterns":[],"underserved_violations":[]}}
+  }},
+  "risk_assessment": {{
+    "categories": [{{"name":"","case_count":0,"conversion_rate":0,"revenue":0,"risk_level":"medium","trend_direction":"stable","top_states":[],"strategic_notes":"","common_defenses":[]}}],
+    "highest_risk_category":"",
+    "fastest_growing_category":"",
+    "most_profitable_category":""
+  }},
+  "engagement_health": {{
+    "bounce_rate_assessment":"",
+    "time_on_page_assessment":"",
+    "ux_issues":[],
+    "performance_impact":"",
+    "overall_grade":""
+  }},
+  "news_context": {{
+    "relevant_trends":[],
+    "opportunities":[],
+    "risks":[]
+  }},
+  "strategic_recommendations": [{{"recommendation":"","category":"marketing","priority":"high","expected_outcome":"","data_basis":""}}],
+  "executive_summary":""
+}}
+
+Be specific and data-driven. Reference actual numbers. For recommendations, cite the specific metric in data_basis.'''
 
         try:
-            analysis_text = call_claude_api(prompt, system_prompt, 4096)
+            analysis_text = call_claude_api(prompt, system_prompt, 6144)
             cleaned = analysis_text.replace('```json', '').replace('```', '').strip()
             analysis = json.loads(cleaned)
         except Exception as e:
@@ -3218,7 +3414,33 @@ Fill in real values based on the data. Be concise.'''
             'conversionFunnel': {
                 'totalCases': len(cases),
                 'paidCases': total_paid,
+                'totalRevenue': round(total_revenue, 2),
                 'overallConversionRate': round(total_paid / len(cases) * 100, 1) if cases else 0,
+            },
+            'previewInsights': {
+                'totalPreviews': preview_insights.get('total_previews', 0),
+                'sampleHeadlines': preview_insights.get('headlines', [])[:5],
+                'commonRisks': preview_insights.get('risks', [])[:5],
+                'deadlinePatterns': preview_insights.get('deadlines', [])[:5],
+            },
+            'businessSnapshot': {
+                'revenueToday': business_snapshot.get('stripe', {}).get('revenue_today', 0),
+                'revenueWeek': business_snapshot.get('stripe', {}).get('revenue_week', 0),
+                'revenueMonth': business_snapshot.get('stripe', {}).get('revenue_month', 0),
+                'adCPA': business_snapshot.get('google_ads', {}).get('cpa', 0),
+                'adCTR': business_snapshot.get('google_ads', {}).get('ctr_pct', 0),
+                'emailProfiles': business_snapshot.get('klaviyo', {}).get('total_profiles', 0),
+            } if business_snapshot else {},
+            'posthogMetrics': {
+                'bounceRate': posthog_data.get('bounceRate', 0),
+                'avgTimeOnPage': posthog_data.get('avgTimeOnPage', 0),
+                'pagesPerSession': posthog_data.get('pagesPerSession', 0),
+                'rageClicks': posthog_data.get('rageClicks', 0),
+                'funnel': posthog_data.get('funnel', {}),
+            } if posthog_data else {},
+            'newsContext': {
+                'articleCount': len(news_articles),
+                'recentTitles': [a.get('title', '') for a in news_articles[:5]],
             },
         }
 
@@ -3236,6 +3458,7 @@ Fill in real values based on the data. Be concise.'''
             },
             'full_analysis': json.dumps({'analysis': analysis, 'rawData': raw_data}),
             'cases_analyzed': len(cases),
+            'news_articles_referenced': len(news_articles),
             'status': 'completed',
         }
 
