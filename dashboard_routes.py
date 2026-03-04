@@ -3345,12 +3345,14 @@ def handle_legality_scorecard():
         system_prompt = 'You are an HOA legal tech analyst for DisputeMyHOA, a $49 self-service SaaS helping homeowners respond to HOA violation notices. Analyze real business data to produce actionable insights. Respond with valid JSON only, no markdown code fences.'
 
         conversion_rate = round(total_paid / len(cases) * 100, 1) if cases else 0
+        violations_json = json.dumps([{"type": t, **d} for t, d in top_types])
+        states_summary = ", ".join([f"{s}({d['count']} cases, ${round(d['revenue'],0)} rev)" for s, d in top_states])
         prompt = f'''Analyze this HOA dispute platform data comprehensively.
 
 === CASE DATA ===
-VIOLATIONS (top 8 by count): {json.dumps([{{"type": t, **d}} for t, d in top_types])}
+VIOLATIONS (top 8 by count): {violations_json}
 CONVERSION: Total={len(cases)}, Paid={total_paid}, Rate={conversion_rate}%, Revenue=${round(total_revenue, 2)}
-TOP STATES: {", ".join([f"{s}({d['count']} cases, ${round(d['revenue'],0)} rev)" for s, d in top_states])}
+TOP STATES: {states_summary}
 
 === CASE PREVIEW INSIGHTS (from {preview_insights['total_previews']} analyzed previews) ===
 SAMPLE HEADLINES: {json.dumps(preview_insights['headlines'][:10])}
@@ -3499,10 +3501,8 @@ Be specific and data-driven. Reference actual numbers. For recommendations, cite
         })
 
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        logger.error(f'Legality scorecard error: {str(e)}\n{tb}')
-        return jsonify({'error': 'Internal server error', 'message': str(e), 'traceback': tb}), 500
+        logger.error(f'Legality scorecard error: {str(e)}', exc_info=True)
+        return jsonify({'error': 'Internal server error', 'message': str(e)}), 500
 
 
 # ============================================================================
