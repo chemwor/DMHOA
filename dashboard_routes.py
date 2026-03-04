@@ -2690,11 +2690,32 @@ def handle_blog_generator():
                         'message': 'Not enough HOA news articles found.',
                     }), 400
 
+                # Fetch existing blog titles and idea titles to avoid duplicates
+                existing_blogs_response = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/blog_posts",
+                    params={'select': 'title', 'order': 'published_at.desc', 'limit': '50'},
+                    headers=supabase_headers(),
+                    timeout=TIMEOUT
+                )
+                existing_blog_titles = [b['title'] for b in (existing_blogs_response.json() if existing_blogs_response.ok else [])]
+
+                existing_ideas_response = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/blog_ideas",
+                    params={'select': 'title', 'status': 'in.(pending,approved,generating)'},
+                    headers=supabase_headers(),
+                    timeout=TIMEOUT
+                )
+                existing_idea_titles = [i['title'] for i in (existing_ideas_response.json() if existing_ideas_response.ok else [])]
+
+                all_existing = existing_blog_titles + existing_idea_titles
+
                 # Generate ideas using Claude
                 article_summaries = '\n'.join([
                     f'- "{a["title"]}" [{a["category"]}]: {a.get("description", "No description")}'
                     for a in articles
                 ])
+
+                existing_topics_text = '\n'.join([f'- {t}' for t in all_existing]) if all_existing else 'None yet'
 
                 system_prompt = 'You are an expert content strategist for an HOA dispute resolution platform. Generate unique blog post ideas that help homeowners understand their rights and navigate HOA issues. Respond with valid JSON only.'
 
@@ -2702,6 +2723,9 @@ def handle_blog_generator():
 
 ARTICLES:
 {article_summaries}
+
+IMPORTANT - DO NOT repeat or closely resemble any of these existing topics. Each idea must cover a distinctly different angle:
+{existing_topics_text}
 
 For each idea, provide:
 1. A compelling title (50-70 chars)
