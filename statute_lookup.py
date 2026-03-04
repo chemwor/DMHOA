@@ -58,7 +58,7 @@ def _log_claude_usage(model, input_tokens, output_tokens, endpoint=''):
         logger.warning(f'Failed to log Claude usage: {str(e)}')
 
 # Valid violation categories
-VALID_CATEGORIES = {'violation', 'fine', 'lien', 'architectural'}
+VALID_CATEGORIES = {'violation', 'fine', 'lien', 'architectural', 'election', 'maintenance', 'dispute', 'insurance'}
 
 # Mapping from free-text violation descriptions to normalized categories
 CATEGORY_KEYWORDS = {
@@ -81,6 +81,26 @@ CATEGORY_KEYWORDS = {
         'architectural', 'arc', 'modification', 'improvement', 'construction',
         'build', 'addition', 'renovation', 'remodel', 'design', 'approval',
         'permit', 'plans', 'review', 'committee', 'acc', 'drc', 'arb'
+    ],
+    'election': [
+        'election', 'vote', 'voting', 'ballot', 'proxy', 'quorum', 'recall',
+        'board member', 'director', 'annual meeting', 'special meeting',
+        'nomination', 'candidate', 'term limit'
+    ],
+    'maintenance': [
+        'maintenance', 'common area', 'reserve', 'reserve fund', 'special assessment',
+        'repair', 'upkeep', 'capital improvement', 'budget', 'assessment increase',
+        'shared expense', 'amenity', 'pool', 'clubhouse'
+    ],
+    'dispute': [
+        'dispute', 'mediation', 'arbitration', 'lawsuit', 'litigation', 'adr',
+        'alternative dispute resolution', 'complaint process', 'grievance',
+        'conflict', 'resolution', 'hearing', 'appeal process'
+    ],
+    'insurance': [
+        'insurance', 'liability', 'coverage', 'claim', 'master policy',
+        'fidelity bond', 'directors and officers', 'd&o', 'property insurance',
+        'flood', 'casualty', 'indemnification'
     ]
 }
 
@@ -215,7 +235,11 @@ def generate_statute_with_claude(state: str, category: str) -> Optional[Dict[str
         'violation': 'general HOA violations and enforcement',
         'fine': 'HOA fines, penalties, and assessments',
         'lien': 'HOA liens and foreclosure procedures',
-        'architectural': 'architectural review and modification approvals'
+        'architectural': 'architectural review and modification approvals',
+        'election': 'HOA board elections, voting rights, and recall procedures',
+        'maintenance': 'common area maintenance, reserve funds, and special assessments',
+        'dispute': 'HOA dispute resolution, mediation, and arbitration',
+        'insurance': 'HOA insurance requirements, liability, and coverage obligations'
     }
 
     category_label = category_labels.get(category, category)

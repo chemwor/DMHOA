@@ -18,6 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Blueprint, request, jsonify
+from statute_lookup import (
+    VALID_CATEGORIES, generate_statute_with_claude, save_statute_to_db,
+    fetch_statute_from_db, normalize_state
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -3548,6 +3552,159 @@ def _build_plan_context() -> Dict:
             for pm in PLAN_MONTHS
         ],
     }
+
+
+# ─── HOA Statutes Management ──────────────────────────────────────────────────
+
+ALL_STATES = [
+    'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+    'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+    'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+    'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+    'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'
+]
+ALL_STATUTE_CATEGORIES = sorted(VALID_CATEGORIES)
+
+
+@dashboard_bp.route('/api/dashboard/statutes', methods=['GET', 'OPTIONS'])
+def get_statutes():
+    """Get all statutes with coverage summary."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return jsonify({'error': 'Supabase not configured'}), 500
+
+    try:
+        headers = supabase_headers()
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/hoa_statutes",
+            params={'select': '*', 'order': 'state.asc,violation_category.asc', 'limit': '1000'},
+            headers=headers, timeout=TIMEOUT
+        )
+        resp.raise_for_status()
+        statutes = resp.json()
+
+        # Build coverage summary
+        by_state = {}
+        by_category = {}
+        for s in statutes:
+            st = s.get('state', '')
+            cat = s.get('violation_category', '')
+            by_state[st] = by_state.get(st, 0) + 1
+            by_category[cat] = by_category.get(cat, 0) + 1
+
+        total_possible = len(ALL_STATES) * len(ALL_STATUTE_CATEGORIES)
+
+        return jsonify({
+            'statutes': statutes,
+            'coverage': {
+                'total_possible': total_possible,
+                'total_existing': len(statutes),
+                'by_state': by_state,
+                'by_category': by_category,
+            },
+            'categories': ALL_STATUTE_CATEGORIES,
+            'states': ALL_STATES,
+        })
+
+    except Exception as e:
+        logger.error(f"Error fetching statutes: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@dashboard_bp.route('/api/dashboard/statutes/scan', methods=['POST', 'OPTIONS'])
+def scan_statutes():
+    """Bulk-generate missing statutes using Claude Haiku."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    body = request.get_json(silent=True) or {}
+    req_states = body.get('states', ['ALL'])
+    req_categories = body.get('categories', ['ALL'])
+
+    # Resolve targets
+    target_states = ALL_STATES if 'ALL' in req_states else [s.upper() for s in req_states if s.upper() in ALL_STATES]
+    target_categories = ALL_STATUTE_CATEGORIES if 'ALL' in req_categories else [c for c in req_categories if c in VALID_CATEGORIES]
+
+    if not target_states or not target_categories:
+        return jsonify({'error': 'No valid states or categories specified'}), 400
+
+    # Fetch existing statutes to find gaps
+    try:
+        headers = supabase_headers()
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/hoa_statutes",
+            params={'select': 'state,violation_category', 'limit': '1000'},
+            headers=headers, timeout=TIMEOUT
+        )
+        resp.raise_for_status()
+        existing = {(r['state'], r['violation_category']) for r in resp.json()}
+    except Exception as e:
+        logger.error(f"Error fetching existing statutes: {e}")
+        return jsonify({'error': f'Failed to check existing statutes: {e}'}), 500
+
+    # Find missing pairs
+    missing = []
+    for state in target_states:
+        for cat in target_categories:
+            if (state, cat) not in existing:
+                missing.append((state, cat))
+
+    # Cap at 20 per request to avoid Heroku timeout
+    batch = missing[:20]
+    generated = 0
+    failed = 0
+    details = []
+
+    for state, cat in batch:
+        try:
+            result = generate_statute_with_claude(state, cat)
+            if result:
+                saved = save_statute_to_db(state, cat, result)
+                if saved:
+                    generated += 1
+                    details.append({'state': state, 'category': cat, 'status': 'generated'})
+                else:
+                    failed += 1
+                    details.append({'state': state, 'category': cat, 'status': 'save_failed'})
+            else:
+                failed += 1
+                details.append({'state': state, 'category': cat, 'status': 'generation_failed'})
+        except Exception as e:
+            failed += 1
+            details.append({'state': state, 'category': cat, 'status': f'error: {str(e)}'})
+
+    return jsonify({
+        'generated': generated,
+        'failed': failed,
+        'skipped': len(missing) - len(batch),
+        'total_missing': len(missing),
+        'details': details,
+    })
+
+
+@dashboard_bp.route('/api/dashboard/statutes/<state>/<category>', methods=['DELETE', 'OPTIONS'])
+def delete_statute(state, category):
+    """Delete a single statute for regeneration."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return jsonify({'error': 'Supabase not configured'}), 500
+
+    try:
+        headers = supabase_headers()
+        resp = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/hoa_statutes",
+            params={'state': f'eq.{state.upper()}', 'violation_category': f'eq.{category}'},
+            headers=headers, timeout=TIMEOUT
+        )
+        resp.raise_for_status()
+        return jsonify({'deleted': True, 'state': state.upper(), 'category': category})
+    except Exception as e:
+        logger.error(f"Error deleting statute {state}/{category}: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @dashboard_bp.route('/api/dashboard/ad-suggestions', methods=['GET', 'POST', 'OPTIONS'])
