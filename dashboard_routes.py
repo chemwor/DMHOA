@@ -3236,11 +3236,22 @@ def handle_legality_scorecard():
                     unlock = pj.get('what_you_get_when_you_unlock', [])
                     if isinstance(unlock, list):
                         preview_insights['unlock_items'].extend(unlock[:2])
-                # Deduplicate and limit
-                preview_insights['headlines'] = list(set(preview_insights['headlines']))[:20]
-                preview_insights['risks'] = list(set(preview_insights['risks']))[:15]
-                preview_insights['deadlines'] = list(set(preview_insights['deadlines']))[:10]
-                preview_insights['unlock_items'] = list(set(preview_insights['unlock_items']))[:10]
+                # Deduplicate and limit (items may be dicts, so stringify for dedup)
+                def _dedup(items, limit):
+                    seen = set()
+                    result = []
+                    for item in items:
+                        key = str(item)
+                        if key not in seen:
+                            seen.add(key)
+                            result.append(item if isinstance(item, str) else str(item))
+                        if len(result) >= limit:
+                            break
+                    return result
+                preview_insights['headlines'] = _dedup(preview_insights['headlines'], 20)
+                preview_insights['risks'] = _dedup(preview_insights['risks'], 15)
+                preview_insights['deadlines'] = _dedup(preview_insights['deadlines'], 10)
+                preview_insights['unlock_items'] = _dedup(preview_insights['unlock_items'], 10)
         except Exception as e:
             logger.warning(f'Scorecard - preview fetch failed: {e}')
 
