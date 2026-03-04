@@ -2398,6 +2398,24 @@ def handle_hoa_news():
 
                 return jsonify({'success': True, 'article': {'id': article_id, 'status': status}})
 
+            # Support { id, action: 'saveNotes', notes } format
+            if data.get('id') and data.get('action') == 'saveNotes':
+                article_id = data['id']
+                notes_text = data.get('notes', '')
+                update_data = {'notes': notes_text if notes_text.strip() else None}
+
+                response = requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+                    params={'id': f'eq.{article_id}'},
+                    headers=supabase_headers(),
+                    json=update_data,
+                    timeout=TIMEOUT
+                )
+                if not response.ok:
+                    raise Exception(f'Failed to save notes: {response.text}')
+
+                return jsonify({'success': True, 'article': {'id': article_id, 'notes': update_data['notes']}})
+
             # Support { articleId, action } format (from News service)
             article_id = data.get('articleId')
             action = data.get('action')
@@ -2442,6 +2460,7 @@ def handle_hoa_news():
     try:
         include_dismissed = request.args.get('includeDismissed') == 'true'
         bookmarked_only = request.args.get('bookmarked') == 'true'
+        has_notes = request.args.get('hasNotes') == 'true'
         filter_status = request.args.get('status', '')
         filter_category = request.args.get('category', '')
 
@@ -2453,6 +2472,8 @@ def handle_hoa_news():
         }
         if not include_dismissed:
             params['dismissed'] = 'eq.false'
+        if has_notes:
+            params['notes'] = 'not.is.null'
         if filter_status:
             params['status'] = f'eq.{filter_status}'
         if filter_category:
@@ -2493,6 +2514,7 @@ def handle_hoa_news():
                 'dismissed': a.get('dismissed', False),
                 'firstSeenAt': a.get('first_seen_at'),
                 'lastSeenAt': a.get('last_seen_at'),
+                'notes': a.get('notes'),
             }
             for a in db_articles
         ]
@@ -2535,6 +2557,88 @@ def handle_hoa_news():
             'error': 'Failed to fetch HOA news',
             'message': str(e),
         }), 500
+
+
+@dashboard_bp.route('/api/dashboard/hoa-news/analyze-notes', methods=['POST', 'OPTIONS'])
+def analyze_hoa_notes():
+    """Analyze all HOA news notes with AI to extract feature ideas, key points, and business analysis."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    try:
+        # Fetch all articles with notes
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+            params={
+                'select': 'id,title,category,priority,notes,description',
+                'notes': 'not.is.null',
+                'order': 'pub_date.desc',
+                'limit': '50'
+            },
+            headers=supabase_headers(),
+            timeout=TIMEOUT
+        )
+
+        if not response.ok:
+            raise Exception(f'Failed to fetch noted articles: {response.text}')
+
+        noted_articles = response.json()
+
+        if not noted_articles:
+            return jsonify({'error': 'No articles with notes found'}), 400
+
+        # Build context for Claude
+        articles_context = []
+        for a in noted_articles:
+            articles_context.append({
+                'title': a.get('title', ''),
+                'category': a.get('category', ''),
+                'priority': a.get('priority', ''),
+                'notes': a.get('notes', ''),
+                'summary': (a.get('description') or '')[:300]
+            })
+
+        prompt = f"""You are a business analyst for DisputeMyHOA, a $49 self-service SaaS product that helps homeowners respond to HOA violations.
+
+Below are notes taken by the team on {len(noted_articles)} HOA industry news articles. Analyze these notes and provide:
+
+1. **Feature Ideas**: 3-5 specific product or website feature ideas inspired by these notes. Each should have a title, description, and priority (high/medium/low).
+
+2. **Key Points**: 5-8 important themes or patterns across all the notes. These should be concise observations.
+
+3. **Business Analysis**: A paragraph analyzing how the information in these notes can benefit DisputeMyHOA — opportunities, threats, market trends, and strategic implications.
+
+ARTICLES WITH NOTES:
+{json.dumps(articles_context, indent=2)}
+
+Respond in this exact JSON format:
+{{
+  "feature_ideas": [
+    {{"title": "...", "description": "...", "priority": "high|medium|low"}}
+  ],
+  "key_points": ["...", "..."],
+  "business_analysis": "..."
+}}"""
+
+        text, usage = call_claude_sonnet(prompt, system_prompt='You are a business analyst. Return only valid JSON.')
+
+        # Parse response
+        result = json.loads(text)
+
+        return jsonify({
+            'feature_ideas': result.get('feature_ideas', []),
+            'key_points': result.get('key_points', []),
+            'business_analysis': result.get('business_analysis', ''),
+            'articles_analyzed': len(noted_articles),
+            'tokens_used': {'input': usage.input_tokens, 'output': usage.output_tokens}
+        })
+
+    except json.JSONDecodeError:
+        logger.error('Failed to parse Claude response for notes analysis')
+        return jsonify({'error': 'Failed to parse AI response'}), 500
+    except Exception as e:
+        logger.error(f'Notes analysis error: {str(e)}')
+        return jsonify({'error': f'Failed to analyze notes: {str(e)}'}), 500
 
 
 # ============================================================================
