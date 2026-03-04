@@ -5303,6 +5303,26 @@ def _fetch_doc_summaries() -> Dict[str, str]:
     return summaries
 
 
+def _read_api_cache(cache_key: str) -> Optional[Dict]:
+    """Read cached data from api_cache table. Returns data dict or None."""
+    if not SUPABASE_URL:
+        return None
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/api_cache",
+            params={'cache_key': f'eq.{cache_key}', 'select': 'data,updated_at'},
+            headers=supabase_headers(),
+            timeout=TIMEOUT
+        )
+        if response.ok:
+            rows = response.json()
+            if rows:
+                return rows[0].get('data')
+    except Exception as e:
+        logger.error(f'_read_api_cache({cache_key}) error: {str(e)}')
+    return None
+
+
 def _build_live_data_snapshot() -> Dict:
     """Build aggregated live data for the chatbot and daily summary. Tolerates individual source failures."""
     sources_loaded = []
@@ -6454,6 +6474,180 @@ Write it as a single prompt that starts with the instruction and includes all co
     except Exception as e:
         logger.error(f'Feature prompt generation error: {str(e)}')
         return jsonify({'error': 'Failed to generate implementation prompt'}), 500
+
+
+@dashboard_bp.route('/api/dashboard/features/suggestions', methods=['POST', 'OPTIONS'])
+def generate_feature_suggestions():
+    """Generate AI-powered feature suggestions from aggregated dashboard data."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if not SUPABASE_URL or not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'Supabase or Anthropic API not configured'}), 500
+
+    result_text = ''
+    try:
+        # 1. Gather live data snapshot (Stripe, Cases, Ads, Klaviyo, Alerts, Checklists)
+        snapshot = _build_live_data_snapshot()
+
+        # 2. Read PostHog cached data
+        posthog_data = _read_api_cache('posthog_data') or {}
+
+        # 3. Read Lighthouse cached data
+        lighthouse_data = _read_api_cache('lighthouse_data') or {}
+
+        # 4. Read latest legality scorecard
+        scorecard_data = {}
+        try:
+            sc_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/legality_scorecard",
+                params={
+                    'status': 'eq.completed',
+                    'order': 'analysis_date.desc',
+                    'limit': '1',
+                    'select': 'summary,categories,cases_analyzed'
+                },
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if sc_resp.ok and sc_resp.json():
+                scorecard_data = sc_resp.json()[0]
+        except Exception as e:
+            logger.warning(f'Feature suggestions - scorecard fetch failed: {e}')
+
+        # 5. Read recent HOA news
+        news_data = []
+        try:
+            news_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+                params={
+                    'select': 'title,category,priority',
+                    'order': 'pub_date.desc',
+                    'limit': '15'
+                },
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if news_resp.ok:
+                news_data = news_resp.json()
+        except Exception as e:
+            logger.warning(f'Feature suggestions - news fetch failed: {e}')
+
+        # 6. Fetch existing features to avoid duplicates
+        existing_features = []
+        try:
+            feat_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/dmhoa_feature_requests",
+                params={'select': 'title,status', 'order': 'created_at.desc'},
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if feat_resp.ok:
+                existing_features = feat_resp.json()
+        except Exception as e:
+            logger.warning(f'Feature suggestions - existing features fetch failed: {e}')
+
+        # 7. Build aggregated context for Claude
+        context = {
+            'revenue': snapshot.get('stripe', {}),
+            'cases': snapshot.get('cases', {}),
+            'google_ads': snapshot.get('google_ads', {}),
+            'email': snapshot.get('klaviyo', {}),
+            'posthog': {
+                'bounceRate': posthog_data.get('bounceRate', 0),
+                'avgTimeOnPage': posthog_data.get('avgTimeOnPage', 0),
+                'pagesPerSession': posthog_data.get('pagesPerSession', 0),
+                'totalSessions': posthog_data.get('totalSessions', 0),
+                'rageClicks': posthog_data.get('rageClicks', 0),
+                'deadClicks': posthog_data.get('deadClicks', 0),
+                'jsErrors': posthog_data.get('jsErrors', 0),
+                'slowPageLoads': posthog_data.get('slowPageLoads', 0),
+                'topPages': posthog_data.get('topPages', []),
+                'pagesWithIssues': posthog_data.get('pagesWithIssues', []),
+                'webVitals': posthog_data.get('webVitals', {}),
+                'funnel': posthog_data.get('funnel', {}),
+                'compositeGrade': posthog_data.get('compositeGrade', {}),
+            },
+            'lighthouse': {
+                'performanceScore': lighthouse_data.get('performanceScore', 0),
+                'seoScore': lighthouse_data.get('seoScore', 0),
+                'accessibilityScore': lighthouse_data.get('accessibilityScore', 0),
+                'bestPracticesScore': lighthouse_data.get('bestPracticesScore', 0),
+                'lcp': lighthouse_data.get('lcp', {}),
+                'fcp': lighthouse_data.get('fcp', {}),
+                'cls': lighthouse_data.get('cls', {}),
+                'tbt': lighthouse_data.get('tbt', {}),
+            },
+            'legality_scorecard': scorecard_data,
+            'recent_news': [{'title': n.get('title', ''), 'category': n.get('category', ''), 'priority': n.get('priority', '')} for n in news_data[:15]],
+        }
+
+        existing_titles = [f.get('title', '') for f in existing_features]
+
+        # 8. Build and send Claude prompt
+        system_prompt = 'You are a product strategist for DisputeMyHOA, a $49 self-service SaaS that helps homeowners respond to HOA violation notices. You analyze real business data and suggest actionable feature improvements. Respond with valid JSON only, no markdown code fences.'
+
+        prompt = f"""Analyze the following real-time business data for DisputeMyHOA and suggest 5-8 feature improvements.
+
+BUSINESS DATA:
+{json.dumps(context, indent=2, default=str)}
+
+EXISTING FEATURES (do NOT duplicate these):
+{json.dumps(existing_titles, indent=2)}
+
+For each suggestion, provide:
+- "title": concise feature title (max 80 chars)
+- "description": 2-3 sentence explanation of what to build and why
+- "category": one of "homepage", "conversion", "performance", "content", "marketing", "ux", "product"
+- "target_repo": one of "frontend", "backend", "dashboard"
+- "estimated_effort": one of "small", "medium", "large"
+- "priority": one of "high", "medium", "low" (based on potential impact)
+- "data_basis": brief explanation of which specific metrics informed this suggestion (e.g. "bounce rate 72%, avg time on page 15s")
+
+Focus areas (prioritize top to bottom):
+1. HOMEPAGE ENGAGEMENT: If bounce rate > 50% or avg time on page < 30s, suggest specific homepage changes to increase visitor stay time (hero copy, social proof, interactive elements, above-the-fold optimization)
+2. CONVERSION FUNNEL: If there are significant drop-offs between landing -> preview -> purchase, suggest fixes for the weakest stage
+3. PERFORMANCE: If any Lighthouse score < 80 or web vitals exceed thresholds (LCP > 2500ms, CLS > 0.1, FCP > 1800ms), suggest specific technical fixes
+4. MARKETING: Based on ad CPA, email list growth, and keyword performance, suggest campaign improvements
+5. PRODUCT: Based on violation type patterns from the legality scorecard, suggest new features or content for the most common case types
+6. CONTENT: Based on HOA news trends, suggest blog topics or educational content that could drive organic traffic
+
+Respond with this exact JSON structure:
+{{"suggestions": [...]}}"""
+
+        result_text, usage = call_claude_sonnet(prompt, system_prompt)
+
+        # Parse the response
+        cleaned = result_text.replace('```json', '').replace('```', '').strip()
+        parsed = json.loads(cleaned)
+        suggestions = parsed.get('suggestions', [])
+
+        # Track data sources that were available
+        data_sources = snapshot.get('_sources_loaded', [])
+        if posthog_data:
+            data_sources.append('posthog')
+        if lighthouse_data:
+            data_sources.append('lighthouse')
+        if scorecard_data:
+            data_sources.append('legality_scorecard')
+        if news_data:
+            data_sources.append('hoa_news')
+
+        return jsonify({
+            'suggestions': suggestions,
+            'data_sources': data_sources,
+            'tokens_used': {
+                'input': usage.get('input_tokens', 0),
+                'output': usage.get('output_tokens', 0),
+            },
+        })
+
+    except json.JSONDecodeError as e:
+        logger.error(f'Feature suggestions JSON parse error: {str(e)}')
+        return jsonify({'error': 'Failed to parse AI suggestions'}), 500
+    except Exception as e:
+        logger.error(f'Feature suggestions error: {str(e)}')
+        return jsonify({'error': 'Failed to generate feature suggestions'}), 500
 
 
 # ============================================================================
