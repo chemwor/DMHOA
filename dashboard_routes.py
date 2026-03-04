@@ -3169,7 +3169,11 @@ def handle_legality_scorecard():
                     payload = {}
 
             notice_type = payload.get('noticeType') or payload.get('violationType') or 'Unknown'
+            if not isinstance(notice_type, str):
+                notice_type = str(notice_type) if notice_type else 'Unknown'
             state = payload.get('state') or payload.get('hoaState') or 'Unknown'
+            if not isinstance(state, str):
+                state = str(state) if state else 'Unknown'
 
             if notice_type not in by_type:
                 by_type[notice_type] = {'count': 0, 'paid': 0, 'revenue': 0}
