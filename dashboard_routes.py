@@ -3651,8 +3651,8 @@ def scan_statutes():
             if (state, cat) not in existing:
                 missing.append((state, cat))
 
-    # Cap at 20 per request to avoid Heroku timeout
-    batch = missing[:20]
+    # Cap at 5 per request to stay within Heroku 30s timeout
+    batch = missing[:5]
     generated = 0
     failed = 0
     details = []
