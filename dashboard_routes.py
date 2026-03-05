@@ -6657,17 +6657,58 @@ def get_six_month_plan():
             except Exception:
                 pass
 
+        # --- Content actuals ---
+        # Auto-count blog posts by month from blog_posts table
+        blog_by_month = {}
+        try:
+            # Plan months: 1=March 2026, 2=April 2026, ..., 6=August 2026
+            blog_resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/blog_posts",
+                params={
+                    'select': 'published_at',
+                    'published_at': 'gte.2026-03-01',
+                    'order': 'published_at.asc',
+                    'limit': '500'
+                },
+                headers=supabase_headers(),
+                timeout=TIMEOUT
+            )
+            if blog_resp.ok:
+                for bp in blog_resp.json():
+                    pub = bp.get('published_at', '')
+                    if pub:
+                        try:
+                            pub_date = datetime.fromisoformat(pub.replace('Z', '+00:00'))
+                            # March=month1, April=month2, ..., August=month6
+                            blog_month = pub_date.month - 2
+                            if 1 <= blog_month <= 6:
+                                blog_by_month[blog_month] = blog_by_month.get(blog_month, 0) + 1
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f'Six-month plan - blog count failed: {e}')
+
+        # Manual content counts from api_cache
+        manual_content = _read_api_cache('plan_content_actuals') or {}
+
         months = []
         for pm in PLAN_MONTHS:
             m = pm['month']
             cl = checklist_by_month.get(m, {'done': 0, 'total': 0})
             status = 'active' if m == current_month else ('completed' if m < current_month else 'upcoming')
+            m_manual = manual_content.get(str(m), {})
             months.append({
                 **pm,
                 'budget_actual': ads_spend if m == current_month else 0,
                 'checklist_done': cl['done'],
                 'checklist_total': cl['total'],
                 'status': status,
+                'content_actuals': {
+                    'blog': blog_by_month.get(m, 0),
+                    'video': m_manual.get('video', 0),
+                    'newsletter': m_manual.get('newsletter', 0),
+                    'social': m_manual.get('social', 0),
+                },
             })
 
         total_done = checklists_all.get('done', 0)
@@ -6691,6 +6732,51 @@ def get_six_month_plan():
     except Exception as e:
         logger.error(f'Six-month plan error: {str(e)}')
         return jsonify({'error': 'Failed to generate six-month plan status'}), 500
+
+
+@dashboard_bp.route('/api/dashboard/six-month/content', methods=['PATCH', 'OPTIONS'])
+def update_content_actual():
+    """Update manual content objective counts (video, newsletter, social)."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    body = request.get_json(silent=True) or {}
+    month = body.get('month')
+    content_type = body.get('type')
+    count = body.get('count', 0)
+
+    if not month or month not in range(1, 7):
+        return jsonify({'error': 'Month must be 1-6'}), 400
+    if content_type not in ('video', 'newsletter', 'social'):
+        return jsonify({'error': 'Type must be video, newsletter, or social'}), 400
+    if not isinstance(count, int) or count < 0:
+        return jsonify({'error': 'Count must be a non-negative integer'}), 400
+
+    try:
+        # Read existing
+        existing = _read_api_cache('plan_content_actuals') or {}
+        month_key = str(month)
+        if month_key not in existing:
+            existing[month_key] = {}
+        existing[month_key][content_type] = count
+
+        # Write back
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/api_cache",
+            headers={**supabase_headers(), 'Prefer': 'resolution=merge-duplicates'},
+            json={
+                'cache_key': 'plan_content_actuals',
+                'data': existing,
+                'updated_at': datetime.now().isoformat(),
+            },
+            timeout=TIMEOUT
+        )
+
+        return jsonify({'ok': True, 'month': month, 'type': content_type, 'count': count})
+
+    except Exception as e:
+        logger.error(f'Update content actual error: {str(e)}')
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================================================
