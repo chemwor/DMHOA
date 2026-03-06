@@ -125,7 +125,11 @@ def get_date_range(period: str) -> Dict[str, str]:
     now = datetime.now()
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    if period == 'today':
+    if period == 'yesterday':
+        yesterday = now - timedelta(days=1)
+        start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
+    elif period == 'today':
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == 'week':
         start = now - timedelta(days=7)
@@ -154,7 +158,12 @@ def get_timestamp_range(period: str) -> Dict[str, int]:
     end_of_day = now.replace(hour=23, minute=59, second=59)
     lte = int(end_of_day.timestamp())
 
-    if period == 'today':
+    if period == 'yesterday':
+        yesterday = now - timedelta(days=1)
+        start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        gte = int(start.timestamp())
+        lte = int(yesterday.replace(hour=23, minute=59, second=59).timestamp())
+    elif period == 'today':
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         gte = int(start.timestamp())
     elif period == 'week':
@@ -184,7 +193,11 @@ def get_google_ads_date_range(period: str) -> Dict[str, str]:
     now = datetime.now(ZoneInfo('America/Los_Angeles'))
     today = now.strftime('%Y-%m-%d')
 
-    if period == 'today':
+    if period == 'yesterday':
+        yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+        start_date = yesterday
+        today = yesterday  # end date is also yesterday
+    elif period == 'today':
         start_date = today
     elif period == 'week':
         start_date = (now - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -5035,7 +5048,10 @@ def _fetch_claude_usage_metrics(period: str = 'month') -> Optional[Dict]:
 
     try:
         now = datetime.now()
-        if period == 'today':
+        if period == 'yesterday':
+            yesterday = now - timedelta(days=1)
+            period_start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == 'today':
             period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         elif period == 'week':
             period_start = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -5072,7 +5088,7 @@ def _fetch_claude_usage_metrics(period: str = 'month') -> Optional[Dict]:
                          if r.get('created_at', '').startswith(today_str))
 
         # Average daily
-        if period == 'today':
+        if period in ('today', 'yesterday'):
             num_days = 1
         elif period == 'week':
             num_days = 7
@@ -6791,11 +6807,15 @@ def get_costs():
 
     try:
         period = request.args.get('period', 'month')
-        if period not in ('today', 'week', 'month'):
+        if period not in ('today', 'yesterday', 'week', 'month'):
             period = 'month'
 
         now = datetime.now()
-        if period == 'today':
+        if period == 'yesterday':
+            num_days = 1
+            yesterday = now - timedelta(days=1)
+            period_label = yesterday.strftime('%Y-%m-%d')
+        elif period == 'today':
             num_days = 1
             period_label = now.strftime('%Y-%m-%d')
         elif period == 'week':
@@ -6821,7 +6841,7 @@ def get_costs():
         openai = _fetch_openai_usage_metrics() or {}
         openai_today = openai.get('today_cost', 0)
         openai_avg = openai.get('avg_daily_7d', 0)
-        if period == 'today':
+        if period in ('today', 'yesterday'):
             openai_spend = openai_today
         elif period == 'week':
             openai_spend = round(openai_avg * 7, 2)
