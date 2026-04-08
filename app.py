@@ -33,6 +33,7 @@ from statute_lookup import (
 
 # Dashboard routes (migrated from Netlify functions)
 from dashboard_routes import dashboard_bp, _execute_alert_scan
+from routes.leads import leads_bp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -48,6 +49,7 @@ CORS(app, resources={r"/*": {"origins": "*"}},
 
 # Register dashboard blueprint (analytics endpoints migrated from Netlify)
 app.register_blueprint(dashboard_bp)
+app.register_blueprint(leads_bp)
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
