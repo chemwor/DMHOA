@@ -23,15 +23,30 @@ logger = logging.getLogger(__name__)
 
 SUBREDDITS = ['HOA', 'homeowners', 'FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
 
-KEYWORDS = [
-    'hoa fine', 'hoa violation', 'hoa dispute', 'hoa letter', 'hoa fined me',
-    "hoa won't", 'hoa ignored', 'hoa threatening', 'appeal hoa', 'fight hoa',
-    'hoa not responding', 'hoa complaint', 'dispute hoa',
+# For r/HOA and r/homeowners — nearly all posts are relevant, match broadly
+HOA_SUB_KEYWORDS = [
+    'fine', 'fined', 'violation', 'dispute', 'letter', 'threatening',
+    'appeal', 'fight', 'complaint', 'board', 'fee', 'assessment',
+    'lien', 'rule', 'enforce', 'notice', 'penalty', 'cc&r', 'ccr',
+    'covenant', 'bylaw', 'hearing', 'help', 'advice', 'what should',
+    'need advice', 'frustrated', 'concern', 'issue', 'problem',
 ]
 
-SCORE_WORDS_HIGH = ['fined', 'violation', 'threatened', 'lawsuit']
-SCORE_WORDS_MED = ['help', 'advice', 'what do i do', 'what should i']
-SCORE_WORDS_LOW = ['lawyer', 'attorney']
+# For general subs — need HOA context
+GENERAL_KEYWORDS = [
+    'hoa', 'homeowner association', 'homeowners association',
+    'condo association', 'condo board', 'hoa fine', 'hoa violation',
+    'hoa dispute', 'hoa letter', 'hoa fined', 'hoa threatening',
+    'appeal hoa', 'fight hoa', 'hoa complaint', 'dispute hoa',
+    'hoa board', 'hoa fee', 'hoa lien', 'hoa assessment',
+]
+
+SCORE_WORDS_HIGH = ['fined', 'violation', 'threatened', 'lawsuit', 'lien', 'penalty', 'foreclos']
+SCORE_WORDS_MED = ['help', 'advice', 'what do i do', 'what should i', 'need advice', 'frustrated']
+SCORE_WORDS_LOW = ['lawyer', 'attorney', 'legal', 'court']
+
+# Subreddits where all posts are HOA-related
+HOA_FOCUSED_SUBS = {'HOA', 'homeowners'}
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -50,9 +65,11 @@ def supabase_headers():
     }
 
 
-def matches_keywords(text):
+def matches_keywords(text, subreddit):
     text_lower = text.lower()
-    return any(kw in text_lower for kw in KEYWORDS)
+    if subreddit in HOA_FOCUSED_SUBS:
+        return any(kw in text_lower for kw in HOA_SUB_KEYWORDS)
+    return any(kw in text_lower for kw in GENERAL_KEYWORDS)
 
 
 def score_post(text):
@@ -145,7 +162,7 @@ def scrape():
                 continue
 
             combined_text = f"{post['title']} {post['selftext']}"
-            if not matches_keywords(combined_text):
+            if not matches_keywords(combined_text, sub_name):
                 continue
 
             lead = {
