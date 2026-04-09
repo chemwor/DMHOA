@@ -1,7 +1,7 @@
 """
 Reddit Lead Scraper for DMHOA
 Monitors HOA-related subreddits for potential leads.
-Uses Reddit's public JSON endpoints — no API key needed.
+Uses Pullpush API (public Reddit search) — no API key needed, works from cloud IPs.
 
 Usage:
     python scripts/reddit_scraper.py
@@ -21,9 +21,14 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-SUBREDDITS = ['HOA', 'homeowners', 'FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
+PULLPUSH_URL = 'https://api.pullpush.io/reddit/search/submission/'
 
-# For r/HOA and r/homeowners — nearly all posts are relevant, match broadly
+# HOA-focused subs: fetch all recent posts (they're all relevant)
+HOA_SUBS = ['HOA', 'homeowners']
+
+# General subs: search for HOA-related posts via keyword
+GENERAL_SUBS = ['FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
+
 HOA_SUB_KEYWORDS = [
     'fine', 'fined', 'violation', 'dispute', 'letter', 'threatening',
     'appeal', 'fight', 'complaint', 'board', 'fee', 'assessment',
@@ -32,28 +37,14 @@ HOA_SUB_KEYWORDS = [
     'need advice', 'frustrated', 'concern', 'issue', 'problem',
 ]
 
-# For general subs — need HOA context
-GENERAL_KEYWORDS = [
-    'hoa', 'homeowner association', 'homeowners association',
-    'condo association', 'condo board', 'hoa fine', 'hoa violation',
-    'hoa dispute', 'hoa letter', 'hoa fined', 'hoa threatening',
-    'appeal hoa', 'fight hoa', 'hoa complaint', 'dispute hoa',
-    'hoa board', 'hoa fee', 'hoa lien', 'hoa assessment',
-]
-
 SCORE_WORDS_HIGH = ['fined', 'violation', 'threatened', 'lawsuit', 'lien', 'penalty', 'foreclos']
 SCORE_WORDS_MED = ['help', 'advice', 'what do i do', 'what should i', 'need advice', 'frustrated']
 SCORE_WORDS_LOW = ['lawyer', 'attorney', 'legal', 'court']
 
-# Subreddits where all posts are HOA-related
-HOA_FOCUSED_SUBS = {'HOA', 'homeowners'}
-
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 
-REDDIT_HEADERS = {
-    'User-Agent': 'DMHOA-LeadScraper/1.0 (monitoring HOA subreddits)',
-}
+HEADERS = {'User-Agent': 'DMHOA-LeadScraper/1.0'}
 
 
 def supabase_headers():
@@ -65,11 +56,9 @@ def supabase_headers():
     }
 
 
-def matches_keywords(text, subreddit):
+def matches_keywords(text):
     text_lower = text.lower()
-    if subreddit in HOA_FOCUSED_SUBS:
-        return any(kw in text_lower for kw in HOA_SUB_KEYWORDS)
-    return any(kw in text_lower for kw in GENERAL_KEYWORDS)
+    return any(kw in text_lower for kw in HOA_SUB_KEYWORDS)
 
 
 def score_post(text):
@@ -88,7 +77,7 @@ def score_post(text):
 
 
 def get_existing_post_ids():
-    """Fetch post_ids that are already replied or skipped so we can skip them."""
+    """Fetch post_ids that are already replied or skipped."""
     url = f"{SUPABASE_URL}/rest/v1/dmhoa_leads"
     params = {
         'select': 'post_id',
@@ -104,42 +93,33 @@ def upsert_lead(lead):
     url = f"{SUPABASE_URL}/rest/v1/dmhoa_leads"
     resp = requests.post(url, headers=supabase_headers(), json=lead, timeout=10)
     if resp.status_code in (200, 201):
-        logger.info(f"  Upserted: {lead['post_id']} (score={lead['score']})")
+        logger.info(f"  Upserted: r/{lead['subreddit']} — {lead['title'][:60]}")
     else:
         logger.error(f"  Failed to upsert {lead['post_id']}: {resp.status_code} {resp.text}")
 
 
-def fetch_subreddit_posts(subreddit, limit=100):
-    """Fetch recent posts from a subreddit using Reddit's public JSON API."""
-    url = f"https://www.reddit.com/r/{subreddit}/new.json"
-    params = {'limit': min(limit, 100)}
+def fetch_pullpush(subreddit, query=None, size=100):
+    """Fetch posts from Pullpush API."""
+    params = {
+        'subreddit': subreddit,
+        'size': size,
+        'sort': 'desc',
+        'sort_type': 'created_utc',
+    }
+    if query:
+        params['q'] = query
 
     try:
-        resp = requests.get(url, headers=REDDIT_HEADERS, params=params, timeout=15)
-        if resp.status_code == 429:
-            logger.warning(f"Rate limited on r/{subreddit}, waiting 10s...")
-            time.sleep(10)
-            resp = requests.get(url, headers=REDDIT_HEADERS, params=params, timeout=15)
-
+        resp = requests.get(PULLPUSH_URL, headers=HEADERS, params=params, timeout=20)
         if resp.status_code != 200:
-            logger.error(f"Reddit returned {resp.status_code} for r/{subreddit}")
+            logger.error(f"Pullpush returned {resp.status_code} for r/{subreddit}")
             return []
 
         data = resp.json()
-        posts = []
-        for child in data.get('data', {}).get('children', []):
-            post = child.get('data', {})
-            posts.append({
-                'id': post.get('id', ''),
-                'title': post.get('title', ''),
-                'selftext': post.get('selftext', ''),
-                'permalink': post.get('permalink', ''),
-                'created_utc': post.get('created_utc', 0),
-            })
-        return posts
+        return data.get('data', [])
 
     except Exception as e:
-        logger.error(f"Error fetching r/{subreddit}: {e}")
+        logger.error(f"Error fetching r/{subreddit} from Pullpush: {e}")
         return []
 
 
@@ -151,34 +131,64 @@ def scrape():
     skip_ids = get_existing_post_ids()
     count = 0
 
-    for sub_name in SUBREDDITS:
-        logger.info(f"Scanning r/{sub_name}...")
-
-        posts = fetch_subreddit_posts(sub_name)
+    # HOA-focused subs: get all recent posts, filter by keywords
+    for sub_name in HOA_SUBS:
+        logger.info(f"Scanning r/{sub_name} (all recent posts)...")
+        posts = fetch_pullpush(sub_name, size=100)
         logger.info(f"  Fetched {len(posts)} posts")
 
         for post in posts:
-            if post['id'] in skip_ids:
+            post_id = post.get('id', '')
+            if post_id in skip_ids:
                 continue
 
-            combined_text = f"{post['title']} {post['selftext']}"
-            if not matches_keywords(combined_text, sub_name):
+            combined = f"{post.get('title', '')} {post.get('selftext', '')}"
+            if not matches_keywords(combined):
                 continue
 
             lead = {
-                'post_id': post['id'],
+                'post_id': post_id,
                 'subreddit': sub_name,
-                'title': post['title'][:500],
-                'url': f"https://reddit.com{post['permalink']}",
-                'score': score_post(combined_text),
+                'title': post.get('title', '')[:500],
+                'url': f"https://reddit.com/r/{sub_name}/comments/{post_id}",
+                'score': score_post(combined),
                 'status': 'new',
-                'created_utc': datetime.fromtimestamp(post['created_utc'], tz=timezone.utc).isoformat(),
+                'created_utc': datetime.fromtimestamp(
+                    post.get('created_utc', 0), tz=timezone.utc
+                ).isoformat(),
             }
             upsert_lead(lead)
             count += 1
 
-        # Be polite — wait between subreddits to avoid rate limits
-        time.sleep(2)
+        time.sleep(1)
+
+    # General subs: search for "hoa" keyword
+    for sub_name in GENERAL_SUBS:
+        logger.info(f"Scanning r/{sub_name} (searching 'hoa')...")
+        posts = fetch_pullpush(sub_name, query='hoa', size=50)
+        logger.info(f"  Fetched {len(posts)} posts")
+
+        for post in posts:
+            post_id = post.get('id', '')
+            if post_id in skip_ids:
+                continue
+
+            combined = f"{post.get('title', '')} {post.get('selftext', '')}"
+            lead = {
+                'post_id': post_id,
+                'subreddit': sub_name,
+                'title': post.get('title', '')[:500],
+                'url': f"https://reddit.com/r/{sub_name}/comments/{post_id}",
+                'score': score_post(combined),
+                'status': 'new',
+                'created_utc': datetime.fromtimestamp(
+                    post.get('created_utc', 0), tz=timezone.utc
+                ).isoformat(),
+            }
+            upsert_lead(lead)
+            count += 1
+
+        time.sleep(1)
 
     logger.info(f"Scrape complete. {count} new leads found.")
     return count
