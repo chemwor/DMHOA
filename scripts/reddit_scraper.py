@@ -1,21 +1,19 @@
 """
 Reddit Lead Scraper for DMHOA
 Monitors HOA-related subreddits for potential leads.
-Run manually or via Heroku Scheduler.
+Uses Reddit's public JSON endpoints — no API key needed.
 
 Usage:
     python scripts/reddit_scraper.py
 
-Requires env vars: PRAW_CLIENT_ID, PRAW_CLIENT_SECRET, PRAW_USER_AGENT,
-                   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+Requires env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 """
 
 import os
-import re
+import time
 import logging
 from datetime import datetime, timezone
 
-import praw
 import requests
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -27,7 +25,7 @@ SUBREDDITS = ['HOA', 'homeowners', 'FirstTimeHomeBuyer', 'personalfinance', 'leg
 
 KEYWORDS = [
     'hoa fine', 'hoa violation', 'hoa dispute', 'hoa letter', 'hoa fined me',
-    'hoa won\'t', 'hoa ignored', 'hoa threatening', 'appeal hoa', 'fight hoa',
+    "hoa won't", 'hoa ignored', 'hoa threatening', 'appeal hoa', 'fight hoa',
     'hoa not responding', 'hoa complaint', 'dispute hoa',
 ]
 
@@ -38,6 +36,10 @@ SCORE_WORDS_LOW = ['lawyer', 'attorney']
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 
+REDDIT_HEADERS = {
+    'User-Agent': 'DMHOA-LeadScraper/1.0 (monitoring HOA subreddits)',
+}
+
 
 def supabase_headers():
     return {
@@ -46,14 +48,6 @@ def supabase_headers():
         'Content-Type': 'application/json',
         'Prefer': 'resolution=merge-duplicates',
     }
-
-
-def get_reddit():
-    return praw.Reddit(
-        client_id=os.environ.get('PRAW_CLIENT_ID'),
-        client_secret=os.environ.get('PRAW_CLIENT_SECRET'),
-        user_agent=os.environ.get('PRAW_USER_AGENT', 'dmhoa-lead-scraper/1.0'),
-    )
 
 
 def matches_keywords(text):
@@ -98,41 +92,76 @@ def upsert_lead(lead):
         logger.error(f"  Failed to upsert {lead['post_id']}: {resp.status_code} {resp.text}")
 
 
+def fetch_subreddit_posts(subreddit, limit=100):
+    """Fetch recent posts from a subreddit using Reddit's public JSON API."""
+    url = f"https://www.reddit.com/r/{subreddit}/new.json"
+    params = {'limit': min(limit, 100)}
+
+    try:
+        resp = requests.get(url, headers=REDDIT_HEADERS, params=params, timeout=15)
+        if resp.status_code == 429:
+            logger.warning(f"Rate limited on r/{subreddit}, waiting 10s...")
+            time.sleep(10)
+            resp = requests.get(url, headers=REDDIT_HEADERS, params=params, timeout=15)
+
+        if resp.status_code != 200:
+            logger.error(f"Reddit returned {resp.status_code} for r/{subreddit}")
+            return []
+
+        data = resp.json()
+        posts = []
+        for child in data.get('data', {}).get('children', []):
+            post = child.get('data', {})
+            posts.append({
+                'id': post.get('id', ''),
+                'title': post.get('title', ''),
+                'selftext': post.get('selftext', ''),
+                'permalink': post.get('permalink', ''),
+                'created_utc': post.get('created_utc', 0),
+            })
+        return posts
+
+    except Exception as e:
+        logger.error(f"Error fetching r/{subreddit}: {e}")
+        return []
+
+
 def scrape():
     if not SUPABASE_URL or not SUPABASE_KEY:
         logger.error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
         return 0
 
-    reddit = get_reddit()
     skip_ids = get_existing_post_ids()
     count = 0
 
     for sub_name in SUBREDDITS:
         logger.info(f"Scanning r/{sub_name}...")
-        try:
-            subreddit = reddit.subreddit(sub_name)
-            for post in subreddit.new(limit=100):
-                if post.id in skip_ids:
-                    continue
 
-                combined_text = f"{post.title} {post.selftext or ''}"
-                if not matches_keywords(combined_text):
-                    continue
+        posts = fetch_subreddit_posts(sub_name)
+        logger.info(f"  Fetched {len(posts)} posts")
 
-                lead = {
-                    'post_id': post.id,
-                    'subreddit': sub_name,
-                    'title': post.title[:500],
-                    'url': f"https://reddit.com{post.permalink}",
-                    'score': score_post(combined_text),
-                    'status': 'new',
-                    'created_utc': datetime.fromtimestamp(post.created_utc, tz=timezone.utc).isoformat(),
-                }
-                upsert_lead(lead)
-                count += 1
+        for post in posts:
+            if post['id'] in skip_ids:
+                continue
 
-        except Exception as e:
-            logger.error(f"Error scanning r/{sub_name}: {e}")
+            combined_text = f"{post['title']} {post['selftext']}"
+            if not matches_keywords(combined_text):
+                continue
+
+            lead = {
+                'post_id': post['id'],
+                'subreddit': sub_name,
+                'title': post['title'][:500],
+                'url': f"https://reddit.com{post['permalink']}",
+                'score': score_post(combined_text),
+                'status': 'new',
+                'created_utc': datetime.fromtimestamp(post['created_utc'], tz=timezone.utc).isoformat(),
+            }
+            upsert_lead(lead)
+            count += 1
+
+        # Be polite — wait between subreddits to avoid rate limits
+        time.sleep(2)
 
     logger.info(f"Scrape complete. {count} new leads found.")
     return count
