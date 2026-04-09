@@ -4,7 +4,7 @@ Routes: GET /api/dashboard/leads, PATCH /api/dashboard/leads/:id, POST /api/dash
 """
 
 import os
-import subprocess
+import threading
 import logging
 from datetime import datetime, timezone
 
@@ -19,6 +19,162 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 TIMEOUT = (5, 60)
 
+# --- Inline scraper (avoids subprocess timeout) ---
+
+PULLPUSH_URL = 'https://api.pullpush.io/reddit/search/submission/'
+HOA_SUBS = ['HOA', 'homeowners']
+GENERAL_SUBS = ['FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
+
+HOA_SUB_KEYWORDS = [
+    'fine', 'fined', 'violation', 'dispute', 'letter', 'threatening',
+    'appeal', 'fight', 'complaint', 'board', 'fee', 'assessment',
+    'lien', 'rule', 'enforce', 'notice', 'penalty', 'cc&r', 'ccr',
+    'covenant', 'bylaw', 'hearing', 'help', 'advice', 'what should',
+    'need advice', 'frustrated', 'concern', 'issue', 'problem',
+]
+
+SCORE_WORDS_HIGH = ['fined', 'violation', 'threatened', 'lawsuit', 'lien', 'penalty', 'foreclos']
+SCORE_WORDS_MED = ['help', 'advice', 'what do i do', 'what should i', 'need advice', 'frustrated']
+SCORE_WORDS_LOW = ['lawyer', 'attorney', 'legal', 'court']
+
+_scraper_status = {'running': False, 'last_result': None}
+
+
+def _supabase_headers_upsert():
+    return {
+        'apikey': SUPABASE_KEY,
+        'Authorization': f'Bearer {SUPABASE_KEY}',
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates',
+    }
+
+
+def _score_post(text):
+    text_lower = text.lower()
+    score = 0
+    for w in SCORE_WORDS_HIGH:
+        if w in text_lower:
+            score += 3
+    for w in SCORE_WORDS_MED:
+        if w in text_lower:
+            score += 2
+    for w in SCORE_WORDS_LOW:
+        if w in text_lower:
+            score += 1
+    return score
+
+
+def _run_scrape():
+    """Run the scraper in a background thread."""
+    _scraper_status['running'] = True
+    count = 0
+    errors = []
+
+    try:
+        # Get existing skipped/replied IDs
+        skip_ids = set()
+        try:
+            resp = http_requests.get(
+                f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+                headers=supabase_headers(),
+                params={'select': 'post_id', 'status': 'in.(replied,skipped)'},
+                timeout=10
+            )
+            if resp.ok:
+                skip_ids = {r['post_id'] for r in resp.json()}
+        except Exception as e:
+            logger.error(f"Failed to fetch existing IDs: {e}")
+
+        headers = {'User-Agent': 'DMHOA-LeadScraper/1.0'}
+
+        # HOA-focused subs: get all recent posts
+        for sub in HOA_SUBS:
+            try:
+                resp = http_requests.get(PULLPUSH_URL, headers=headers,
+                    params={'subreddit': sub, 'size': 100, 'sort': 'desc', 'sort_type': 'created_utc'},
+                    timeout=20)
+                if resp.status_code != 200:
+                    errors.append(f"r/{sub}: HTTP {resp.status_code}")
+                    continue
+
+                posts = resp.json().get('data', [])
+                for post in posts:
+                    pid = post.get('id', '')
+                    if pid in skip_ids:
+                        continue
+                    combined = f"{post.get('title', '')} {post.get('selftext', '')}"
+                    if not any(kw in combined.lower() for kw in HOA_SUB_KEYWORDS):
+                        continue
+
+                    lead = {
+                        'post_id': pid,
+                        'subreddit': sub,
+                        'title': post.get('title', '')[:500],
+                        'url': f"https://reddit.com/r/{sub}/comments/{pid}",
+                        'score': _score_post(combined),
+                        'status': 'new',
+                        'created_utc': datetime.fromtimestamp(
+                            post.get('created_utc', 0), tz=timezone.utc
+                        ).isoformat(),
+                    }
+                    r = http_requests.post(
+                        f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+                        headers=_supabase_headers_upsert(), json=lead, timeout=10)
+                    if r.status_code in (200, 201):
+                        count += 1
+            except Exception as e:
+                errors.append(f"r/{sub}: {str(e)[:100]}")
+
+        # General subs: search for "hoa"
+        for sub in GENERAL_SUBS:
+            try:
+                resp = http_requests.get(PULLPUSH_URL, headers=headers,
+                    params={'subreddit': sub, 'q': 'hoa', 'size': 50, 'sort': 'desc', 'sort_type': 'created_utc'},
+                    timeout=20)
+                if resp.status_code != 200:
+                    errors.append(f"r/{sub}: HTTP {resp.status_code}")
+                    continue
+
+                posts = resp.json().get('data', [])
+                for post in posts:
+                    pid = post.get('id', '')
+                    if pid in skip_ids:
+                        continue
+                    combined = f"{post.get('title', '')} {post.get('selftext', '')}"
+                    lead = {
+                        'post_id': pid,
+                        'subreddit': sub,
+                        'title': post.get('title', '')[:500],
+                        'url': f"https://reddit.com/r/{sub}/comments/{pid}",
+                        'score': _score_post(combined),
+                        'status': 'new',
+                        'created_utc': datetime.fromtimestamp(
+                            post.get('created_utc', 0), tz=timezone.utc
+                        ).isoformat(),
+                    }
+                    r = http_requests.post(
+                        f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+                        headers=_supabase_headers_upsert(), json=lead, timeout=10)
+                    if r.status_code in (200, 201):
+                        count += 1
+            except Exception as e:
+                errors.append(f"r/{sub}: {str(e)[:100]}")
+
+        _scraper_status['last_result'] = {
+            'ok': True,
+            'count': count,
+            'errors': errors,
+        }
+
+    except Exception as e:
+        _scraper_status['last_result'] = {'ok': False, 'error': str(e)}
+
+    finally:
+        _scraper_status['running'] = False
+        logger.info(f"Scrape complete. {count} leads upserted. Errors: {errors}")
+
+
+# --- Routes ---
 
 def supabase_headers():
     return {
@@ -92,20 +248,22 @@ def run_scraper():
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
-    try:
-        result = subprocess.run(
-            ['python', 'scripts/reddit_scraper.py'],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return jsonify({
-            'ok': result.returncode == 0,
-            'stdout': result.stdout[-2000:] if result.stdout else '',
-            'stderr': result.stderr[-500:] if result.stderr else '',
-        })
-    except subprocess.TimeoutExpired:
-        return jsonify({'ok': False, 'error': 'Scraper timed out after 120s'}), 504
-    except Exception as e:
-        logger.error(f"Error running scraper: {e}")
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    if _scraper_status['running']:
+        return jsonify({'ok': True, 'message': 'Scraper is already running'})
+
+    # Run in background thread so we can respond immediately
+    thread = threading.Thread(target=_run_scrape, daemon=True)
+    thread.start()
+
+    return jsonify({'ok': True, 'message': 'Scraper started. Refresh in ~30 seconds to see new leads.'})
+
+
+@leads_bp.route('/api/dashboard/leads/scraper-status', methods=['GET', 'OPTIONS'])
+def scraper_status():
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    return jsonify({
+        'running': _scraper_status['running'],
+        'last_result': _scraper_status['last_result'],
+    })
