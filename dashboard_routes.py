@@ -185,7 +185,7 @@ def get_timestamp_range(period: str) -> Dict[str, int]:
     return {'gte': gte, 'lte': lte}
 
 
-PLAN_START_DATE = '2026-02-25'
+PLAN_START_DATE = '2026-04-01'
 
 def get_google_ads_date_range(period: str) -> Dict[str, str]:
     """Get date range in YYYY-MM-DD format for Google Ads API.
@@ -6460,13 +6460,20 @@ def send_daily_summary():
 # ============================================================================
 
 PLAN_MONTHS = [
-    {'month': 1, 'name': 'March 2026', 'theme': 'Foundation & Launch', 'budget_planned': 600},
-    {'month': 2, 'name': 'April 2026', 'theme': 'Growth & Optimization', 'budget_planned': 600},
-    {'month': 3, 'name': 'May 2026', 'theme': 'Content & SEO Push', 'budget_planned': 600},
-    {'month': 4, 'name': 'June 2026', 'theme': 'Scale What Works', 'budget_planned': 750},
-    {'month': 5, 'name': 'July 2026', 'theme': 'Expansion & Partnerships', 'budget_planned': 800},
-    {'month': 6, 'name': 'August 2026', 'theme': 'Sustainability & Review', 'budget_planned': 900},
+    {'month': 1, 'name': 'April 2026', 'theme': 'Foundation & Launch', 'budget_planned': 400},
+    {'month': 2, 'name': 'May 2026', 'theme': 'Optimize & Amplify', 'budget_planned': 500},
+    {'month': 3, 'name': 'June 2026', 'theme': 'Content Engine', 'budget_planned': 600},
+    {'month': 4, 'name': 'July 2026', 'theme': 'Scale What Works', 'budget_planned': 750},
+    {'month': 5, 'name': 'August 2026', 'theme': 'Authority & Media', 'budget_planned': 850},
+    {'month': 6, 'name': 'September 2026', 'theme': 'Evaluate & Decide', 'budget_planned': 900},
 ]
+
+# Pre-plan ramp-up data (March 2026) — kept for historical reference
+RAMP_UP_PERIOD = {
+    'name': 'March 2026',
+    'theme': 'Pre-plan Ramp-Up',
+    'budget_planned': 600,
+}
 
 
 def _fetch_posthog_metrics_for_plan() -> Dict:
@@ -6522,19 +6529,19 @@ def _fetch_posthog_metrics_for_plan() -> Dict:
 
 GRADING = {
     'traffic': {
-        'monthly_visitors': {'A': 1000, 'C': 250},
-        'google_ads_ctr': {'A': 0.035, 'C': 0.02},
-        'organic_share': {'A': 0.30, 'C': 0.10},
+        'monthly_visitors': {'A': 500, 'C': 100},
+        'google_ads_ctr': {'A': 0.025, 'C': 0.015},
+        'organic_share': {'A': 0.20, 'C': 0.05},
     },
     'conversion': {
-        'site_conversion': {'A': 0.03, 'C': 0.01},
+        'site_conversion': {'A': 0.02, 'C': 0.005},
         'email_open_rate': {'A': 0.25, 'C': 0.15},
-        'preview_to_paid': {'A': 0.05, 'C': 0.02},
+        'preview_to_paid': {'A': 0.03, 'C': 0.01},
     },
     'revenue': {
-        'monthly_revenue': {'A': 1000, 'C': 300},
+        'monthly_revenue': {'A': 200, 'C': 50},
         'cac_ltv_ratio': {'A': 3, 'C': 1},
-        'roas': {'A': 3, 'C': 1},
+        'roas': {'A': 2, 'C': 0.5},
     },
 }
 
@@ -6555,11 +6562,11 @@ def get_six_month_plan():
 
     try:
         now = datetime.now()
-        # Plan started Feb 25, 2026: Feb=Month 1, Mar=Month 1, Apr=Month 2, etc.
-        if now.strftime('%Y-%m-%d') < '2026-03-01':
-            current_month = 1  # Still in the ramp-up period of Month 1
+        # Official plan starts April 2026: Apr=Month 1, May=Month 2, ..., Sep=Month 6
+        if now.strftime('%Y-%m-%d') < '2026-04-01':
+            current_month = 1  # Pre-plan, still in ramp-up
         else:
-            current_month = max(1, min(6, now.month - 2))  # March=1..August=6
+            current_month = max(1, min(6, now.month - 3))  # April=1..September=6
 
         # Fetch live data — use plan_start date range for the full picture
         stripe_month = _fetch_stripe_metrics('month')
@@ -6675,9 +6682,11 @@ def get_six_month_plan():
 
         # --- Content actuals ---
         # Auto-count blog posts by month from blog_posts table
+        # Plan months: 1=April 2026, 2=May 2026, ..., 6=September 2026
+        # March 2026 = ramp-up period (kept separately)
         blog_by_month = {}
+        ramp_up_blog_count = 0
         try:
-            # Plan months: 1=March 2026, 2=April 2026, ..., 6=August 2026
             blog_resp = requests.get(
                 f"{SUPABASE_URL}/rest/v1/blog_posts",
                 params={
@@ -6695,10 +6704,13 @@ def get_six_month_plan():
                     if pub:
                         try:
                             pub_date = datetime.fromisoformat(pub.replace('Z', '+00:00'))
-                            # March=month1, April=month2, ..., August=month6
-                            blog_month = pub_date.month - 2
-                            if 1 <= blog_month <= 6:
-                                blog_by_month[blog_month] = blog_by_month.get(blog_month, 0) + 1
+                            if pub_date.month == 3 and pub_date.year == 2026:
+                                ramp_up_blog_count += 1
+                            else:
+                                # April=month1, May=month2, ..., September=month6
+                                blog_month = pub_date.month - 3
+                                if 1 <= blog_month <= 6:
+                                    blog_by_month[blog_month] = blog_by_month.get(blog_month, 0) + 1
                         except Exception:
                             pass
         except Exception as e:
@@ -6731,9 +6743,23 @@ def get_six_month_plan():
         total_all = checklists_all.get('total', 0)
         overall_progress = round(total_done / total_all, 2) if total_all > 0 else 0
 
+        # Pre-plan ramp-up summary (March 2026 — historical)
+        ramp_up_manual = _read_api_cache('plan_ramp_up_actuals') or {}
+        ramp_up = {
+            **RAMP_UP_PERIOD,
+            'budget_actual': 55.98,  # historical: ad spend during ramp-up
+            'content_actuals': {
+                'blog': ramp_up_blog_count,
+                'video': ramp_up_manual.get('video', 0),
+                'newsletter': ramp_up_manual.get('newsletter', 0),
+                'social': ramp_up_manual.get('social', 0),
+            },
+        }
+
         return jsonify({
             'current_month': current_month,
             'months': months,
+            'ramp_up': ramp_up,
             'current_grades': current_grades,
             'scenario': {
                 'current': scenario,
