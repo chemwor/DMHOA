@@ -34,6 +34,7 @@ from statute_lookup import (
 # Dashboard routes (migrated from Netlify functions)
 from dashboard_routes import dashboard_bp, _execute_alert_scan
 from routes.leads import leads_bp
+from routes.google_ads_writer import google_ads_writer_bp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -50,6 +51,7 @@ CORS(app, resources={r"/*": {"origins": "*"}},
 # Register dashboard blueprint (analytics endpoints migrated from Netlify)
 app.register_blueprint(dashboard_bp)
 app.register_blueprint(leads_bp)
+app.register_blueprint(google_ads_writer_bp)
 
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -6154,8 +6156,24 @@ def _scheduled_alert_scan():
             logger.error(f"Scheduled alert scan failed: {e}")
 
 
+def _scheduled_ad_analyzer():
+    """Daily Google Ads analyzer — generates pending proposals for review."""
+    try:
+        from routes.google_ads_writer import _get_access_token, _run_analyzer
+        token = _get_access_token()
+        if not token:
+            logger.warning("Skipping ad analyzer: Google Ads credentials not configured")
+            return
+        result = _run_analyzer(token)
+        logger.info(f"Daily ad analyzer: {result.get('proposals_created', 0)} proposals created")
+        if result.get('errors'):
+            logger.warning(f"Ad analyzer errors: {result['errors']}")
+    except Exception as e:
+        logger.error(f"Scheduled ad analyzer failed: {e}")
+
+
 def _start_scheduler():
-    """Initialize APScheduler with hourly alert scan."""
+    """Initialize APScheduler with hourly alert scan and daily ad analyzer."""
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler(daemon=True)
@@ -6166,8 +6184,15 @@ def _start_scheduler():
             id='hourly_alert_scan',
             replace_existing=True,
         )
+        scheduler.add_job(
+            _scheduled_ad_analyzer,
+            'interval',
+            hours=24,
+            id='daily_ad_analyzer',
+            replace_existing=True,
+        )
         scheduler.start()
-        logger.info("APScheduler started — alert scan running every hour")
+        logger.info("APScheduler started — alert scan hourly, ad analyzer daily")
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
 
