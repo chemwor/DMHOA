@@ -42,6 +42,19 @@ TIMEOUT = (5, 60)
 # Site host used for landing page URLs
 SITE_URL = os.environ.get('SITE_URL', 'https://disputemyhoa.com')
 
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
+
+# Same writing style rules as the rest of the system
+HUMAN_VOICE_RULES = """
+
+WRITING STYLE RULES (critical, must follow):
+- Never use em-dashes (—) or en-dashes (–). Use periods, commas, colons, or parentheses instead.
+- Never use these words/phrases: delve, leverage, robust, seamlessly, comprehensive, holistic, empower, streamline, cutting-edge, state-of-the-art, embark, harness, tapestry, vibrant, transformative, paramount, pivotal, moreover, furthermore, in essence, it is worth noting, in conclusion, ultimately, navigate the complexities, in today's, in the realm of.
+- Do not start sentences with "Indeed", "Notably", "Importantly", or "However,".
+- Write plain, direct, conversational English. Short sentences. No throat-clearing.
+- Sound like a real person wrote this, not like a press release."""
+
 
 def supabase_headers():
     return {
@@ -703,6 +716,33 @@ def _apply_proposal(token: str, proposal: Dict) -> Dict:
         # Informational only - nothing to mutate
         return {'ok': True, 'message': 'Acknowledged budget alert (no mutation needed)'}
 
+    if p_type == 'new_ad_copy':
+        ag_resource = payload.get('ad_group_resource')
+        headlines = payload.get('headlines') or []
+        descriptions = payload.get('descriptions') or []
+        final_url = payload.get('final_url')
+
+        if not ag_resource or not headlines or not descriptions or not final_url:
+            return {'ok': False, 'error': 'Missing required fields (ad_group_resource, headlines, descriptions, final_url)'}
+        if len(headlines) < 3 or len(descriptions) < 2:
+            return {'ok': False, 'error': f'Google Ads requires 3-15 headlines and 2-4 descriptions (got {len(headlines)} headlines, {len(descriptions)} descriptions)'}
+
+        op = {
+            'create': {
+                'adGroup': ag_resource,
+                'status': 'ENABLED',
+                'ad': {
+                    'finalUrls': [final_url],
+                    'responsiveSearchAd': {
+                        'headlines': [{'text': h[:30]} for h in headlines[:15]],
+                        'descriptions': [{'text': d[:90]} for d in descriptions[:4]],
+                    },
+                },
+            }
+        }
+        result = _mutate(token, 'adGroupAds', [op])
+        return {'ok': True, 'mutation': result, 'message': 'New RSA created. Google Ads will rotate it against existing ads.'}
+
     return {'ok': False, 'error': f'Unknown proposal type: {p_type}'}
 
 
@@ -775,3 +815,305 @@ def reject_proposal(proposal_id):
 
     _update_proposal_status(proposal_id, 'rejected')
     return jsonify({'ok': True})
+
+
+# ============================================================================
+# AI AD COPY GENERATOR
+# Acts as a Google Ads specialist for DMHOA. Pulls performance data, asks
+# Claude for fresh creative tuned to brand voice and UPL rules, saves results
+# as proposals. User approves/rejects through the existing queue.
+# ============================================================================
+
+DMHOA_BRAND_BRIEF = """About DisputeMyHOA:
+- A self-help document preparation tool for homeowners fighting unfair HOA notices.
+- Branded around "the Dispute Engine" — our proprietary product name.
+- Customers pay $49 for a complete dispute letter package they review and send themselves.
+- Free notice review available with no credit card required.
+- Brand voice: practical, calm, "you've got this", slightly defiant. Not corporate.
+- Audience: regular homeowners who got an HOA fine or violation letter and want help.
+
+CRITICAL UPL CONSTRAINTS (Unauthorized Practice of Law):
+- DisputeMyHOA is NOT a law firm and does not provide legal advice.
+- NEVER use these words/phrases anywhere in the ad copy:
+  lawyer, attorney, legal advice, legal counsel, legal representation,
+  represent you, win your case, guaranteed, legal-grade, lawyer-grade,
+  case won, sue your HOA, court, lawsuit.
+- NEVER promise specific outcomes ("guaranteed reversal", "100% success", "we win every case").
+- Frame everything as: self-help tool, document preparation, educational, "you draft and send yourself".
+- It is fine to say "fight", "appeal", "respond", "draft", "dispute".
+
+CRITICAL BRANDING RULES:
+- Do NOT say "AI" anywhere in headlines or descriptions. Say "Smart", "Dispute Engine", or just describe what it does.
+- Refer to the product as "the Dispute Engine" or "DisputeMyHOA".
+
+GOOGLE ADS RSA FORMAT:
+- Headlines: max 30 characters each (count carefully). Aim for 8-10 distinct headlines per ad group.
+- Descriptions: max 90 characters each. Aim for 4 descriptions per ad group.
+- Mix angles: practical benefit, educational, urgency, social proof, "free" hook, price anchor.
+- Each headline should be readable on its own.
+- Avoid overused openers like "Are you", "Tired of", "Looking for".
+"""
+
+
+def _call_claude_for_ad_copy(user_prompt: str) -> Dict:
+    """Call Claude with the brand brief + performance context to generate ad copy."""
+    if not ANTHROPIC_API_KEY:
+        raise Exception('ANTHROPIC_API_KEY not configured')
+
+    system_prompt = (
+        "You are a senior Google Ads specialist and copywriter working in-house "
+        "at DisputeMyHOA. You write Responsive Search Ad headlines and descriptions "
+        "that are UPL-compliant, on brand, and tested for character limits.\n\n"
+        + DMHOA_BRAND_BRIEF
+        + "\n\nReturn JSON only, no markdown, no code fences. Use this exact shape:\n"
+        + '{"ad_groups":[{"ad_group_id":"...","ad_group_name":"...","rationale":"1-2 sentence angle","headlines":["..."],"descriptions":["..."]}]}'
+        + HUMAN_VOICE_RULES
+    )
+
+    response = requests.post(
+        ANTHROPIC_API_URL,
+        headers={
+            'x-api-key': ANTHROPIC_API_KEY,
+            'Content-Type': 'application/json',
+            'anthropic-version': '2023-06-01',
+        },
+        json={
+            'model': 'claude-sonnet-4-20250514',
+            'max_tokens': 4096,
+            'system': system_prompt,
+            'messages': [{'role': 'user', 'content': user_prompt}],
+        },
+        timeout=(10, 120),
+    )
+
+    if not response.ok:
+        raise Exception(f'Claude API error: {response.status_code} - {response.text[:500]}')
+
+    data = response.json()
+    raw = data['content'][0]['text']
+    # Strip code fences if present
+    cleaned = raw.replace('```json', '').replace('```', '').strip()
+    return json.loads(cleaned)
+
+
+def _fetch_ad_group_performance(token: str, campaign_name: str = M1_CAMPAIGN_NAME) -> List[Dict]:
+    """For each enabled ad group in our managed campaign, return current ads
+    and 14-day performance metrics."""
+    # Query 1: ad groups in our campaign with their final URLs and current ads
+    ad_groups_query = f"""
+        SELECT
+            ad_group.id,
+            ad_group.name,
+            ad_group.resource_name,
+            campaign.id,
+            campaign.name
+        FROM ad_group
+        WHERE campaign.name = '{campaign_name}'
+          AND ad_group.status = 'ENABLED'
+    """
+    ag_rows = _query(token, ad_groups_query)
+    if not ag_rows:
+        return []
+
+    results = []
+    for row in ag_rows:
+        ag = row.get('adGroup', {})
+        ag_id = ag.get('id')
+        ag_name = ag.get('name')
+        ag_resource = ag.get('resourceName')
+
+        # Query 2: get current responsive search ads in this ad group
+        ads_query = f"""
+            SELECT
+                ad_group_ad.ad.id,
+                ad_group_ad.ad.responsive_search_ad.headlines,
+                ad_group_ad.ad.responsive_search_ad.descriptions,
+                ad_group_ad.ad.final_urls,
+                ad_group_ad.status,
+                metrics.clicks,
+                metrics.impressions,
+                metrics.conversions,
+                metrics.ctr
+            FROM ad_group_ad
+            WHERE ad_group.id = {ag_id}
+              AND ad_group_ad.status = 'ENABLED'
+              AND segments.date DURING LAST_14_DAYS
+        """
+        try:
+            ads_rows = _query(token, ads_query)
+        except Exception as e:
+            logger.warning(f'Could not fetch ads for ad group {ag_id}: {e}')
+            ads_rows = []
+
+        # Aggregate metrics across this ad group
+        total_clicks = 0
+        total_impressions = 0
+        total_conversions = 0.0
+        current_ads = []
+        final_url = None
+
+        for ar in ads_rows:
+            metrics = ar.get('metrics', {})
+            total_clicks += int(metrics.get('clicks', 0))
+            total_impressions += int(metrics.get('impressions', 0))
+            total_conversions += float(metrics.get('conversions', 0))
+
+            ad = ar.get('adGroupAd', {}).get('ad', {})
+            rsa = ad.get('responsiveSearchAd', {})
+            headlines = [h.get('text', '') for h in rsa.get('headlines', [])]
+            descriptions = [d.get('text', '') for d in rsa.get('descriptions', [])]
+            urls = ad.get('finalUrls', [])
+            if urls and not final_url:
+                final_url = urls[0]
+            current_ads.append({
+                'ad_id': ad.get('id'),
+                'headlines': headlines,
+                'descriptions': descriptions,
+            })
+
+        ctr = (total_clicks / total_impressions) if total_impressions > 0 else 0
+
+        results.append({
+            'ad_group_id': ag_id,
+            'ad_group_name': ag_name,
+            'ad_group_resource': ag_resource,
+            'final_url': final_url or f"{SITE_URL}/",
+            'metrics_14d': {
+                'clicks': total_clicks,
+                'impressions': total_impressions,
+                'conversions': total_conversions,
+                'ctr': round(ctr, 4),
+            },
+            'current_ads': current_ads,
+        })
+
+    return results
+
+
+def _build_copy_user_prompt(performance: List[Dict]) -> str:
+    """Build the user prompt with current performance and existing ads."""
+    lines = [
+        "Generate fresh Google Ads RSA copy for the ad groups below. For each ad group, write 8-10 headlines (max 30 chars each) and 4 descriptions (max 90 chars each).",
+        "",
+        "Use a different angle than the existing copy. Mix benefits, education, urgency, social proof, and price hooks. Stay UPL-compliant and on brand.",
+        "",
+        "AD GROUPS:",
+        "",
+    ]
+
+    for ag in performance:
+        m = ag.get('metrics_14d', {})
+        lines.append(f"--- Ad Group: {ag['ad_group_name']} (id: {ag['ad_group_id']}) ---")
+        lines.append(f"Landing page: {ag['final_url']}")
+        lines.append(f"Last 14 days: {m.get('clicks', 0)} clicks, {m.get('impressions', 0)} impressions, {m.get('conversions', 0)} conversions, CTR {m.get('ctr', 0)*100:.2f}%")
+        lines.append("Current headlines:")
+        for ad in ag.get('current_ads', []):
+            for h in ad.get('headlines', [])[:8]:
+                lines.append(f"  - {h}")
+            break
+        lines.append("Current descriptions:")
+        for ad in ag.get('current_ads', []):
+            for d in ad.get('descriptions', [])[:4]:
+                lines.append(f"  - {d}")
+            break
+        lines.append("")
+
+    lines.append("Return JSON only with the schema specified in the system prompt. The ad_group_id values must match exactly.")
+    return "\n".join(lines)
+
+
+def _create_ad_copy_proposals(token: str) -> Dict:
+    """Run the full generator pipeline: fetch performance, ask Claude, save proposals."""
+    performance = _fetch_ad_group_performance(token)
+    if not performance:
+        return {'proposals_created': 0, 'error': f'No enabled ad groups found in campaign "{M1_CAMPAIGN_NAME}". Launch the M1 campaign first.'}
+
+    user_prompt = _build_copy_user_prompt(performance)
+    claude_result = _call_claude_for_ad_copy(user_prompt)
+
+    # Index performance by ad_group_id for quick lookup
+    perf_by_id = {str(p['ad_group_id']): p for p in performance}
+
+    proposals_created = 0
+    for new_ad in claude_result.get('ad_groups', []):
+        ag_id = str(new_ad.get('ad_group_id', ''))
+        perf = perf_by_id.get(ag_id)
+        if not perf:
+            logger.warning(f'Claude returned ad group id {ag_id} that was not in our request')
+            continue
+
+        # Validate character limits and sanitize
+        headlines = [h.strip()[:30] for h in (new_ad.get('headlines') or []) if h and h.strip()]
+        descriptions = [d.strip()[:90] for d in (new_ad.get('descriptions') or []) if d and d.strip()]
+        # Google Ads requires 3-15 headlines and 2-4 descriptions
+        if len(headlines) < 3 or len(descriptions) < 2:
+            logger.warning(f'Skipping ad group {ag_id}: not enough valid headlines/descriptions')
+            continue
+        headlines = headlines[:15]
+        descriptions = descriptions[:4]
+
+        payload = {
+            'ad_group_id': ag_id,
+            'ad_group_name': new_ad.get('ad_group_name') or perf['ad_group_name'],
+            'ad_group_resource': perf['ad_group_resource'],
+            'final_url': perf['final_url'],
+            'rationale': new_ad.get('rationale', ''),
+            'headlines': headlines,
+            'descriptions': descriptions,
+            'current_metrics_14d': perf['metrics_14d'],
+        }
+        reason = f"New RSA variant for {perf['ad_group_name']}: {new_ad.get('rationale', '')[:120]}"
+        result = _create_proposal('new_ad_copy', payload, reason)
+        if result:
+            proposals_created += 1
+
+    return {'proposals_created': proposals_created, 'ad_groups_analyzed': len(performance)}
+
+
+_copy_gen_status = {'running': False, 'last_result': None}
+
+
+def _run_copy_generation_background():
+    """Background runner for ad copy generation. Avoids Heroku 30s timeout."""
+    _copy_gen_status['running'] = True
+    try:
+        token = _get_access_token()
+        if not token:
+            _copy_gen_status['last_result'] = {'ok': False, 'error': 'Google Ads credentials not configured'}
+            return
+        result = _create_ad_copy_proposals(token)
+        _copy_gen_status['last_result'] = {'ok': True, **result}
+        logger.info(f'Ad copy generator: {result.get("proposals_created", 0)} proposals created for {result.get("ad_groups_analyzed", 0)} ad groups')
+    except Exception as e:
+        logger.error(f'Background ad copy generation failed: {e}')
+        _copy_gen_status['last_result'] = {'ok': False, 'error': str(e)}
+    finally:
+        _copy_gen_status['running'] = False
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/generate-copy', methods=['POST', 'OPTIONS'])
+def generate_ad_copy():
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if _copy_gen_status['running']:
+        return jsonify({'ok': True, 'message': 'Ad copy generator is already running. Refresh in ~30 seconds.'})
+
+    import threading
+    thread = threading.Thread(target=_run_copy_generation_background, daemon=True)
+    thread.start()
+
+    return jsonify({
+        'ok': True,
+        'message': 'Ad copy generator started. New proposals will appear in ~30 seconds.',
+    })
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/generate-copy/status', methods=['GET', 'OPTIONS'])
+def generate_ad_copy_status():
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+    return jsonify({
+        'running': _copy_gen_status['running'],
+        'last_result': _copy_gen_status['last_result'],
+    })
