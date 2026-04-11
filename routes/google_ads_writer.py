@@ -491,7 +491,7 @@ def create_lead_captured_conversion():
         result = _get_or_create_conversion_action(
             token=token,
             name='DMHOA Lead Captured',
-            category='LEAD',
+            category='SUBMIT_LEAD_FORM',
             default_value=5.0,
         )
         return jsonify({'ok': True, **result})
