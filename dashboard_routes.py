@@ -891,6 +891,13 @@ def get_google_ads_data():
         period = request.args.get('period', 'today')
         date_range = get_google_ads_date_range(period)
 
+        # Optional campaign filter (single campaign by exact name)
+        campaign_filter = request.args.get('campaign', '').strip()
+        # Sanitize: only allow alphanumeric, dashes, spaces, underscores
+        if campaign_filter and not all(ch.isalnum() or ch in ' -_' for ch in campaign_filter):
+            return jsonify({'error': 'Invalid campaign name'}), 400
+        campaign_clause = f"AND campaign.name = '{campaign_filter}'" if campaign_filter else ''
+
         access_token = get_google_ads_access_token()
         if not access_token:
             raise Exception('Failed to get access token')
@@ -911,6 +918,7 @@ def get_google_ads_data():
             WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
                 AND campaign.status != 'REMOVED'
                 AND metrics.cost_micros > 0
+                {campaign_clause}
             ORDER BY metrics.cost_micros DESC
         """
 
@@ -971,6 +979,7 @@ def get_google_ads_data():
                     AND campaign.status = 'ENABLED'
                     AND ad_group_criterion.status != 'REMOVED'
                     AND metrics.impressions > 0
+                    {campaign_clause}
                 ORDER BY metrics.clicks DESC
                 LIMIT 50
             """
@@ -1029,6 +1038,7 @@ def get_google_ads_data():
                 WHERE segments.date BETWEEN '{date_range["startDate"]}' AND '{date_range["endDate"]}'
                     AND campaign.status = 'ENABLED'
                     AND metrics.impressions > 0
+                    {campaign_clause}
                 ORDER BY metrics.clicks DESC
                 LIMIT 50
             """
@@ -1076,6 +1086,7 @@ def get_google_ads_data():
                     AND ad_group_ad.status != 'REMOVED'
                     AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
                     AND metrics.impressions > 0
+                    {campaign_clause}
                 ORDER BY metrics.clicks DESC
                 LIMIT 20
             """
@@ -1134,7 +1145,8 @@ def get_google_ads_data():
             'keywords': keywords,
             'searchTerms': search_terms,
             'ads': ads,
-            'targetCampaign': 'DMHOA - DIY Response - Phrase - March',
+            'targetCampaign': campaign_filter or 'DMHOA - DIY Response - Phrase - March',
+            'campaignFilter': campaign_filter or None,
             'dailyBudget': daily_budget,
             'period': period,
             'dateRange': date_range,
