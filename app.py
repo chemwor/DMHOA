@@ -35,6 +35,7 @@ from statute_lookup import (
 from dashboard_routes import dashboard_bp, _execute_alert_scan
 from routes.leads import leads_bp
 from routes.google_ads_writer import google_ads_writer_bp
+from utils.funnel import log_funnel_stage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -2353,6 +2354,15 @@ def save_case():
         except Exception as e:
             logger.warning(f"Failed to log event (non-critical): {str(e)}")
 
+        # --- Email funnel: log quick_preview_complete (non-critical) ---
+        try:
+            funnel_email = payload.get('email')
+            funnel_link = payload.get('fullCaseFormLink', '')
+            if funnel_email:
+                log_funnel_stage(funnel_email, 'quick_preview_complete', funnel_link)
+        except Exception as e:
+            logger.warning(f"Failed to log funnel quick_preview_complete (non-critical): {e}")
+
         # Sync email to appropriate Klaviyo abandonment list (non-critical)
         try:
             email_for_klaviyo = payload.get('email')
@@ -2970,6 +2980,23 @@ def get_case_preview(case_id):
         }
 
         logger.info(f"Successfully retrieved preview for case {case_id}")
+
+        # --- Email funnel: log full_preview_viewed (non-critical, fires once only) ---
+        try:
+            case_payload = case.get('payload') or {}
+            if isinstance(case_payload, str):
+                try:
+                    case_payload = json.loads(case_payload)
+                except Exception:
+                    case_payload = {}
+            funnel_email = case.get('email') or case_payload.get('email')
+            if funnel_email:
+                # log_funnel_stage is forward-only — silently ignored if already
+                # at full_preview_viewed or later (e.g., paid customers re-viewing).
+                log_funnel_stage(funnel_email, 'full_preview_viewed')
+        except Exception as e:
+            logger.warning(f"Failed to log funnel full_preview_viewed (non-critical): {e}")
+
         return jsonify(frontend_response), 200
 
     except Exception as e:
@@ -5483,6 +5510,14 @@ def stripe_webhook():
                 logger.error(f"Failed to update case: {str(e)}")
                 return jsonify({'error': 'Database update failed'}), 500
 
+            # --- Email funnel: log purchased (non-fatal) ---
+            if email:
+                try:
+                    case_link = f"https://disputemyhoa.com/case/{token}" if token else ''
+                    log_funnel_stage(email, 'purchased', case_link)
+                except Exception as e:
+                    logger.warning(f"Failed to log funnel purchased (non-critical): {e}")
+
             # --- Move email to Klaviyo post-purchase list (non-fatal) ---
             if email and KLAVIYO_POST_PURCHASE_LIST_ID:
                 try:
@@ -6185,8 +6220,18 @@ def _scheduled_ad_analyzer():
         logger.error(f"Scheduled ad analyzer failed: {e}")
 
 
+def _scheduled_email_nudges():
+    """Email funnel nudge runner — checks for stalled funnel users every 30 minutes."""
+    try:
+        from jobs.email_nudges import run_nudges
+        run_nudges()
+    except Exception as e:
+        logger.error(f"Scheduled email nudges failed: {e}")
+
+
 def _start_scheduler():
-    """Initialize APScheduler with hourly alert scan and daily ad analyzer."""
+    """Initialize APScheduler with hourly alert scan, daily ad analyzer,
+    and 30-minute email funnel nudges."""
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler(daemon=True)
@@ -6204,8 +6249,15 @@ def _start_scheduler():
             id='daily_ad_analyzer',
             replace_existing=True,
         )
+        scheduler.add_job(
+            _scheduled_email_nudges,
+            'interval',
+            minutes=30,
+            id='email_funnel_nudges',
+            replace_existing=True,
+        )
         scheduler.start()
-        logger.info("APScheduler started — alert scan hourly, ad analyzer daily")
+        logger.info("APScheduler started — alert scan hourly, ad analyzer daily, email nudges every 30 min")
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
 
