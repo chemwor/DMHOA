@@ -25,6 +25,8 @@ import requests
 from flask import Blueprint, request, jsonify
 
 from utils.funnel import log_funnel_stage
+from utils import email_templates
+from utils.email import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +342,92 @@ def trigger_nudges_now():
         })
     except Exception as e:
         logger.error(f'trigger_nudges_now failed: {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ----------------------------------------------------------------------------
+# EMAIL TEMPLATE PREVIEW + STANDALONE TEST SEND
+# Lets you inspect or send a single email of any template without touching
+# the funnel state. Useful for tweaking copy and verifying deliverability.
+# ----------------------------------------------------------------------------
+
+EMAIL_TEMPLATES = {
+    'quick_preview_confirmation': email_templates.quick_preview_confirmation,
+    'nudge_1': email_templates.nudge_1,
+    'nudge_2': email_templates.nudge_2,
+    'nudge_3': email_templates.nudge_3,
+    'purchase_confirmation': email_templates.purchase_confirmation,
+}
+
+
+@test_funnel_bp.route('/api/dashboard/test-funnel/email-preview/<template_name>', methods=['GET', 'OPTIONS'])
+def preview_email_template(template_name):
+    """Render any email template and return subject + body without sending.
+
+    Optional query param: link=<url> to substitute into the template.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if template_name not in EMAIL_TEMPLATES:
+        return jsonify({
+            'error': f'Unknown template: {template_name}',
+            'available': sorted(EMAIL_TEMPLATES.keys()),
+        }), 400
+
+    link = request.args.get('link', 'https://disputemyhoa.com/case-preview/example')
+    try:
+        subject, body = EMAIL_TEMPLATES[template_name](link)
+        return jsonify({
+            'template': template_name,
+            'subject': subject,
+            'body': body,
+            'link_used': link,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@test_funnel_bp.route('/api/dashboard/test-funnel/send-test-email', methods=['POST', 'OPTIONS'])
+def send_test_email():
+    """Send a one-off email of any template to a specific address.
+
+    Body: { "template": "nudge_1", "to": "you@example.com", "link": "..." (optional) }
+    Does not touch the email_funnel table or any case data.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    body = request.get_json(silent=True) or {}
+    template_name = (body.get('template') or '').strip()
+    to_address = (body.get('to') or '').strip()
+    link = (body.get('link') or 'https://disputemyhoa.com/case-preview/example').strip()
+
+    if template_name not in EMAIL_TEMPLATES:
+        return jsonify({
+            'error': f'Unknown template: {template_name}',
+            'available': sorted(EMAIL_TEMPLATES.keys()),
+        }), 400
+
+    if not to_address or '@' not in to_address:
+        return jsonify({'error': 'Valid "to" email address required'}), 400
+
+    try:
+        subject, body_text = EMAIL_TEMPLATES[template_name](link)
+        sent = send_email(to_address, subject, body_text)
+        if sent:
+            return jsonify({
+                'ok': True,
+                'message': f'Sent {template_name} to {to_address}',
+                'subject': subject,
+            })
+        else:
+            return jsonify({
+                'ok': False,
+                'error': 'Resend send returned non-success. Check Heroku logs and verify mail.disputemyhoa.com is configured in Resend.',
+            }), 500
+    except Exception as e:
+        logger.error(f'send_test_email failed: {e}')
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
