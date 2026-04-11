@@ -239,6 +239,10 @@ NEGATIVE_KEYWORDS = [
 
 def _create_m1_campaign(token: str) -> Dict:
     """Create the full M1 campaign structure. Returns a summary dict."""
+    # Enforce DMHOA tag prefix on every campaign created via the dashboard
+    assert _is_dmhoa_campaign(M1_CAMPAIGN_NAME), \
+        f'M1_CAMPAIGN_NAME must contain "{DMHOA_CAMPAIGN_TAG}" tag'
+
     summary: Dict[str, Any] = {
         'budget_resource': None,
         'campaign_resource': None,
@@ -381,17 +385,31 @@ def _create_m1_campaign(token: str) -> Dict:
     return summary
 
 
+# Campaign tag prefix used to identify DMHOA-managed campaigns. All campaigns
+# created through the dashboard must start with this prefix so they can be
+# filtered out from any pre-existing campaigns in the same Google Ads account.
+DMHOA_CAMPAIGN_TAG = 'DMHOA'
+
+
+def _is_dmhoa_campaign(name: str) -> bool:
+    """Check if a campaign name belongs to DMHOA. Case-insensitive contains check."""
+    return DMHOA_CAMPAIGN_TAG.lower() in (name or '').lower()
+
+
 @google_ads_writer_bp.route('/api/dashboard/google-ads/all-campaigns', methods=['GET', 'OPTIONS'])
 def all_campaigns():
-    """Return every campaign in the account (any status), with its ad groups,
-    ads, keywords, and 30-day performance metrics. Used by the Marketing page
-    to show and track managed campaigns."""
+    """Return DMHOA-tagged campaigns (any status), with their ad groups,
+    ads, keywords, and 30-day performance metrics. A campaign is considered
+    DMHOA-tagged if its name contains "DMHOA". Pass ?include_all=true to
+    return campaigns from the entire account regardless of tag."""
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
     token = _get_access_token()
     if not token:
         return jsonify({'campaigns': [], 'error': 'Google Ads credentials not configured'}), 500
+
+    include_all = request.args.get('include_all', '').lower() == 'true'
 
     try:
         # 1. All campaigns with budget and 30d metrics
@@ -414,11 +432,15 @@ def all_campaigns():
 
         # Build base campaign list. Some campaigns may appear multiple times
         # (one row per day). Aggregate by campaign id.
+        # Filter to DMHOA-tagged campaigns unless include_all=true was passed.
         campaigns_by_id = {}
         for row in campaign_rows:
             c = row.get('campaign', {})
             cid = c.get('id')
+            name = c.get('name', '')
             if not cid:
+                continue
+            if not include_all and not _is_dmhoa_campaign(name):
                 continue
             metrics = row.get('metrics', {})
             budget = row.get('campaignBudget', {})
@@ -426,7 +448,7 @@ def all_campaigns():
             if cid not in campaigns_by_id:
                 campaigns_by_id[cid] = {
                     'id': cid,
-                    'name': c.get('name', ''),
+                    'name': name,
                     'status': c.get('status', 'UNKNOWN'),
                     'channel_type': c.get('advertisingChannelType', ''),
                     'daily_budget_usd': round(int(budget.get('amountMicros', 0) or 0) / 1_000_000, 2),
@@ -454,12 +476,15 @@ def all_campaigns():
             for row in base_rows:
                 c = row.get('campaign', {})
                 cid = c.get('id')
+                name = c.get('name', '')
                 if not cid:
+                    continue
+                if not include_all and not _is_dmhoa_campaign(name):
                     continue
                 budget = row.get('campaignBudget', {})
                 campaigns_by_id[cid] = {
                     'id': cid,
-                    'name': c.get('name', ''),
+                    'name': name,
                     'status': c.get('status', 'UNKNOWN'),
                     'channel_type': c.get('advertisingChannelType', ''),
                     'daily_budget_usd': round(int(budget.get('amountMicros', 0) or 0) / 1_000_000, 2),
@@ -1125,6 +1150,11 @@ def approve_proposal(proposal_id):
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
+    # Optional payload override from the review modal: client may have edited
+    # headlines/descriptions before clicking "Confirm & Create".
+    body = request.get_json(silent=True) or {}
+    payload_override = body.get('payload_override')
+
     # Fetch proposal
     try:
         r = requests.get(
@@ -1143,6 +1173,22 @@ def approve_proposal(proposal_id):
 
     if proposal['status'] != 'pending':
         return jsonify({'error': f"Proposal status is '{proposal['status']}', cannot approve"}), 400
+
+    # Merge override fields into the stored payload (override wins)
+    if isinstance(payload_override, dict):
+        merged_payload = {**proposal.get('payload', {}), **payload_override}
+        proposal = {**proposal, 'payload': merged_payload}
+        # Persist the merged payload so the audit trail reflects what was applied
+        try:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/ad_proposals",
+                headers=supabase_headers(),
+                params={'id': f'eq.{proposal_id}'},
+                json={'payload': merged_payload},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f'Failed to persist merged payload for {proposal_id}: {e}')
 
     token = _get_access_token()
     if not token:
