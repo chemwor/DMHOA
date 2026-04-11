@@ -200,7 +200,7 @@ M1_AD_GROUPS = [
             ],
             'descriptions': [
                 'Step-by-step educational guide to HOA disputes. Free notice review. Not legal advice.',
-                'Learn how the HOA dispute process works. The Dispute Engine — a self-help tool. Not a law firm.',
+                'Learn how the HOA dispute process works. The Dispute Engine is a self-help tool. Not a law firm.',
                 'Educational resource and document drafting tool for HOA disputes. Free preview.',
                 'Understand your HOA notice before responding. Free preview, full report from $49.',
             ],
