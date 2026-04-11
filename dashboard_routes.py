@@ -187,6 +187,19 @@ def get_timestamp_range(period: str) -> Dict[str, int]:
 
 PLAN_START_DATE = '2026-04-01'
 
+# Style rules appended to every Claude/OpenAI system prompt to make output
+# read human and avoid AI-tells. Keep this in sync with the same constant
+# in the Netlify functions.
+HUMAN_VOICE_RULES = """
+
+WRITING STYLE RULES (critical, must follow):
+- Never use em-dashes (—) or en-dashes (–). Use periods, commas, colons, or parentheses instead.
+- Never use these words/phrases: delve, leverage, robust, seamlessly, comprehensive, holistic, empower, streamline, cutting-edge, state-of-the-art, embark, harness, tapestry, vibrant, transformative, paramount, pivotal, moreover, furthermore, in essence, it is worth noting, in conclusion, ultimately, navigate the complexities, in today's, in the realm of.
+- Do not start sentences with "Indeed", "Notably", "Importantly", or "However,".
+- Do not end with a "Conclusion" or "In summary" paragraph that just restates the body.
+- Write plain, direct, conversational English. Short sentences. No throat-clearing.
+- Sound like a real person wrote this, not like a press release."""
+
 def get_google_ads_date_range(period: str) -> Dict[str, str]:
     """Get date range in YYYY-MM-DD format for Google Ads API.
     Uses America/Los_Angeles timezone to match the Google Ads account timezone."""
@@ -4462,6 +4475,8 @@ Provide strategic advice on budget, bidding, targeting, or landing page based on
 
 def call_claude_haiku(prompt, system_prompt='', max_retries=3):
     """Call Claude Haiku with retry logic and exponential backoff."""
+    # Auto-append human voice rules to every system prompt
+    effective_system = (system_prompt or '') + HUMAN_VOICE_RULES
     for attempt in range(max_retries):
         try:
             response = requests.post(
@@ -4474,7 +4489,7 @@ def call_claude_haiku(prompt, system_prompt='', max_retries=3):
                 json={
                     'model': 'claude-haiku-4-5-20251001',
                     'max_tokens': 4096,
-                    'system': system_prompt,
+                    'system': effective_system,
                     'messages': [{'role': 'user', 'content': prompt}]
                 },
                 timeout=(10, 120)
@@ -5940,6 +5955,7 @@ def _build_live_data_snapshot() -> Dict:
 
 def call_claude_sonnet(prompt, system_prompt='', max_retries=3):
     """Call Claude Sonnet with retry logic."""
+    effective_system = (system_prompt or '') + HUMAN_VOICE_RULES
     for attempt in range(max_retries):
         try:
             response = requests.post(
@@ -5952,7 +5968,7 @@ def call_claude_sonnet(prompt, system_prompt='', max_retries=3):
                 json={
                     'model': 'claude-sonnet-4-5-20250929',
                     'max_tokens': 2048,
-                    'system': system_prompt,
+                    'system': effective_system,
                     'messages': [{'role': 'user', 'content': prompt}]
                 },
                 timeout=(10, 60)
@@ -5986,6 +6002,7 @@ def call_claude_sonnet(prompt, system_prompt='', max_retries=3):
 
 def call_claude_sonnet_chat(messages, system_prompt='', max_retries=3):
     """Call Claude Sonnet for multi-turn chat with full message history."""
+    effective_system = (system_prompt or '') + HUMAN_VOICE_RULES
     for attempt in range(max_retries):
         try:
             response = requests.post(
@@ -5998,7 +6015,7 @@ def call_claude_sonnet_chat(messages, system_prompt='', max_retries=3):
                 json={
                     'model': 'claude-sonnet-4-5-20250929',
                     'max_tokens': 2048,
-                    'system': system_prompt,
+                    'system': effective_system,
                     'messages': messages
                 },
                 timeout=(10, 60)

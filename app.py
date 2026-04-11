@@ -53,6 +53,19 @@ app.register_blueprint(dashboard_bp)
 app.register_blueprint(leads_bp)
 app.register_blueprint(google_ads_writer_bp)
 
+# Style rules appended to every Claude/OpenAI system prompt that produces
+# user-facing prose (case analysis, chat, blog, ads). Keep this in sync
+# with the same constant in dashboard_routes.py and the Netlify functions.
+HUMAN_VOICE_RULES = """
+
+WRITING STYLE RULES (critical, must follow):
+- Never use em-dashes (—) or en-dashes (–). Use periods, commas, colons, or parentheses instead.
+- Never use these words/phrases: delve, leverage, robust, seamlessly, comprehensive, holistic, empower, streamline, cutting-edge, state-of-the-art, embark, harness, tapestry, vibrant, transformative, paramount, pivotal, moreover, furthermore, in essence, it is worth noting, in conclusion, ultimately, navigate the complexities, in today's, in the realm of.
+- Do not start sentences with "Indeed", "Notably", "Importantly", or "However,".
+- Do not end with a "Conclusion" or "In summary" paragraph that just restates the body.
+- Write plain, direct, conversational English. Short sentences. No throat-clearing.
+- Sound like a real person wrote this, not like a press release."""
+
 # Configuration
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -1685,7 +1698,7 @@ RULES:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object."
+                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object." + HUMAN_VOICE_RULES
                 },
                 {
                     "role": "user",
@@ -1850,7 +1863,7 @@ RULES:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object."
+                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object." + HUMAN_VOICE_RULES
                 },
                 {
                     "role": "user",
@@ -2600,7 +2613,7 @@ RULES:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object."
+                    "content": "You write conversion-optimized previews for HOA dispute tool. Output ONLY valid JSON. No explanation, no markdown, just the JSON object." + HUMAN_VOICE_RULES
                 },
                 {
                     "role": "user",
@@ -4136,7 +4149,7 @@ Do not include any text before or after the JSON. The response must be parseable
                     json={
                         'model': 'claude-sonnet-4-6',
                         'max_tokens': 8192,
-                        'system': system_prompt_analysis,
+                        'system': system_prompt_analysis + HUMAN_VOICE_RULES,
                         'messages': anthropic_messages
                     },
                     timeout=(10, 180)  # 10s connect, 180s read for longer legal analysis
@@ -4738,7 +4751,7 @@ with clear wording, proper procedure, and minimal risk — now that the case is 
 """
 
             # Convert history to OpenAI message format
-            messages = [{'role': 'system', 'content': system_prompt}]
+            messages = [{'role': 'system', 'content': system_prompt + HUMAN_VOICE_RULES}]
 
             # Add context about the case
             context_message = f"Case context: {json.dumps(case_payload, indent=2)}"
@@ -5096,7 +5109,7 @@ Generate a specific counter-letter responding directly to this HOA message. Addr
                     json={
                         'model': 'claude-sonnet-4-6',
                         'max_tokens': 4096,
-                        'system': system_prompt,
+                        'system': system_prompt + HUMAN_VOICE_RULES,
                         'messages': [{'role': 'user', 'content': user_message}]
                     },
                     timeout=(10, 120)
