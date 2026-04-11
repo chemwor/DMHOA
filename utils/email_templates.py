@@ -6,7 +6,7 @@ typed it in Gmail.
 
 
 def quick_preview_confirmation(preview_link: str = '') -> tuple:
-    subject = 'your HOA preview is ready'
+    subject = 'Your HOA Preview Is Ready'
     body = (
         "Hey,\n"
         "\n"
@@ -24,7 +24,7 @@ def quick_preview_confirmation(preview_link: str = '') -> tuple:
 
 
 def nudge_1(preview_link: str = '') -> tuple:
-    subject = 'did something go wrong?'
+    subject = 'Did Something Go Wrong?'
     body = (
         "Hey,\n"
         "\n"
@@ -41,7 +41,7 @@ def nudge_1(preview_link: str = '') -> tuple:
 
 
 def nudge_2(preview_link: str = '') -> tuple:
-    subject = 'your HOA case details are still here'
+    subject = 'Your HOA Case Details Are Still Here'
     body = (
         "Hey,\n"
         "\n"
@@ -58,7 +58,7 @@ def nudge_2(preview_link: str = '') -> tuple:
 
 
 def nudge_3(preview_link: str = '') -> tuple:
-    subject = 'last reminder \u2014 your HOA response'
+    subject = 'Last Reminder: Your HOA Response'
     body = (
         "Hey,\n"
         "\n"
@@ -75,7 +75,7 @@ def nudge_3(preview_link: str = '') -> tuple:
 
 
 def purchase_confirmation(case_link: str = '') -> tuple:
-    subject = "you're ready to respond to your HOA"
+    subject = "You're Ready To Respond To Your HOA"
     body = (
         "Hey,\n"
         "\n"
