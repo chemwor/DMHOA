@@ -5515,7 +5515,7 @@ def stripe_webhook():
             # --- Email funnel: log purchased (non-fatal) ---
             if email:
                 try:
-                    case_link = f"https://disputemyhoa.com/case/{token}" if token else ''
+                    case_link = f"https://disputemyhoa.com/case.html?case={token}" if token else ''
                     log_funnel_stage(email, 'purchased', case_link)
                 except Exception as e:
                     logger.warning(f"Failed to log funnel purchased (non-critical): {e}")
