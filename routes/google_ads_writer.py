@@ -396,6 +396,110 @@ def _is_dmhoa_campaign(name: str) -> bool:
     return DMHOA_CAMPAIGN_TAG.lower() in (name or '').lower()
 
 
+def _get_or_create_conversion_action(token: str, name: str, category: str, default_value: float) -> Dict:
+    """Create a new Google Ads conversion action if one with this name doesn't
+    already exist, then return its resource name and the gtag send_to label."""
+    # Check if it already exists by name
+    try:
+        existing = _query(token, f"""
+            SELECT
+                conversion_action.id,
+                conversion_action.name,
+                conversion_action.resource_name,
+                conversion_action.tag_snippets
+            FROM conversion_action
+            WHERE conversion_action.name = '{name}'
+        """)
+        if existing:
+            row = existing[0].get('conversionAction', {})
+            send_to = _extract_send_to(row.get('tagSnippets', []))
+            return {
+                'created': False,
+                'resource_name': row.get('resourceName'),
+                'id': row.get('id'),
+                'send_to': send_to,
+            }
+    except Exception as e:
+        logger.warning(f'Existing conversion lookup failed (non-fatal): {e}')
+
+    # Create new
+    op = {
+        'create': {
+            'name': name,
+            'type': 'WEBPAGE',
+            'category': category,
+            'status': 'ENABLED',
+            'valueSettings': {
+                'defaultValue': default_value,
+                'defaultCurrencyCode': 'USD',
+                'alwaysUseDefaultValue': True,
+            },
+            'countingType': 'ONE_PER_CLICK',
+            'clickThroughLookbackWindowDays': 30,
+            'viewThroughLookbackWindowDays': 1,
+        }
+    }
+    result = _mutate(token, 'conversionActions', [op])
+    resource_name = result['results'][0]['resourceName']
+    conv_id = resource_name.split('/')[-1]
+
+    # Query the new conversion to get its tag snippets (which contain send_to)
+    snippets_rows = _query(token, f"""
+        SELECT
+            conversion_action.id,
+            conversion_action.tag_snippets
+        FROM conversion_action
+        WHERE conversion_action.id = {conv_id}
+    """)
+    send_to = ''
+    if snippets_rows:
+        ca = snippets_rows[0].get('conversionAction', {})
+        send_to = _extract_send_to(ca.get('tagSnippets', []))
+
+    return {
+        'created': True,
+        'resource_name': resource_name,
+        'id': conv_id,
+        'send_to': send_to,
+    }
+
+
+def _extract_send_to(tag_snippets: list) -> str:
+    """Find the AW-XXX/YYY value inside any of the conversion action tag snippets."""
+    import re
+    for snippet in tag_snippets or []:
+        for key in ('eventSnippet', 'globalSiteTag'):
+            text = snippet.get(key, '') or ''
+            match = re.search(r"send_to['\"]?\s*:\s*['\"]?(AW-[0-9A-Za-z_/-]+)", text)
+            if match:
+                return match.group(1)
+    return ''
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/conversions/lead-captured', methods=['POST', 'OPTIONS'])
+def create_lead_captured_conversion():
+    """Idempotently create a "DMHOA Lead Captured" conversion action and return
+    its gtag send_to value so the frontend can fire it from the wizard email step."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    token = _get_access_token()
+    if not token:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 500
+
+    try:
+        result = _get_or_create_conversion_action(
+            token=token,
+            name='DMHOA Lead Captured',
+            category='LEAD',
+            default_value=5.0,
+        )
+        return jsonify({'ok': True, **result})
+    except Exception as e:
+        logger.error(f'create_lead_captured_conversion failed: {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @google_ads_writer_bp.route('/api/dashboard/google-ads/all-campaigns', methods=['GET', 'OPTIONS'])
 def all_campaigns():
     """Return DMHOA-tagged campaigns (any status), with their ad groups,
