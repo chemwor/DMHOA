@@ -381,6 +381,250 @@ def _create_m1_campaign(token: str) -> Dict:
     return summary
 
 
+@google_ads_writer_bp.route('/api/dashboard/google-ads/all-campaigns', methods=['GET', 'OPTIONS'])
+def all_campaigns():
+    """Return every campaign in the account (any status), with its ad groups,
+    ads, keywords, and 30-day performance metrics. Used by the Marketing page
+    to show and track managed campaigns."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    token = _get_access_token()
+    if not token:
+        return jsonify({'campaigns': [], 'error': 'Google Ads credentials not configured'}), 500
+
+    try:
+        # 1. All campaigns with budget and 30d metrics
+        campaign_rows = _query(token, """
+            SELECT
+                campaign.id,
+                campaign.name,
+                campaign.status,
+                campaign.advertising_channel_type,
+                campaign_budget.amount_micros,
+                metrics.cost_micros,
+                metrics.clicks,
+                metrics.impressions,
+                metrics.conversions,
+                metrics.ctr
+            FROM campaign
+            WHERE segments.date DURING LAST_30_DAYS
+              AND campaign.status != 'REMOVED'
+        """)
+
+        # Build base campaign list. Some campaigns may appear multiple times
+        # (one row per day). Aggregate by campaign id.
+        campaigns_by_id = {}
+        for row in campaign_rows:
+            c = row.get('campaign', {})
+            cid = c.get('id')
+            if not cid:
+                continue
+            metrics = row.get('metrics', {})
+            budget = row.get('campaignBudget', {})
+
+            if cid not in campaigns_by_id:
+                campaigns_by_id[cid] = {
+                    'id': cid,
+                    'name': c.get('name', ''),
+                    'status': c.get('status', 'UNKNOWN'),
+                    'channel_type': c.get('advertisingChannelType', ''),
+                    'daily_budget_usd': round(int(budget.get('amountMicros', 0) or 0) / 1_000_000, 2),
+                    'metrics_30d': {'spend': 0.0, 'clicks': 0, 'impressions': 0, 'conversions': 0.0},
+                    'ad_groups': [],
+                }
+            m = campaigns_by_id[cid]['metrics_30d']
+            m['spend'] += int(metrics.get('costMicros', 0) or 0) / 1_000_000
+            m['clicks'] += int(metrics.get('clicks', 0) or 0)
+            m['impressions'] += int(metrics.get('impressions', 0) or 0)
+            m['conversions'] += float(metrics.get('conversions', 0) or 0)
+
+        # If no rows came back (no impressions in last 30d), still query campaigns directly
+        if not campaigns_by_id:
+            base_rows = _query(token, """
+                SELECT
+                    campaign.id,
+                    campaign.name,
+                    campaign.status,
+                    campaign.advertising_channel_type,
+                    campaign_budget.amount_micros
+                FROM campaign
+                WHERE campaign.status != 'REMOVED'
+            """)
+            for row in base_rows:
+                c = row.get('campaign', {})
+                cid = c.get('id')
+                if not cid:
+                    continue
+                budget = row.get('campaignBudget', {})
+                campaigns_by_id[cid] = {
+                    'id': cid,
+                    'name': c.get('name', ''),
+                    'status': c.get('status', 'UNKNOWN'),
+                    'channel_type': c.get('advertisingChannelType', ''),
+                    'daily_budget_usd': round(int(budget.get('amountMicros', 0) or 0) / 1_000_000, 2),
+                    'metrics_30d': {'spend': 0.0, 'clicks': 0, 'impressions': 0, 'conversions': 0.0},
+                    'ad_groups': [],
+                }
+
+        # If still nothing, we already have the empty result
+        if not campaigns_by_id:
+            return jsonify({'campaigns': []})
+
+        # Round metrics
+        for c in campaigns_by_id.values():
+            m = c['metrics_30d']
+            m['spend'] = round(m['spend'], 2)
+            m['conversions'] = round(m['conversions'], 2)
+            m['ctr'] = round((m['clicks'] / m['impressions']) * 100, 2) if m['impressions'] > 0 else 0
+            m['cpc'] = round(m['spend'] / m['clicks'], 2) if m['clicks'] > 0 else 0
+
+        # 2. Ad groups for these campaigns
+        ag_rows = _query(token, """
+            SELECT
+                ad_group.id,
+                ad_group.name,
+                ad_group.status,
+                ad_group.cpc_bid_micros,
+                campaign.id
+            FROM ad_group
+            WHERE ad_group.status != 'REMOVED'
+        """)
+        ad_groups_by_campaign = {}
+        for row in ag_rows:
+            ag = row.get('adGroup', {})
+            cid = row.get('campaign', {}).get('id')
+            if not cid or cid not in campaigns_by_id:
+                continue
+            ag_id = ag.get('id')
+            if not ag_id:
+                continue
+            ag_groups_list = ad_groups_by_campaign.setdefault(cid, [])
+            ag_groups_list.append({
+                'id': ag_id,
+                'name': ag.get('name', ''),
+                'status': ag.get('status', 'UNKNOWN'),
+                'max_cpc_usd': round(int(ag.get('cpcBidMicros', 0) or 0) / 1_000_000, 2),
+                'keywords': [],
+                'ads': [],
+            })
+
+        # 3. Keywords for our ad groups (active only)
+        kw_rows = _query(token, """
+            SELECT
+                ad_group_criterion.criterion_id,
+                ad_group_criterion.keyword.text,
+                ad_group_criterion.keyword.match_type,
+                ad_group_criterion.status,
+                ad_group.id,
+                campaign.id
+            FROM ad_group_criterion
+            WHERE ad_group_criterion.type = 'KEYWORD'
+              AND ad_group_criterion.status != 'REMOVED'
+              AND ad_group_criterion.negative = FALSE
+        """)
+        keywords_by_ag = {}
+        for row in kw_rows:
+            cid = row.get('campaign', {}).get('id')
+            if not cid or cid not in campaigns_by_id:
+                continue
+            ag_id = row.get('adGroup', {}).get('id')
+            crit = row.get('adGroupCriterion', {})
+            kw = crit.get('keyword', {})
+            keywords_by_ag.setdefault(ag_id, []).append({
+                'text': kw.get('text', ''),
+                'match_type': kw.get('matchType', 'BROAD'),
+                'status': crit.get('status', 'UNKNOWN'),
+            })
+
+        # 4. RSAs for our ad groups
+        ad_rows = _query(token, """
+            SELECT
+                ad_group_ad.ad.id,
+                ad_group_ad.ad.responsive_search_ad.headlines,
+                ad_group_ad.ad.responsive_search_ad.descriptions,
+                ad_group_ad.ad.final_urls,
+                ad_group_ad.status,
+                ad_group.id,
+                campaign.id
+            FROM ad_group_ad
+            WHERE ad_group_ad.status != 'REMOVED'
+              AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+        """)
+        ads_by_ag = {}
+        for row in ad_rows:
+            cid = row.get('campaign', {}).get('id')
+            if not cid or cid not in campaigns_by_id:
+                continue
+            ag_id = row.get('adGroup', {}).get('id')
+            ad_wrap = row.get('adGroupAd', {})
+            ad = ad_wrap.get('ad', {})
+            rsa = ad.get('responsiveSearchAd', {})
+            ads_by_ag.setdefault(ag_id, []).append({
+                'id': ad.get('id'),
+                'status': ad_wrap.get('status', 'UNKNOWN'),
+                'headlines': [h.get('text', '') for h in rsa.get('headlines', [])],
+                'descriptions': [d.get('text', '') for d in rsa.get('descriptions', [])],
+                'final_urls': ad.get('finalUrls', []),
+            })
+
+        # 5. Stitch the structure together
+        for cid, c in campaigns_by_id.items():
+            for ag in ad_groups_by_campaign.get(cid, []):
+                ag['keywords'] = keywords_by_ag.get(ag['id'], [])
+                ag['ads'] = ads_by_ag.get(ag['id'], [])
+            c['ad_groups'] = ad_groups_by_campaign.get(cid, [])
+            c['ad_group_count'] = len(c['ad_groups'])
+            c['keyword_count'] = sum(len(ag['keywords']) for ag in c['ad_groups'])
+            c['ad_count'] = sum(len(ag['ads']) for ag in c['ad_groups'])
+
+        # Sort: enabled first, then alphabetical
+        status_order = {'ENABLED': 0, 'PAUSED': 1, 'REMOVED': 2}
+        campaigns_list = sorted(
+            campaigns_by_id.values(),
+            key=lambda x: (status_order.get(x['status'], 3), x['name']),
+        )
+
+        return jsonify({
+            'campaigns': campaigns_list,
+            'fetched_at': datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as e:
+        logger.error(f'all_campaigns failed: {e}')
+        return jsonify({'campaigns': [], 'error': str(e)}), 500
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/campaigns/<campaign_id>/status', methods=['POST', 'OPTIONS'])
+def update_campaign_status(campaign_id):
+    """Enable or pause a campaign by id."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    body = request.get_json(silent=True) or {}
+    new_status = body.get('status', '').upper()
+    if new_status not in ('ENABLED', 'PAUSED'):
+        return jsonify({'error': 'status must be ENABLED or PAUSED'}), 400
+
+    token = _get_access_token()
+    if not token:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 500
+
+    try:
+        op = {
+            'update': {
+                'resourceName': f'customers/{GOOGLE_ADS_CUSTOMER_ID}/campaigns/{campaign_id}',
+                'status': new_status,
+            },
+            'updateMask': 'status',
+        }
+        result = _mutate(token, 'campaigns', [op])
+        return jsonify({'ok': True, 'mutation': result})
+    except Exception as e:
+        logger.error(f'update_campaign_status failed: {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @google_ads_writer_bp.route('/api/dashboard/google-ads/fill-missing-ads', methods=['POST', 'OPTIONS'])
 def fill_missing_ads():
     """For each ad group in the M1 campaign, create the static M1 ad if there
