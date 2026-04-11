@@ -37,6 +37,7 @@ from routes.leads import leads_bp
 from routes.google_ads_writer import google_ads_writer_bp
 from routes.test_funnel import test_funnel_bp
 from utils.funnel import log_funnel_stage
+from utils.posthog import capture as posthog_capture
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -2362,6 +2363,18 @@ def save_case():
             funnel_link = payload.get('fullCaseFormLink', '')
             if funnel_email:
                 log_funnel_stage(funnel_email, 'quick_preview_complete', funnel_link)
+                # Server-side PostHog event for funnel analytics
+                try:
+                    posthog_capture(
+                        distinct_id=funnel_email,
+                        event='quick_preview_completed_server',
+                        properties={
+                            'case_token': token,
+                            'source': 'save_case_endpoint',
+                        },
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"Failed to log funnel quick_preview_complete (non-critical): {e}")
 
@@ -2996,6 +3009,18 @@ def get_case_preview(case_id):
                 # log_funnel_stage is forward-only — silently ignored if already
                 # at full_preview_viewed or later (e.g., paid customers re-viewing).
                 log_funnel_stage(funnel_email, 'full_preview_viewed')
+                # Server-side PostHog event for funnel analytics
+                try:
+                    posthog_capture(
+                        distinct_id=funnel_email,
+                        event='full_preview_viewed_server',
+                        properties={
+                            'case_id': case_id,
+                            'source': 'case_preview_endpoint',
+                        },
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"Failed to log funnel full_preview_viewed (non-critical): {e}")
 
@@ -5519,6 +5544,24 @@ def stripe_webhook():
                     log_funnel_stage(email, 'purchased', case_link)
                 except Exception as e:
                     logger.warning(f"Failed to log funnel purchased (non-critical): {e}")
+
+            # --- PostHog server-side purchase event (safety net) ---
+            # Fires regardless of whether the user returns to case-preview.html
+            # so we always have a reliable record of every paid conversion.
+            if email:
+                try:
+                    posthog_capture(
+                        distinct_id=email,
+                        event='purchase_completed_server',
+                        properties={
+                            'case_token': token,
+                            'value': 49,
+                            'currency': 'USD',
+                            'source': 'stripe_webhook',
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send PostHog purchase event (non-critical): {e}")
 
             # --- Move email to Klaviyo post-purchase list (non-fatal) ---
             if email and KLAVIYO_POST_PURCHASE_LIST_ID:
