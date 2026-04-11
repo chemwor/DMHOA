@@ -262,6 +262,9 @@ def _create_m1_campaign(token: str) -> Dict:
                 'targetContentNetwork': False,
                 'targetPartnerSearchNetwork': False,
             },
+            # Required by Google Ads API v21 for EU compliance.
+            # DMHOA does not run political ads, so this is always false.
+            'containsEuPoliticalAdvertising': 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
         }
     }
     campaign_resp = _mutate(token, 'campaigns', [campaign_op])
