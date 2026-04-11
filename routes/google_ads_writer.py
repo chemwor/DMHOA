@@ -113,6 +113,9 @@ def _to_micros(usd: float) -> int:
     return int(round(usd * 1_000_000))
 
 
+# All ad copy is UPL-compliant: no claims of legal advice, representation,
+# guaranteed outcomes, or "winning". Frames the product as a self-help
+# document preparation tool, not legal counsel.
 M1_AD_GROUPS = [
     {
         'name': 'Appeal Intent',
@@ -126,20 +129,20 @@ M1_AD_GROUPS = [
         ],
         'rsa': {
             'headlines': [
-                'Appeal Your HOA Fine',
-                'Fight HOA Violations',
-                'Appeal HOA Fine in 24 Hours',
-                'Win Your HOA Appeal',
-                'AI-Powered HOA Disputes',
-                'Stop Unfair HOA Fines',
-                'Get Your Appeal Letter',
-                'Free HOA Fine Review',
+                'HOA Appeal Letter Tool',
+                'Draft Your HOA Appeal',
+                'AI HOA Letter Generator',
+                'Self-Help HOA Disputes',
+                'Free HOA Notice Review',
+                'Prepare Your Appeal',
+                'HOA Letter Drafting Tool',
+                'Understand Your HOA Notice',
             ],
             'descriptions': [
-                'Get an AI-drafted appeal letter for your HOA fine in minutes. Free preview available.',
-                "Don't pay an unfair HOA fine. Get a custom appeal letter backed by your state's statutes.",
-                'Trusted by homeowners across the US. Free review, paid full appeal letters from $49.',
-                "We've helped homeowners overturn thousands in HOA fines. Start your appeal free.",
+                'AI-powered tool helps you draft your own HOA appeal letter. Free notice review. Not a law firm.',
+                'Self-help document preparation for HOA disputes. Free preview, full letter from $49.',
+                'Educational HOA information and AI drafting assistance. We are not a law firm and do not provide legal advice.',
+                'Get help organizing and responding to your HOA notice. Free review available.',
             ],
         },
     },
@@ -156,20 +159,20 @@ M1_AD_GROUPS = [
         ],
         'rsa': {
             'headlines': [
-                'Fight Your HOA Violation',
-                'Unfair HOA Fine?',
-                'Fight HOA Letters Now',
-                "Don't Pay Unfair Fines",
-                'AI HOA Dispute Tool',
-                'Win Against Your HOA',
+                'Respond to HOA Violations',
+                'Unfair HOA Notice?',
+                'HOA Response Letter Tool',
+                "Don't Just Pay It",
+                'AI HOA Self-Help Tool',
+                'Draft Your Own Response',
                 'Free HOA Letter Review',
                 'HOA Violation Help',
             ],
             'descriptions': [
-                "Got an unfair HOA fine? Don't just pay it. Get a custom dispute letter in minutes.",
-                "Our AI reviews your violation letter and drafts a custom rebuttal. Free preview.",
-                'Real homeowners winning real HOA disputes. Free preview, full letter from $49.',
-                "Stop letting your HOA push you around. Get the legal-grade response you need.",
+                'Self-help tool to draft your own response to an HOA violation notice. Free review.',
+                'AI-assisted document preparation for HOA disputes. Not a law firm. From $49.',
+                'Get organized and informed before you reply to your HOA. Free notice analysis.',
+                'Educational tool that helps you understand and respond to HOA notices. From $49.',
             ],
         },
     },
@@ -187,19 +190,19 @@ M1_AD_GROUPS = [
         'rsa': {
             'headlines': [
                 'How to Dispute an HOA Fine',
-                'Is Your HOA Fine Legal?',
+                'Understand HOA Notices',
                 'HOA Dispute Process',
-                'Dispute HOA in 3 Steps',
-                'Free HOA Fine Review',
-                'AI-Powered Dispute',
-                'Know Your HOA Rights',
+                '3-Step HOA Response Tool',
+                'Free HOA Notice Review',
+                'AI HOA Self-Help Tool',
+                'Know Your HOA Notice',
                 'Disputing HOA Fines',
             ],
             'descriptions': [
-                'Step-by-step HOA dispute process. Free review of your violation letter in minutes.',
-                "Find out if your HOA fine is even legal under your state's statutes. Free preview.",
-                'Our AI checks your fine against state HOA law. Free preview, full report from $49.',
-                'The complete guide to disputing an HOA fine. Get your free preview today.',
+                'Step-by-step educational guide to HOA disputes. Free notice review. Not legal advice.',
+                'Learn how the HOA dispute process works. AI-powered self-help tool. Not a law firm.',
+                'Educational resource and document drafting tool for HOA disputes. Free preview.',
+                'Understand your HOA notice before responding. Free preview, full report from $49.',
             ],
         },
     },
