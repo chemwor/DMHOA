@@ -35,6 +35,7 @@ from statute_lookup import (
 from dashboard_routes import dashboard_bp, _execute_alert_scan
 from routes.leads import leads_bp
 from routes.google_ads_writer import google_ads_writer_bp
+from routes.test_funnel import test_funnel_bp
 from utils.funnel import log_funnel_stage
 
 # Configure logging
@@ -53,6 +54,7 @@ CORS(app, resources={r"/*": {"origins": "*"}},
 app.register_blueprint(dashboard_bp)
 app.register_blueprint(leads_bp)
 app.register_blueprint(google_ads_writer_bp)
+app.register_blueprint(test_funnel_bp)
 
 # Style rules appended to every Claude/OpenAI system prompt that produces
 # user-facing prose (case analysis, chat, blog, ads). Keep this in sync
