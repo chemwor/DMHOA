@@ -152,9 +152,9 @@ M1_AD_GROUPS = [
                 'Understand Your HOA Notice',
             ],
             'descriptions': [
-                'The Dispute Engine helps you draft your own HOA appeal letter. Free notice review. Not a law firm.',
-                'Self-help document preparation for HOA disputes. Free preview, full letter from $49.',
-                'Educational HOA information and Engine-assisted drafting. We are not a law firm and do not provide legal advice.',
+                'The Dispute Engine drafts your HOA appeal letter. Free notice review. Not a law firm.',
+                'Self-help document prep for HOA disputes. Free preview, full letter from $49.',
+                'Educational HOA info and Engine drafting. Not a law firm. Not legal advice.',
                 'Get help organizing and responding to your HOA notice. Free review available.',
             ],
         },
@@ -212,8 +212,8 @@ M1_AD_GROUPS = [
                 'Disputing HOA Fines',
             ],
             'descriptions': [
-                'Step-by-step educational guide to HOA disputes. Free notice review. Not legal advice.',
-                'Learn how the HOA dispute process works. The Dispute Engine is a self-help tool. Not a law firm.',
+                'Step-by-step educational guide to HOA disputes. Free notice review.',
+                'Learn the HOA dispute process. The Dispute Engine is a self-help tool. Not a law firm.',
                 'Educational resource and document drafting tool for HOA disputes. Free preview.',
                 'Understand your HOA notice before responding. Free preview, full report from $49.',
             ],
@@ -341,8 +341,17 @@ def _create_m1_campaign(token: str) -> Dict:
             _mutate(token, 'adGroupCriteria', kw_ops)
             summary['keywords_added'] += len(kw_ops)
 
-        # Responsive search ad
+        # Responsive search ad - validate character limits before sending
         final_url = f"{SITE_URL}{ag['final_url_path']}"
+        for h in ag['rsa']['headlines']:
+            if len(h) > 30:
+                logger.error(f"Headline too long ({len(h)} > 30): {h!r}")
+                summary.setdefault('errors', []).append(f"{ag['name']}: headline too long ({len(h)} chars): {h!r}")
+        for d in ag['rsa']['descriptions']:
+            if len(d) > 90:
+                logger.error(f"Description too long ({len(d)} > 90): {d!r}")
+                summary.setdefault('errors', []).append(f"{ag['name']}: description too long ({len(d)} chars): {d!r}")
+
         rsa_op = {
             'create': {
                 'adGroup': ag_resource,
@@ -350,8 +359,8 @@ def _create_m1_campaign(token: str) -> Dict:
                 'ad': {
                     'finalUrls': [final_url],
                     'responsiveSearchAd': {
-                        'headlines': [{'text': h} for h in ag['rsa']['headlines']],
-                        'descriptions': [{'text': d} for d in ag['rsa']['descriptions']],
+                        'headlines': [{'text': h[:30]} for h in ag['rsa']['headlines']],
+                        'descriptions': [{'text': d[:90]} for d in ag['rsa']['descriptions']],
                     },
                 },
             }
@@ -360,7 +369,8 @@ def _create_m1_campaign(token: str) -> Dict:
             _mutate(token, 'adGroupAds', [rsa_op])
             summary['ads_added'] += 1
         except Exception as e:
-            logger.warning(f"RSA creation failed for {ag['name']}: {e}")
+            logger.error(f"RSA creation failed for {ag['name']}: {e}")
+            summary.setdefault('errors', []).append(f"{ag['name']}: RSA failed: {str(e)[:200]}")
 
         summary['ad_groups'].append({
             'name': ag['name'],
@@ -369,6 +379,106 @@ def _create_m1_campaign(token: str) -> Dict:
         })
 
     return summary
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/fill-missing-ads', methods=['POST', 'OPTIONS'])
+def fill_missing_ads():
+    """For each ad group in the M1 campaign, create the static M1 ad if there
+    isn't one yet. Idempotent. Used to backfill ads that failed during launch."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    token = _get_access_token()
+    if not token:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 500
+
+    try:
+        # Find ad groups in our campaign and which already have ads
+        existing = _query(token, f"""
+            SELECT
+                ad_group.id,
+                ad_group.name,
+                ad_group.resource_name,
+                ad_group_ad.ad.id
+            FROM ad_group_ad
+            WHERE campaign.name = '{M1_CAMPAIGN_NAME}'
+        """)
+
+        # Map ad group name -> resource name, and track which have ads
+        ad_groups_with_ads = set()
+        ad_group_resources = {}
+        for row in existing:
+            ag = row.get('adGroup', {})
+            name = ag.get('name')
+            resource = ag.get('resourceName')
+            if name and resource:
+                ad_group_resources[name] = resource
+            if row.get('adGroupAd', {}).get('ad', {}).get('id'):
+                ad_groups_with_ads.add(name)
+
+        # If some ad groups have no ads at all, the previous query won't include them
+        # because ad_group_ad is the FROM. Run a separate query for ad groups.
+        all_ag_rows = _query(token, f"""
+            SELECT ad_group.id, ad_group.name, ad_group.resource_name
+            FROM ad_group
+            WHERE campaign.name = '{M1_CAMPAIGN_NAME}'
+        """)
+        for row in all_ag_rows:
+            ag = row.get('adGroup', {})
+            name = ag.get('name')
+            resource = ag.get('resourceName')
+            if name and resource:
+                ad_group_resources[name] = resource
+
+        created = []
+        errors = []
+        for ag_def in M1_AD_GROUPS:
+            name = ag_def['name']
+            if name in ad_groups_with_ads:
+                continue  # already has an ad
+
+            ag_resource = ad_group_resources.get(name)
+            if not ag_resource:
+                errors.append(f'Ad group "{name}" not found in campaign')
+                continue
+
+            final_url = f"{SITE_URL}{ag_def['final_url_path']}"
+
+            # Validate character limits
+            bad_headlines = [h for h in ag_def['rsa']['headlines'] if len(h) > 30]
+            bad_descriptions = [d for d in ag_def['rsa']['descriptions'] if len(d) > 90]
+            if bad_headlines or bad_descriptions:
+                errors.append(f'{name}: invalid lengths - headlines: {bad_headlines}, descriptions: {bad_descriptions}')
+                continue
+
+            rsa_op = {
+                'create': {
+                    'adGroup': ag_resource,
+                    'status': 'ENABLED',
+                    'ad': {
+                        'finalUrls': [final_url],
+                        'responsiveSearchAd': {
+                            'headlines': [{'text': h[:30]} for h in ag_def['rsa']['headlines']],
+                            'descriptions': [{'text': d[:90]} for d in ag_def['rsa']['descriptions']],
+                        },
+                    },
+                }
+            }
+            try:
+                _mutate(token, 'adGroupAds', [rsa_op])
+                created.append(name)
+            except Exception as e:
+                errors.append(f'{name}: {str(e)[:300]}')
+
+        return jsonify({
+            'ok': len(errors) == 0,
+            'created': created,
+            'already_had_ads': sorted(ad_groups_with_ads),
+            'errors': errors,
+        })
+    except Exception as e:
+        logger.error(f'fill_missing_ads failed: {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @google_ads_writer_bp.route('/api/dashboard/google-ads/launch-m1', methods=['POST', 'OPTIONS'])
