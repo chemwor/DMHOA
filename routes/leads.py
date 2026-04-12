@@ -576,13 +576,70 @@ def draft_reply(lead_id):
     body = request.get_json(silent=True) or {}
     extra_context = (body.get('extra_context') or '').strip()
 
-    # Step 1: Scrape the full Reddit post + comments via Firecrawl
-    from utils.firecrawl import scrape_url
-    scraped = scrape_url(reddit_url)
+    # Step 1: Fetch the full Reddit post + comments
+    # Reddit's .json endpoint returns the full post body + all comments.
+    # We try this first (works from most IPs), fall back to RSS, then to
+    # just the title if everything fails.
+    scraped = ''
+
+    # Extract the Reddit post path from the URL for the .json endpoint
+    # URL format: https://reddit.com/r/HOA/comments/1si6nkl/...
+    json_url = reddit_url.replace('https://reddit.com', 'https://www.reddit.com')
+    if not json_url.startswith('https://www.reddit.com'):
+        json_url = f'https://www.reddit.com{reddit_url}' if reddit_url.startswith('/') else reddit_url
+
+    # Strip trailing slashes and add .json
+    json_url = json_url.rstrip('/') + '.json'
+
+    try:
+        resp = http_requests.get(json_url, headers={'User-Agent': 'DMHOA-ReplyDrafter/1.0'}, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            # Reddit returns [post_listing, comments_listing]
+            post_data = data[0]['data']['children'][0]['data'] if data else {}
+            post_title = post_data.get('title', title)
+            post_body = post_data.get('selftext', '')
+            post_author = post_data.get('author', '')
+            post_sub = post_data.get('subreddit', subreddit)
+
+            parts = [f"Subreddit: r/{post_sub}", f"Title: {post_title}", f"Author: u/{post_author}", "", post_body, "", "--- COMMENTS ---"]
+
+            comments = data[1]['data']['children'] if len(data) > 1 else []
+            for c in comments[:20]:
+                cd = c.get('data', {})
+                if cd.get('body'):
+                    parts.append(f"\nu/{cd.get('author', 'unknown')}:")
+                    parts.append(cd['body'][:500])
+
+            scraped = '\n'.join(parts)
+            logger.info(f'Reddit JSON: fetched {len(scraped)} chars for {reddit_url}')
+        else:
+            logger.warning(f'Reddit JSON returned {resp.status_code} for {json_url}')
+    except Exception as e:
+        logger.warning(f'Reddit JSON fetch failed: {e}')
+
+    # Fallback: try RSS
+    if not scraped:
+        try:
+            rss_url = json_url.replace('.json', '/.rss')
+            resp = http_requests.get(rss_url, headers={'User-Agent': 'DMHOA-ReplyDrafter/1.0'}, timeout=15)
+            if resp.status_code == 200 and '<entry>' in resp.text:
+                # Quick parse: strip HTML tags from entries
+                import re
+                entries = re.findall(r'<content[^>]*>(.*?)</content>', resp.text, re.DOTALL)
+                parts = [f"Subreddit: r/{subreddit}", f"Title: {title}", ""]
+                for entry in entries[:15]:
+                    text = re.sub(r'<[^>]+>', ' ', entry)
+                    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+                    parts.append(' '.join(text.split())[:600])
+                    parts.append("")
+                scraped = '\n'.join(parts)
+                logger.info(f'Reddit RSS: fetched {len(scraped)} chars for {reddit_url}')
+        except Exception as e:
+            logger.warning(f'Reddit RSS fetch failed: {e}')
 
     if not scraped:
-        # Fallback: just use the title and any stored text
-        scraped = f"Post title: {title}\nSubreddit: r/{subreddit}\n(Full post text could not be retrieved)"
+        scraped = f"Post title: {title}\nSubreddit: r/{subreddit}\n(Full post text could not be retrieved. Draft based on title only.)"
 
     # Truncate to ~8k chars to stay within token budget
     if len(scraped) > 8000:
