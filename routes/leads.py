@@ -484,6 +484,36 @@ def scraper_status():
     })
 
 
+@leads_bp.route('/api/dashboard/leads/daily-stats', methods=['GET', 'OPTIONS'])
+def daily_lead_stats():
+    """Return today's reply count for the daily activity counter."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+            headers=supabase_headers(),
+            params={
+                'select': 'id',
+                'status': 'eq.replied',
+                'replied_at': f'gte.{today_start}',
+            },
+            timeout=TIMEOUT,
+        )
+        replied_today = len(resp.json()) if resp.ok else 0
+
+        return jsonify({
+            'replied_today': replied_today,
+            'goal': 10,
+            'date': today_start[:10],
+        })
+    except Exception as e:
+        return jsonify({'replied_today': 0, 'goal': 10, 'error': str(e)})
+
+
 @leads_bp.route('/api/dashboard/leads/purge-stale', methods=['POST', 'OPTIONS'])
 def purge_stale_leads():
     """Delete all leads older than MAX_AGE_DAYS that are still in 'new' status.

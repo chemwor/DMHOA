@@ -7439,3 +7439,67 @@ def get_command_center():
     except Exception as e:
         logger.error(f'Command center error: {str(e)}')
         return jsonify({'error': 'Failed to load command center data'}), 500
+
+
+# ============================================================================
+# DAILY GARDEN — "Watering the Garden" recurring daily growth tasks
+# ============================================================================
+
+@dashboard_bp.route('/api/dashboard/daily-garden', methods=['GET', 'OPTIONS'])
+def get_daily_garden():
+    """Return today's garden task completion state."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/daily_garden",
+            headers=supabase_headers(),
+            params={
+                'task_date': f'eq.{today}',
+                'select': '*',
+            },
+            timeout=TIMEOUT,
+        )
+        rows = resp.json() if resp.ok else []
+        completions = {r['task_key']: r.get('completed', False) for r in rows}
+        return jsonify({'date': today, 'completions': completions})
+    except Exception as e:
+        logger.error(f'daily_garden GET error: {e}')
+        return jsonify({'date': today, 'completions': {}, 'error': str(e)})
+
+
+@dashboard_bp.route('/api/dashboard/daily-garden/<task_key>', methods=['PATCH', 'OPTIONS'])
+def toggle_daily_garden(task_key):
+    """Toggle a garden task's completion for today."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    body = request.get_json(silent=True) or {}
+    completed = bool(body.get('completed', False))
+    today = datetime.now().strftime('%Y-%m-%d')
+    now_iso = datetime.now().isoformat()
+
+    payload = {
+        'task_date': today,
+        'task_key': task_key,
+        'completed': completed,
+        'completed_at': now_iso if completed else None,
+    }
+
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/daily_garden",
+            headers={**supabase_headers(), 'Prefer': 'resolution=merge-duplicates,return=representation'},
+            json=payload,
+            timeout=TIMEOUT,
+        )
+        if resp.ok:
+            rows = resp.json() or []
+            return jsonify({'ok': True, 'row': rows[0] if rows else payload})
+        return jsonify({'ok': False, 'error': resp.text[:300]}), 500
+    except Exception as e:
+        logger.error(f'daily_garden PATCH error: {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
