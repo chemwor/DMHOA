@@ -552,6 +552,8 @@ def purge_stale_leads():
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 
+REDDIT_USERNAME = 'disputemyhoa'
+
 REPLY_SYSTEM_PROMPT = """You are Eric, founder of DisputeMyHOA.com, a self-help document preparation tool for homeowners dealing with HOA violations and fines.
 
 You are writing a Reddit reply to someone who has a real HOA problem.
@@ -597,6 +599,202 @@ WRITING STYLE RULES (critical):
 - Never use: delve, leverage, robust, seamlessly, comprehensive, holistic, empower, streamline, cutting-edge, state-of-the-art, embark, harness, tapestry, vibrant, transformative, paramount, pivotal, moreover, furthermore, in essence, it is worth noting, in conclusion, ultimately, navigate the complexities.
 - Do not start sentences with "Indeed", "Notably", "Importantly", or "However,".
 - Write plain, direct, conversational English. Short sentences. Sound like a real person on Reddit."""
+
+
+def _find_replies_to_user(thread_json: list, username: str) -> list:
+    """Walk the Reddit comment tree and find replies to comments by `username`.
+    Returns a list of {parent_comment, reply_author, reply_body, reply_id, reply_created_utc}."""
+    replies_found = []
+
+    def _walk_comments(children: list, parent_author: str = ''):
+        for child in children:
+            if child.get('kind') != 't1':
+                continue
+            data = child.get('data', {})
+            author = data.get('author', '')
+            body = data.get('body', '')
+            comment_id = data.get('id', '')
+            created_utc = data.get('created_utc', 0)
+            parent_body = data.get('parent_id', '')
+
+            # If the parent of this comment was written by our user, this is a reply TO us
+            if parent_author.lower() == username.lower() and author.lower() != username.lower():
+                replies_found.append({
+                    'reply_author': author,
+                    'reply_body': body[:1000],
+                    'reply_id': comment_id,
+                    'reply_created_utc': created_utc,
+                })
+
+            # If THIS comment is by our user, check its direct children for replies
+            nested = data.get('replies')
+            if isinstance(nested, dict):
+                nested_children = nested.get('data', {}).get('children', [])
+                _walk_comments(nested_children, parent_author=author)
+
+    # thread_json is [post_listing, comments_listing]
+    if len(thread_json) > 1:
+        top_level = thread_json[1].get('data', {}).get('children', [])
+        # First pass: find our comments at top level
+        for child in top_level:
+            if child.get('kind') != 't1':
+                continue
+            data = child.get('data', {})
+            author = data.get('author', '')
+            # Walk nested replies under each top-level comment
+            nested = data.get('replies')
+            if isinstance(nested, dict):
+                nested_children = nested.get('data', {}).get('children', [])
+                _walk_comments(nested_children, parent_author=author)
+
+    return replies_found
+
+
+@leads_bp.route('/api/dashboard/leads/check-replies', methods=['POST', 'OPTIONS'])
+def check_replies():
+    """Check all 'replied' leads for new responses to u/disputemyhoa's comments.
+    Fetches each replied thread from Reddit and walks the comment tree to find
+    replies directed at our user."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    # Fetch all replied leads
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+            headers=supabase_headers(),
+            params={
+                'status': 'eq.replied',
+                'select': 'id,post_id,title,url,subreddit,replied_at',
+                'order': 'replied_at.desc',
+                'limit': '50',
+            },
+            timeout=TIMEOUT,
+        )
+        if not resp.ok:
+            return jsonify({'error': 'Failed to fetch replied leads'}), 500
+        leads = resp.json() or []
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    if not leads:
+        return jsonify({'ok': True, 'threads_checked': 0, 'replies': []})
+
+    all_replies = []
+    threads_checked = 0
+    errors = []
+
+    for lead in leads:
+        reddit_url = lead.get('url', '')
+        if not reddit_url:
+            continue
+
+        # Build the .json URL for the thread
+        json_url = reddit_url.replace('https://reddit.com', 'https://www.reddit.com')
+        if not json_url.startswith('https://www.reddit.com'):
+            json_url = f'https://www.reddit.com{reddit_url}' if reddit_url.startswith('/') else reddit_url
+        json_url = json_url.rstrip('/') + '.json'
+
+        try:
+            r = http_requests.get(json_url, headers={'User-Agent': 'DMHOA-ReplyChecker/1.0'}, timeout=15)
+            if r.status_code == 200:
+                thread_data = r.json()
+                replies = _find_replies_to_user(thread_data, REDDIT_USERNAME)
+                threads_checked += 1
+
+                for reply in replies:
+                    all_replies.append({
+                        'lead_id': lead.get('id'),
+                        'lead_title': lead.get('title', ''),
+                        'subreddit': lead.get('subreddit', ''),
+                        'reddit_url': reddit_url,
+                        **reply,
+                    })
+            elif r.status_code == 403:
+                # Try RSS fallback — but RSS doesn't give us nested comments
+                # so we can't find replies. Just skip.
+                errors.append(f"r/{lead.get('subreddit')}: Reddit returned 403")
+            else:
+                errors.append(f"r/{lead.get('subreddit')}: HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"{lead.get('post_id')}: {str(e)[:100]}")
+
+        # Be polite between requests
+        time.sleep(0.5)
+
+    # Sort by most recent reply first
+    all_replies.sort(key=lambda x: x.get('reply_created_utc', 0), reverse=True)
+
+    return jsonify({
+        'ok': True,
+        'threads_checked': threads_checked,
+        'replies': all_replies,
+        'errors': errors if errors else None,
+    })
+
+
+@leads_bp.route('/api/dashboard/leads/<lead_id>/draft-follow-up', methods=['POST', 'OPTIONS'])
+def draft_follow_up(lead_id):
+    """Draft a follow-up reply to someone who responded to our Reddit comment.
+    Body: { "their_reply": "...", "thread_context": "..." (optional) }"""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not configured'}), 500
+
+    body = request.get_json(silent=True) or {}
+    their_reply = (body.get('their_reply') or '').strip()
+    thread_context = (body.get('thread_context') or '').strip()
+
+    if not their_reply:
+        return jsonify({'error': 'their_reply is required'}), 400
+
+    user_prompt = f"""Someone replied to my Reddit comment. I need to write a follow-up.
+
+Their reply to me:
+---
+{their_reply[:2000]}
+---
+
+{f"Thread context: {thread_context[:2000]}" if thread_context else ""}
+
+Write a short, natural follow-up response (1-3 paragraphs). Be helpful and conversational. Do NOT mention disputemyhoa.com again since I already mentioned it in my original comment. Just be genuinely helpful."""
+
+    try:
+        resp = http_requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                'x-api-key': ANTHROPIC_API_KEY,
+                'Content-Type': 'application/json',
+                'anthropic-version': '2023-06-01',
+            },
+            json={
+                'model': 'claude-sonnet-4-20250514',
+                'max_tokens': 512,
+                'system': REPLY_SYSTEM_PROMPT,
+                'messages': [{'role': 'user', 'content': user_prompt}],
+            },
+            timeout=(10, 60),
+        )
+
+        if not resp.ok:
+            return jsonify({'error': f'Claude API error: {resp.status_code}'}), 500
+
+        data = resp.json()
+        raw_reply = data.get('content', [{}])[0].get('text', '')
+
+        # Strip category tag if present
+        import re
+        reply_text = raw_reply
+        cat_match = re.match(r'\[CATEGORY:\s*\w+\]\s*\n?', raw_reply)
+        if cat_match:
+            reply_text = raw_reply[cat_match.end():].strip()
+
+        return jsonify({'ok': True, 'reply': reply_text})
+
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @leads_bp.route('/api/dashboard/leads/<lead_id>/draft-reply', methods=['POST', 'OPTIONS'])
