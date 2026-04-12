@@ -107,7 +107,25 @@ def _fetch_reddit_search(sub: str, query: str, limit: int = 50) -> list:
     except Exception as e:
         logger.warning(f'Reddit search for r/{sub} failed: {e}')
 
-    # Attempt 2: Pullpush (may be stale but accessible from any IP)
+    # Attempt 2: RSS search feed
+    try:
+        rss_url = f'https://www.reddit.com/r/{sub}/search.rss'
+        resp = http_requests.get(rss_url, headers=headers, params={
+            'q': query,
+            'restrict_sr': 'on',
+            'sort': 'new',
+            't': 'week',
+            'limit': str(limit),
+        }, timeout=15)
+        if resp.status_code == 200 and '<entry>' in resp.text:
+            posts = _parse_rss_posts(resp.text, sub)
+            if posts:
+                logger.info(f'Reddit RSS search: r/{sub} returned {len(posts)} posts')
+                return posts
+    except Exception as e:
+        logger.warning(f'Reddit RSS search for r/{sub} failed: {e}')
+
+    # Attempt 3: Pullpush (may be stale but accessible from any IP)
     try:
         cutoff = int(time.time() - (MAX_AGE_DAYS * 86400))
         resp = http_requests.get(PULLPUSH_URL, headers=headers, params={
@@ -136,13 +154,94 @@ def _fetch_reddit_search(sub: str, query: str, limit: int = 50) -> list:
     return posts
 
 
+def _parse_rss_posts(xml_text: str, sub: str) -> list:
+    """Parse Reddit Atom/RSS feed into our standard post format.
+    Uses simple string parsing to avoid adding an XML dependency."""
+    import re
+    posts = []
+
+    # Extract each <entry>...</entry> block
+    entries = re.findall(r'<entry>(.*?)</entry>', xml_text, re.DOTALL)
+    for entry in entries:
+        # Post ID: <id>t3_xxxxx</id> → extract just xxxxx
+        id_match = re.search(r'<id>t3_([^<]+)</id>', entry)
+        post_id = id_match.group(1) if id_match else ''
+
+        # Title
+        title_match = re.search(r'<title>([^<]*)</title>', entry)
+        title = title_match.group(1) if title_match else ''
+        # Decode HTML entities
+        title = title.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+
+        # Link (permalink)
+        link_match = re.search(r'<link href="([^"]*)"', entry)
+        permalink = link_match.group(1) if link_match else ''
+        # Convert full URL to relative path
+        if 'reddit.com' in permalink:
+            permalink = '/' + permalink.split('reddit.com/', 1)[-1]
+
+        # Published timestamp
+        pub_match = re.search(r'<published>([^<]+)</published>', entry)
+        created_utc = 0
+        if pub_match:
+            try:
+                from datetime import datetime as dt
+                pub_str = pub_match.group(1)
+                # Parse ISO 8601
+                pub_dt = dt.fromisoformat(pub_str.replace('Z', '+00:00'))
+                created_utc = pub_dt.timestamp()
+            except Exception:
+                pass
+
+        # Body text (strip HTML from content)
+        content_match = re.search(r'<content[^>]*>(.*?)</content>', entry, re.DOTALL)
+        selftext = ''
+        if content_match:
+            raw = content_match.group(1)
+            # Strip HTML tags and decode entities
+            selftext = re.sub(r'<[^>]+>', ' ', raw)
+            selftext = selftext.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"').replace('&nbsp;', ' ')
+            selftext = ' '.join(selftext.split())[:2000]
+
+        if post_id:
+            posts.append({
+                'id': post_id,
+                'title': title,
+                'selftext': selftext,
+                'permalink': permalink,
+                'created_utc': created_utc,
+                'subreddit': sub,
+            })
+
+    return posts
+
+
 def _fetch_hoa_sub_posts(sub: str, limit: int = 100) -> list:
     """For HOA-focused subs, fetch all recent posts (they're all relevant).
-    Tries Reddit new.json first, then search, then Pullpush."""
+    Strategy: RSS feed first (works from cloud IPs more often than JSON),
+    then JSON, then Pullpush as last resort."""
     headers = {'User-Agent': 'DMHOA-LeadScraper/1.0'}
     posts = []
 
-    # Reddit new.json (most complete for HOA-focused subs)
+    # Attempt 1: RSS feed (Atom format, often less aggressively blocked)
+    try:
+        resp = http_requests.get(
+            f'https://www.reddit.com/r/{sub}/new/.rss',
+            headers=headers,
+            params={'limit': min(limit, 100)},
+            timeout=15,
+        )
+        if resp.status_code == 200 and '<entry>' in resp.text:
+            posts = _parse_rss_posts(resp.text, sub)
+            if posts:
+                logger.info(f'Reddit RSS: r/{sub} returned {len(posts)} posts')
+                return posts
+        elif resp.status_code == 403:
+            logger.info(f'Reddit RSS: r/{sub} returned 403')
+    except Exception as e:
+        logger.warning(f'Reddit RSS for r/{sub} failed: {e}')
+
+    # Attempt 2: Reddit new.json
     try:
         resp = http_requests.get(
             f'https://www.reddit.com/r/{sub}/new.json',
@@ -165,12 +264,10 @@ def _fetch_hoa_sub_posts(sub: str, limit: int = 100) -> list:
             if posts:
                 logger.info(f'Reddit new.json: r/{sub} returned {len(posts)} posts')
                 return posts
-        elif resp.status_code == 403:
-            logger.info(f'Reddit new.json: r/{sub} returned 403, trying search')
     except Exception as e:
         logger.warning(f'Reddit new.json for r/{sub} failed: {e}')
 
-    # Fall back to search with a broad query
+    # Attempt 3: search with a broad query
     return _fetch_reddit_search(sub, HOA_BROAD_QUERY, limit)
 
 
