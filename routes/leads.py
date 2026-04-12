@@ -25,8 +25,8 @@ TIMEOUT = (5, 60)
 PULLPUSH_URL = 'https://api.pullpush.io/reddit/search/submission/'
 REDDIT_SEARCH_URL = 'https://www.reddit.com/r/{sub}/search.json'
 
-HOA_SUBS = ['HOA', 'homeowners']
-GENERAL_SUBS = ['FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
+HOA_SUBS = ['HOA', 'homeowners', 'fuckhoa']
+GENERAL_SUBS = ['FirstTimeHomeBuyer', 'personalfinance', 'legaladvice', 'RealEstate', 'neighborsfromhell', 'Landlord']
 
 # Only keep posts newer than this many days
 MAX_AGE_DAYS = 7
