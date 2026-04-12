@@ -7445,6 +7445,101 @@ def get_command_center():
 # DAILY GARDEN — "Watering the Garden" recurring daily growth tasks
 # ============================================================================
 
+@dashboard_bp.route('/api/dashboard/email-funnel-metrics', methods=['GET', 'OPTIONS'])
+def email_funnel_metrics():
+    """Return aggregate funnel metrics from the email_funnel table.
+    Shows stage counts, conversion rates, and nudge effectiveness."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    try:
+        # Fetch all funnel rows
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/email_funnel",
+            headers=supabase_headers(),
+            params={'select': '*', 'limit': '5000'},
+            timeout=TIMEOUT,
+        )
+        rows = resp.json() if resp.ok else []
+
+        total = len(rows)
+        if total == 0:
+            return jsonify({
+                'total': 0,
+                'stages': {'quick_preview_complete': 0, 'full_preview_viewed': 0, 'purchased': 0},
+                'nudges': {'nudge_1_sent': 0, 'nudge_2_sent': 0, 'nudge_3_sent': 0},
+                'conversion_rates': {'quick_to_full': 0, 'full_to_purchased': 0, 'overall': 0},
+                'purchased_count': 0,
+                'revenue_estimate': 0,
+            })
+
+        # Stage counts (current stage, not cumulative)
+        stage_counts = {'quick_preview_complete': 0, 'full_preview_viewed': 0, 'purchased': 0}
+        nudge_counts = {'nudge_1_sent': 0, 'nudge_2_sent': 0, 'nudge_3_sent': 0}
+        purchased_count = 0
+
+        # "Reached" counts (cumulative: if you're at purchased, you also reached full and quick)
+        reached_quick = 0
+        reached_full = 0
+        reached_purchased = 0
+
+        stage_rank = {'quick_preview_complete': 1, 'full_preview_viewed': 2, 'purchased': 3}
+
+        for row in rows:
+            stage = row.get('stage', '')
+            rank = stage_rank.get(stage, 0)
+
+            # Current stage count
+            if stage in stage_counts:
+                stage_counts[stage] += 1
+
+            # Cumulative "reached" counts
+            if rank >= 1:
+                reached_quick += 1
+            if rank >= 2:
+                reached_full += 1
+            if rank >= 3:
+                reached_purchased += 1
+
+            # Nudge counts
+            if row.get('nudge_1_sent'):
+                nudge_counts['nudge_1_sent'] += 1
+            if row.get('nudge_2_sent'):
+                nudge_counts['nudge_2_sent'] += 1
+            if row.get('nudge_3_sent'):
+                nudge_counts['nudge_3_sent'] += 1
+
+            if row.get('purchased'):
+                purchased_count += 1
+
+        # Conversion rates (percentage of people who reached the next stage)
+        quick_to_full = round((reached_full / reached_quick) * 100, 1) if reached_quick > 0 else 0
+        full_to_purchased = round((reached_purchased / reached_full) * 100, 1) if reached_full > 0 else 0
+        overall = round((reached_purchased / reached_quick) * 100, 1) if reached_quick > 0 else 0
+
+        return jsonify({
+            'total': total,
+            'stages': stage_counts,
+            'reached': {
+                'quick_preview': reached_quick,
+                'full_preview': reached_full,
+                'purchased': reached_purchased,
+            },
+            'nudges': nudge_counts,
+            'conversion_rates': {
+                'quick_to_full': quick_to_full,
+                'full_to_purchased': full_to_purchased,
+                'overall': overall,
+            },
+            'purchased_count': purchased_count,
+            'revenue_estimate': purchased_count * 49,
+        })
+
+    except Exception as e:
+        logger.error(f'email_funnel_metrics error: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
 @dashboard_bp.route('/api/dashboard/daily-garden', methods=['GET', 'OPTIONS'])
 def get_daily_garden():
     """Return today's garden task completion state."""
