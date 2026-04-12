@@ -511,3 +511,127 @@ def purge_stale_leads():
         return jsonify({'ok': False, 'error': resp.text[:300]}), 500
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# REDDIT REPLY DRAFTER
+# Scrapes the full Reddit post via Firecrawl, asks Claude to draft a
+# personalized, helpful reply that soft-mentions DMHOA at the end.
+# ============================================================================
+
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
+
+REPLY_SYSTEM_PROMPT = """You are Eric, founder of DisputeMyHOA.com, a self-help document preparation tool for homeowners dealing with HOA violations and fines.
+
+You are writing a Reddit reply to someone who has a real HOA problem. Your job:
+
+1. Actually help them. Answer their specific question based on the details in their post. Be concrete, not vague. Reference specifics from their situation.
+2. Keep it short. 3-5 paragraphs max. No walls of text.
+3. Sound like a real person on Reddit, not a marketing bot. No corporate speak, no bullet lists, no "as a founder I..." cringe.
+4. At the very end, one natural mention: "if you want help drafting an actual response letter, I built disputemyhoa.com for exactly this." One line, not a paragraph.
+5. Do NOT say "I am not a lawyer" or "this is not legal advice" in the Reddit reply. That's implied and screams bot.
+6. Do NOT use em-dashes. Use periods or commas instead.
+7. Do NOT start with "Hey there!" or "Great question!" or any Reddit cliche opener. Just start talking about their situation.
+
+WRITING STYLE RULES (critical):
+- Never use em-dashes or en-dashes. Use periods, commas, colons, or parentheses instead.
+- Never use: delve, leverage, robust, seamlessly, comprehensive, holistic, empower, streamline, cutting-edge, state-of-the-art, embark, harness, tapestry, vibrant, transformative, paramount, pivotal, moreover, furthermore, in essence, it is worth noting, in conclusion, ultimately, navigate the complexities.
+- Do not start sentences with "Indeed", "Notably", "Importantly", or "However,".
+- Write plain, direct, conversational English. Short sentences. Sound like a real person on Reddit."""
+
+
+@leads_bp.route('/api/dashboard/leads/<lead_id>/draft-reply', methods=['POST', 'OPTIONS'])
+def draft_reply(lead_id):
+    """Scrape the Reddit post via Firecrawl, then ask Claude to draft a
+    personalized reply. Returns the draft text for the user to review/edit.
+
+    Body (optional): { "extra_context": "..." } — any notes the user wants
+    Claude to incorporate into the reply.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    if not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not configured'}), 500
+
+    # Look up the lead to get the URL and title
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+            headers=supabase_headers(),
+            params={'id': f'eq.{lead_id}', 'select': '*'},
+            timeout=TIMEOUT,
+        )
+        if not resp.ok or not resp.json():
+            return jsonify({'error': 'Lead not found'}), 404
+        lead = resp.json()[0]
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    reddit_url = lead.get('url', '')
+    title = lead.get('title', '')
+    subreddit = lead.get('subreddit', '')
+
+    body = request.get_json(silent=True) or {}
+    extra_context = (body.get('extra_context') or '').strip()
+
+    # Step 1: Scrape the full Reddit post + comments via Firecrawl
+    from utils.firecrawl import scrape_url
+    scraped = scrape_url(reddit_url)
+
+    if not scraped:
+        # Fallback: just use the title and any stored text
+        scraped = f"Post title: {title}\nSubreddit: r/{subreddit}\n(Full post text could not be retrieved)"
+
+    # Truncate to ~8k chars to stay within token budget
+    if len(scraped) > 8000:
+        scraped = scraped[:8000] + '\n\n[... post truncated for length]'
+
+    # Step 2: Ask Claude to draft the reply
+    user_prompt = f"""Here is a Reddit post from r/{subreddit} that I want to reply to:
+
+---
+{scraped}
+---
+
+{f"Additional context from me: {extra_context}" if extra_context else ""}
+
+Draft a Reddit reply from me (Eric, founder of disputemyhoa.com). Be genuinely helpful first, mention my tool once at the end. Keep it natural and short."""
+
+    try:
+        resp = http_requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                'x-api-key': ANTHROPIC_API_KEY,
+                'Content-Type': 'application/json',
+                'anthropic-version': '2023-06-01',
+            },
+            json={
+                'model': 'claude-sonnet-4-20250514',
+                'max_tokens': 1024,
+                'system': REPLY_SYSTEM_PROMPT,
+                'messages': [{'role': 'user', 'content': user_prompt}],
+            },
+            timeout=(10, 60),
+        )
+
+        if not resp.ok:
+            return jsonify({'error': f'Claude API error: {resp.status_code} - {resp.text[:300]}'}), 500
+
+        data = resp.json()
+        reply_text = data.get('content', [{}])[0].get('text', '')
+
+        return jsonify({
+            'ok': True,
+            'reply': reply_text,
+            'lead_id': lead_id,
+            'reddit_url': reddit_url,
+            'subreddit': subreddit,
+            'title': title,
+            'scraped_length': len(scraped),
+        })
+
+    except Exception as e:
+        logger.error(f'draft_reply failed for lead {lead_id}: {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
