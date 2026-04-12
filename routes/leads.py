@@ -4,6 +4,7 @@ Routes: GET /api/dashboard/leads, PATCH /api/dashboard/leads/:id, POST /api/dash
 """
 
 import os
+import time
 import threading
 import logging
 from datetime import datetime, timezone
@@ -22,8 +23,13 @@ TIMEOUT = (5, 60)
 # --- Inline scraper (avoids subprocess timeout) ---
 
 PULLPUSH_URL = 'https://api.pullpush.io/reddit/search/submission/'
+REDDIT_SEARCH_URL = 'https://www.reddit.com/r/{sub}/search.json'
+
 HOA_SUBS = ['HOA', 'homeowners']
 GENERAL_SUBS = ['FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
+
+# Only keep posts newer than this many days
+MAX_AGE_DAYS = 7
 
 HOA_SUB_KEYWORDS = [
     'fine', 'fined', 'violation', 'dispute', 'letter', 'threatening',
@@ -32,6 +38,10 @@ HOA_SUB_KEYWORDS = [
     'covenant', 'bylaw', 'hearing', 'help', 'advice', 'what should',
     'need advice', 'frustrated', 'concern', 'issue', 'problem',
 ]
+
+# Search queries used on general subs (tried on Reddit search first)
+HOA_SEARCH_QUERY = 'hoa fine OR hoa violation OR hoa dispute OR hoa letter OR hoa appeal'
+HOA_BROAD_QUERY = 'hoa'
 
 SCORE_WORDS_HIGH = ['fined', 'violation', 'threatened', 'lawsuit', 'lien', 'penalty', 'foreclos']
 SCORE_WORDS_MED = ['help', 'advice', 'what do i do', 'what should i', 'need advice', 'frustrated']
@@ -47,6 +57,121 @@ def _supabase_headers_upsert():
         'Content-Type': 'application/json',
         'Prefer': 'resolution=merge-duplicates',
     }
+
+
+def _is_recent(created_utc: float) -> bool:
+    """True if the post is younger than MAX_AGE_DAYS."""
+    if not created_utc:
+        return False
+    age_seconds = time.time() - created_utc
+    return age_seconds < (MAX_AGE_DAYS * 86400)
+
+
+def _fetch_reddit_search(sub: str, query: str, limit: int = 50) -> list:
+    """Try Reddit's own search.json endpoint first (fresh data).
+    Falls back to Pullpush if Reddit returns 403 from cloud IPs."""
+    headers = {'User-Agent': 'DMHOA-LeadScraper/1.0'}
+    posts = []
+
+    # Attempt 1: Reddit search.json (returns real-time fresh posts)
+    try:
+        url = REDDIT_SEARCH_URL.format(sub=sub)
+        resp = http_requests.get(url, headers=headers, params={
+            'q': query,
+            'restrict_sr': 'on',
+            'sort': 'new',
+            't': 'week',
+            'limit': str(limit),
+        }, timeout=15)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            children = data.get('data', {}).get('children', [])
+            for child in children:
+                p = child.get('data', {})
+                posts.append({
+                    'id': p.get('id', ''),
+                    'title': p.get('title', ''),
+                    'selftext': p.get('selftext', ''),
+                    'permalink': p.get('permalink', ''),
+                    'created_utc': p.get('created_utc', 0),
+                    'subreddit': p.get('subreddit', sub),
+                })
+            if posts:
+                logger.info(f'Reddit search: r/{sub} returned {len(posts)} posts')
+                return posts
+        elif resp.status_code == 403:
+            logger.info(f'Reddit search: r/{sub} returned 403, falling back to Pullpush')
+        else:
+            logger.warning(f'Reddit search: r/{sub} returned {resp.status_code}')
+    except Exception as e:
+        logger.warning(f'Reddit search for r/{sub} failed: {e}')
+
+    # Attempt 2: Pullpush (may be stale but accessible from any IP)
+    try:
+        cutoff = int(time.time() - (MAX_AGE_DAYS * 86400))
+        resp = http_requests.get(PULLPUSH_URL, headers=headers, params={
+            'subreddit': sub,
+            'q': query,
+            'size': limit,
+            'sort': 'desc',
+            'sort_type': 'created_utc',
+            'after': cutoff,
+        }, timeout=20)
+        if resp.status_code == 200:
+            for p in resp.json().get('data', []):
+                posts.append({
+                    'id': p.get('id', ''),
+                    'title': p.get('title', ''),
+                    'selftext': p.get('selftext', ''),
+                    'permalink': f"/r/{sub}/comments/{p.get('id', '')}",
+                    'created_utc': p.get('created_utc', 0),
+                    'subreddit': sub,
+                })
+            if posts:
+                logger.info(f'Pullpush: r/{sub} returned {len(posts)} posts')
+    except Exception as e:
+        logger.warning(f'Pullpush for r/{sub} failed: {e}')
+
+    return posts
+
+
+def _fetch_hoa_sub_posts(sub: str, limit: int = 100) -> list:
+    """For HOA-focused subs, fetch all recent posts (they're all relevant).
+    Tries Reddit new.json first, then search, then Pullpush."""
+    headers = {'User-Agent': 'DMHOA-LeadScraper/1.0'}
+    posts = []
+
+    # Reddit new.json (most complete for HOA-focused subs)
+    try:
+        resp = http_requests.get(
+            f'https://www.reddit.com/r/{sub}/new.json',
+            headers=headers,
+            params={'limit': min(limit, 100)},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            children = resp.json().get('data', {}).get('children', [])
+            for child in children:
+                p = child.get('data', {})
+                posts.append({
+                    'id': p.get('id', ''),
+                    'title': p.get('title', ''),
+                    'selftext': p.get('selftext', ''),
+                    'permalink': p.get('permalink', ''),
+                    'created_utc': p.get('created_utc', 0),
+                    'subreddit': p.get('subreddit', sub),
+                })
+            if posts:
+                logger.info(f'Reddit new.json: r/{sub} returned {len(posts)} posts')
+                return posts
+        elif resp.status_code == 403:
+            logger.info(f'Reddit new.json: r/{sub} returned 403, trying search')
+    except Exception as e:
+        logger.warning(f'Reddit new.json for r/{sub} failed: {e}')
+
+    # Fall back to search with a broad query
+    return _fetch_reddit_search(sub, HOA_BROAD_QUERY, limit)
 
 
 def _score_post(text):
@@ -85,32 +210,27 @@ def _run_scrape():
         except Exception as e:
             logger.error(f"Failed to fetch existing IDs: {e}")
 
-        headers = {'User-Agent': 'DMHOA-LeadScraper/1.0'}
-
-        # HOA-focused subs: get all recent posts
+        # HOA-focused subs: get all recent posts, filter by keywords
         for sub in HOA_SUBS:
             try:
-                resp = http_requests.get(PULLPUSH_URL, headers=headers,
-                    params={'subreddit': sub, 'size': 100, 'sort': 'desc', 'sort_type': 'created_utc'},
-                    timeout=20)
-                if resp.status_code != 200:
-                    errors.append(f"r/{sub}: HTTP {resp.status_code}")
-                    continue
-
-                posts = resp.json().get('data', [])
+                posts = _fetch_hoa_sub_posts(sub)
                 for post in posts:
                     pid = post.get('id', '')
-                    if pid in skip_ids:
+                    if not pid or pid in skip_ids:
+                        continue
+                    if not _is_recent(post.get('created_utc', 0)):
                         continue
                     combined = f"{post.get('title', '')} {post.get('selftext', '')}"
                     if not any(kw in combined.lower() for kw in HOA_SUB_KEYWORDS):
                         continue
 
+                    permalink = post.get('permalink', '')
+                    url = f"https://reddit.com{permalink}" if permalink.startswith('/') else f"https://reddit.com/r/{sub}/comments/{pid}"
                     lead = {
                         'post_id': pid,
                         'subreddit': sub,
                         'title': post.get('title', '')[:500],
-                        'url': f"https://reddit.com/r/{sub}/comments/{pid}",
+                        'url': url,
                         'score': _score_post(combined),
                         'status': 'new',
                         'created_utc': datetime.fromtimestamp(
@@ -125,27 +245,25 @@ def _run_scrape():
             except Exception as e:
                 errors.append(f"r/{sub}: {str(e)[:100]}")
 
-        # General subs: search for "hoa"
+        # General subs: search for HOA-related terms
         for sub in GENERAL_SUBS:
             try:
-                resp = http_requests.get(PULLPUSH_URL, headers=headers,
-                    params={'subreddit': sub, 'q': 'hoa', 'size': 50, 'sort': 'desc', 'sort_type': 'created_utc'},
-                    timeout=20)
-                if resp.status_code != 200:
-                    errors.append(f"r/{sub}: HTTP {resp.status_code}")
-                    continue
-
-                posts = resp.json().get('data', [])
+                posts = _fetch_reddit_search(sub, HOA_SEARCH_QUERY, 50)
                 for post in posts:
                     pid = post.get('id', '')
-                    if pid in skip_ids:
+                    if not pid or pid in skip_ids:
+                        continue
+                    if not _is_recent(post.get('created_utc', 0)):
                         continue
                     combined = f"{post.get('title', '')} {post.get('selftext', '')}"
+
+                    permalink = post.get('permalink', '')
+                    url = f"https://reddit.com{permalink}" if permalink.startswith('/') else f"https://reddit.com/r/{sub}/comments/{pid}"
                     lead = {
                         'post_id': pid,
                         'subreddit': sub,
                         'title': post.get('title', '')[:500],
-                        'url': f"https://reddit.com/r/{sub}/comments/{pid}",
+                        'url': url,
                         'score': _score_post(combined),
                         'status': 'new',
                         'created_utc': datetime.fromtimestamp(
@@ -267,3 +385,32 @@ def scraper_status():
         'running': _scraper_status['running'],
         'last_result': _scraper_status['last_result'],
     })
+
+
+@leads_bp.route('/api/dashboard/leads/purge-stale', methods=['POST', 'OPTIONS'])
+def purge_stale_leads():
+    """Delete all leads older than MAX_AGE_DAYS that are still in 'new' status.
+    Keeps replied/skipped leads for historical reference."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    cutoff = datetime.fromtimestamp(
+        time.time() - (MAX_AGE_DAYS * 86400), tz=timezone.utc
+    ).isoformat()
+
+    try:
+        resp = http_requests.delete(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_leads",
+            headers={**supabase_headers(), 'Prefer': 'return=representation'},
+            params={
+                'status': 'eq.new',
+                'created_utc': f'lt.{cutoff}',
+            },
+            timeout=TIMEOUT,
+        )
+        if resp.ok:
+            deleted = resp.json() or []
+            return jsonify({'ok': True, 'purged': len(deleted)})
+        return jsonify({'ok': False, 'error': resp.text[:300]}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
