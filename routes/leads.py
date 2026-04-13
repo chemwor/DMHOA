@@ -96,6 +96,8 @@ def _fetch_reddit_search(sub: str, query: str, limit: int = 50) -> list:
                     'permalink': p.get('permalink', ''),
                     'created_utc': p.get('created_utc', 0),
                     'subreddit': p.get('subreddit', sub),
+                    'ups': int(p.get('ups', 0) or 0),
+                    'num_comments': int(p.get('num_comments', 0) or 0),
                 })
             if posts:
                 logger.info(f'Reddit search: r/{sub} returned {len(posts)} posts')
@@ -211,6 +213,8 @@ def _parse_rss_posts(xml_text: str, sub: str) -> list:
                 'permalink': permalink,
                 'created_utc': created_utc,
                 'subreddit': sub,
+                'ups': 0,  # RSS doesn't include vote/comment counts
+                'num_comments': 0,
             })
 
     return posts
@@ -260,6 +264,8 @@ def _fetch_hoa_sub_posts(sub: str, limit: int = 100) -> list:
                     'permalink': p.get('permalink', ''),
                     'created_utc': p.get('created_utc', 0),
                     'subreddit': p.get('subreddit', sub),
+                    'ups': int(p.get('ups', 0) or 0),
+                    'num_comments': int(p.get('num_comments', 0) or 0),
                 })
             if posts:
                 logger.info(f'Reddit new.json: r/{sub} returned {len(posts)} posts')
@@ -329,6 +335,8 @@ def _run_scrape():
                         'title': post.get('title', '')[:500],
                         'url': url,
                         'score': _score_post(combined),
+                        'upvotes': post.get('ups', 0),
+                        'num_comments': post.get('num_comments', 0),
                         'status': 'new',
                         'created_utc': datetime.fromtimestamp(
                             post.get('created_utc', 0), tz=timezone.utc
@@ -362,6 +370,8 @@ def _run_scrape():
                         'title': post.get('title', '')[:500],
                         'url': url,
                         'score': _score_post(combined),
+                        'upvotes': post.get('ups', 0),
+                        'num_comments': post.get('num_comments', 0),
                         'status': 'new',
                         'created_utc': datetime.fromtimestamp(
                             post.get('created_utc', 0), tz=timezone.utc
