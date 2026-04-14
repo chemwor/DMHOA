@@ -39,6 +39,27 @@ STAGE_ORDER = {
 
 VALID_STAGES = set(STAGE_ORDER.keys())
 
+# Internal/test emails that should never enter the funnel.
+# These are the same domains that have admin dashboard access.
+EXCLUDED_EMAILS = set()
+EXCLUDED_DOMAINS = {'disputemyhoa.com', 'astrodigitallabs.com'}
+
+def _is_excluded_email(email: str) -> bool:
+    """Returns True if this email belongs to an internal user and should not
+    be tracked in the customer funnel."""
+    if not email:
+        return True
+    lower = email.lower().strip()
+    if lower in EXCLUDED_EMAILS:
+        return True
+    domain = lower.split('@')[-1] if '@' in lower else ''
+    if domain in EXCLUDED_DOMAINS:
+        return True
+    # Also exclude the founder's personal email
+    if lower == 'chemworeric@gmail.com':
+        return True
+    return False
+
 
 def _supabase_headers() -> dict:
     return {
@@ -136,6 +157,10 @@ def log_funnel_stage(email: str, stage: str, link: str = '') -> bool:
     Returns True if the funnel advanced, False otherwise.
     """
     if not email or '@' not in email:
+        return False
+
+    if _is_excluded_email(email):
+        logger.info(f'Funnel: skipping internal email {email}')
         return False
 
     stage = (stage or '').strip()
