@@ -2640,7 +2640,7 @@ def analyze_hoa_notes():
                 'summary': (a.get('description') or '')[:300]
             })
 
-        prompt = f"""You are a business analyst for DisputeMyHOA, a $49 self-service SaaS product that helps homeowners respond to HOA violations.
+        prompt = f"""You are a business analyst for DisputeMyHOA, a $29 self-service SaaS product that helps homeowners respond to HOA violations.
 
 Below are notes taken by the team on {len(noted_articles)} HOA industry news articles. Analyze these notes and provide:
 
@@ -3380,7 +3380,7 @@ def handle_legality_scorecard():
 
         news_titles = [a.get('title', '') for a in news_articles[:10]]
 
-        system_prompt = 'You are an HOA legal tech analyst for DisputeMyHOA, a $49 self-service SaaS helping homeowners respond to HOA violation notices. Analyze real business data to produce actionable insights. Respond with valid JSON only, no markdown code fences.'
+        system_prompt = 'You are an HOA legal tech analyst for DisputeMyHOA, a $29 self-service SaaS helping homeowners respond to HOA violation notices. Analyze real business data to produce actionable insights. Respond with valid JSON only, no markdown code fences.'
 
         conversion_rate = round(total_paid / len(cases) * 100, 1) if cases else 0
         violations_json = json.dumps([{"type": t, **d} for t, d in top_types])
@@ -4155,13 +4155,13 @@ Full 6-Month Plan:
                 # Build system prompt
                 campaign_label = campaign_name or (f'Campaign ID {campaign_id}' if campaign_id else '')
                 if campaign_label:
-                    system_prompt = f'''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
+                    system_prompt = f'''You are a Google Ads optimization expert for DisputeMyHOA, a $29 self-service SaaS tool that helps homeowners respond to HOA violation notices.
 You are generating a CAMPAIGN BRIEF for: "{campaign_label}".
 This brief should provide a full picture of how this specific campaign is performing, grounded in the 6-month marketing plan context.
 Evaluate the campaign's trajectory — is it improving, declining, or stable? Is it on track for the plan goals?
 Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
                 else:
-                    system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $49 self-service SaaS tool that helps homeowners respond to HOA violation notices.
+                    system_prompt = '''You are a Google Ads optimization expert for DisputeMyHOA, a $29 self-service SaaS tool that helps homeowners respond to HOA violation notices.
 The product helps DIY homeowners write responses to HOA fines and violations — NOT for people seeking attorneys.
 Respond with ONLY valid JSON, no markdown, no explanation. Every array in the response MUST have at least 2-3 items.'''
 
@@ -4217,13 +4217,13 @@ ANALYSIS RULES — follow every rule below precisely.
 ===================================================================
 
 BUSINESS CONTEXT — READ FIRST:
-DisputeMyHOA is a $49 self-serve SaaS tool that generates HOA violation response letters. It is NOT a law firm, NOT legal counsel, NOT a referral service.
+DisputeMyHOA is a $29 self-serve SaaS tool that generates HOA violation response letters. It is NOT a law firm, NOT legal counsel, NOT a referral service.
 
 Target customer: a homeowner who already has an HOA violation, fine, notice, or collections threat in hand and wants to respond themselves without hiring an attorney.
 
 The funnel has two steps:
   Step 1 — Free preview: user uploads notice, gets plain-English explanation, risk assessment, and response options
-  Step 2 — $49 payment: unlocks complete response letters, compliance checklist, statute citations, deadline reminders
+  Step 2 — $29 payment: unlocks complete response letters, compliance checklist, statute citations, deadline reminders
 
 Email capture via abandonment flows is the intermediate conversion event between ad click and payment. It is meaningful funnel progress and must be treated as a positive signal, not ignored.
 
@@ -4328,7 +4328,7 @@ ACCEPTABLE framing:
   - "Skip the attorney fees" (cost comparison, not legal claim)
   - "Respond to your HOA violation"
   - "Free preview first" / "See before you pay"
-  - "$49 flat fee" (price clarity)
+  - "$29 flat fee" (price clarity)
 
 CHARACTER LIMITS — these are hard limits, not guidelines:
   Headlines: 30 characters maximum (count spaces + punctuation)
@@ -4353,7 +4353,7 @@ overnight_pct = overnight_impressions / total_impressions
 If overnight_pct > 0.10:
   Add to generalRecommendations:
   {{
-    "recommendation": "Set ad schedule to 7AM-9PM only. [pct]% of impressions ([overnight_impressions] of [total]) occur overnight (10PM-6AM) when homeowners making $49 decisions are asleep. These accumulate low-engagement signals that reduce Quality Score without driving conversions. Peak hours are [top 3 hours by impression volume] — concentrate budget there.",
+    "recommendation": "Set ad schedule to 7AM-9PM only. [pct]% of impressions ([overnight_impressions] of [total]) occur overnight (10PM-6AM) when homeowners making $29 decisions are asleep. These accumulate low-engagement signals that reduce Quality Score without driving conversions. Peak hours are [top 3 hours by impression volume] — concentrate budget there.",
     "category": "targeting",
     "priority": "high",
     "expectedImpact": "Redirect [pct]% of overnight budget to peak hours, improve Quality Score",
@@ -6125,7 +6125,7 @@ def dashboard_chat():
         if s.get('_sources_failed'):
             unavailable_note = f"\nNote: The following data sources were unavailable: {', '.join(s['_sources_failed'])}. Do not reference data from these sources.\n"
 
-        system_prompt = f"""You are the DMHOA Business Advisor — a senior co-founder-level strategic advisor for Dispute My HOA, a $49 one-time-purchase educational platform that helps homeowners navigate HOA disputes.
+        system_prompt = f"""You are the DMHOA Business Advisor — a senior co-founder-level strategic advisor for Dispute My HOA, a $29 one-time-purchase educational platform that helps homeowners navigate HOA disputes.
 
 Your role: Be direct, data-driven, and action-oriented. Reference specific numbers. Recommend concrete next steps. Challenge weak assumptions. Think like a technical founder running a bootstrapped SaaS with a $600/month marketing budget.
 
@@ -6254,7 +6254,7 @@ def _generate_daily_summary() -> Dict:
     data_text = json.dumps(snapshot, indent=2, default=str)
 
     # Generate structured JSON summary
-    json_prompt = f"""You are a business operations assistant for DisputeMyHOA (DMHOA), a bootstrapped $49 one-time-purchase educational platform.
+    json_prompt = f"""You are a business operations assistant for DisputeMyHOA (DMHOA), a bootstrapped $29 one-time-purchase educational platform.
 
 CONTEXT:
 - The 6-month growth plan started February 25, 2026. We are currently in Month 1 (Foundation & Launch).
@@ -7255,7 +7255,7 @@ def generate_feature_suggestions():
         existing_titles = [f.get('title', '') for f in existing_features]
 
         # 8. Build and send Claude prompt
-        system_prompt = 'You are a product strategist for DisputeMyHOA, a $49 self-service SaaS that helps homeowners respond to HOA violation notices. You analyze real business data and suggest actionable feature improvements. Respond with valid JSON only, no markdown code fences.'
+        system_prompt = 'You are a product strategist for DisputeMyHOA, a $29 self-service SaaS that helps homeowners respond to HOA violation notices. You analyze real business data and suggest actionable feature improvements. Respond with valid JSON only, no markdown code fences.'
 
         prompt = f"""Analyze the following real-time business data for DisputeMyHOA and suggest 5-8 feature improvements.
 
@@ -7532,7 +7532,7 @@ def email_funnel_metrics():
                 'overall': overall,
             },
             'purchased_count': purchased_count,
-            'revenue_estimate': purchased_count * 49,
+            'revenue_estimate': purchased_count * 29,
         })
 
     except Exception as e:

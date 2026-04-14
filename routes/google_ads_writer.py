@@ -153,7 +153,7 @@ M1_AD_GROUPS = [
             ],
             'descriptions': [
                 'The Dispute Engine drafts your HOA appeal letter. Free notice review. Not a law firm.',
-                'Self-help document prep for HOA disputes. Free preview, full letter from $49.',
+                'Self-help document prep for HOA disputes. Free preview, full letter from $29.',
                 'Educational HOA info and Engine drafting. Not a law firm. Not legal advice.',
                 'Get help organizing and responding to your HOA notice. Free review available.',
             ],
@@ -183,9 +183,9 @@ M1_AD_GROUPS = [
             ],
             'descriptions': [
                 'Self-help tool to draft your own response to an HOA violation notice. Free review.',
-                'Engine-assisted document preparation for HOA disputes. Not a law firm. From $49.',
+                'Engine-assisted document preparation for HOA disputes. Not a law firm. From $29.',
                 'Get organized and informed before you reply to your HOA. Free notice analysis.',
-                'Educational tool that helps you understand and respond to HOA notices. From $49.',
+                'Educational tool that helps you understand and respond to HOA notices. From $29.',
             ],
         },
     },
@@ -215,7 +215,7 @@ M1_AD_GROUPS = [
                 'Step-by-step educational guide to HOA disputes. Free notice review.',
                 'Learn the HOA dispute process. The Dispute Engine is a self-help tool. Not a law firm.',
                 'Educational resource and document drafting tool for HOA disputes. Free preview.',
-                'Understand your HOA notice before responding. Free preview, full report from $49.',
+                'Understand your HOA notice before responding. Free preview, full report from $29.',
             ],
         },
     },
@@ -1331,7 +1331,7 @@ def reject_proposal(proposal_id):
 DMHOA_BRAND_BRIEF = """About DisputeMyHOA:
 - A self-help document preparation tool for homeowners fighting unfair HOA notices.
 - Branded around "the Dispute Engine" — our proprietary product name.
-- Customers pay $49 for a complete dispute letter package they review and send themselves.
+- Customers pay $29 for a complete dispute letter package they review and send themselves.
 - Free notice review available with no credit card required.
 - Brand voice: practical, calm, "you've got this", slightly defiant. Not corporate.
 - Audience: regular homeowners who got an HOA fine or violation letter and want help.

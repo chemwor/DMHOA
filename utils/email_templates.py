@@ -47,7 +47,7 @@ def nudge_2(preview_link: str = '') -> tuple:
         "\n"
         "You looked at the preview earlier but didn't grab the full response. Just a heads up, your case is still saved and ready when you are.\n"
         "\n"
-        "The full version is $49 and includes the actual response letter you can send back, the state statutes that apply, and a step by step on what to do next.\n"
+        "The full version is \$29 and includes the actual response letter you can send back, the state statutes that apply, and a step by step on what to do next.\n"
         + (f"\n{preview_link}\n" if preview_link else "")
         + "\n"
         "No pressure. If you decide to handle it on your own that's totally fine. Just wanted to make sure you knew it was still here.\n"
