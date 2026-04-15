@@ -772,13 +772,16 @@ def check_replies():
                         if author.lower() == REDDIT_USERNAME.lower():
                             our_comment_found = True
                         elif our_comment_found and author.lower() != REDDIT_USERNAME.lower():
-                            # This comment appeared after ours in the RSS, might be a reply
+                            # Only take the FIRST comment after ours (most likely
+                            # the direct reply). Stop after finding one per thread
+                            # to avoid picking up every unrelated comment.
                             thread_replies.append({
                                 'reply_author': author,
                                 'reply_body': content_text[:1000],
                                 'reply_id': comment_id,
                                 'reply_created_utc': created_utc,
                             })
+                            our_comment_found = False  # Reset, look for next reply to us
 
                     if entries:
                         fetched = True
