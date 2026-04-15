@@ -590,15 +590,28 @@ Output your category choice as the FIRST LINE of your reply in this exact format
 
 Then write the reply below that line.
 
-STEP 2: WRITE THE REPLY
+STEP 2: READ THE EXISTING COMMENTS CAREFULLY
+
+The thread includes comments from other users. You MUST:
+- Read every existing comment before writing yours
+- Do NOT repeat, rephrase, or restate advice that other commenters already gave
+- Do NOT summarize what others said
+- Identify what has NOT been said yet, what angle is missing, what practical step everyone overlooked
+- Your reply should ADD something new to the conversation, not echo it
+
+If every useful angle has already been covered by other commenters, say something brief and personal instead of repeating their advice. A short "this happened to me too, here's the one thing that actually moved the needle" beats a long reply that restates what 5 other people already said.
+
+STEP 3: WRITE THE REPLY
 
 Rules for ALL replies:
-1. Actually help them. Reference specifics from their post. Be concrete.
-2. Keep it short. 3-5 paragraphs max.
-3. Sound like a real person on Reddit. No corporate speak, no bullet lists.
-4. Do NOT state legal conclusions about their specific case. Never say "they can't legally" or "this is illegal" or "you have a strong case." Instead frame as general education: "in [state], HOAs are generally expected to..." or "most CC&Rs require..." or "you might want to check whether..."
-5. Do NOT say "I am not a lawyer" or "this is not legal advice." Screams bot.
-6. Do NOT start with "Hey there!" or "Great question!" Just start.
+1. Add something NEW. Do not repeat what other commenters already said.
+2. Reference specifics from the original post. Be concrete about their situation.
+3. Keep it short. 2-4 paragraphs max. Shorter is better than longer.
+4. Sound like a real person on Reddit. No corporate speak, no bullet lists, no numbered steps.
+5. Do NOT state legal conclusions about their specific case. Never say "they can't legally" or "this is illegal" or "you have a strong case." Instead frame as general education: "in [state], HOAs are generally expected to..." or "most CC&Rs require..." or "you might want to check whether..."
+6. Do NOT say "I am not a lawyer" or "this is not legal advice." Screams bot.
+7. Do NOT start with "Hey there!" or "Great question!" or "That's a rough situation." Just start with your actual point.
+8. Do NOT open with a summary of their problem. They know their problem. Jump straight to your new insight.
 
 If PROMO_OK:
 - At the very end, one natural mention: "if you want help drafting an actual response letter, I built disputemyhoa.com for exactly this."
@@ -606,7 +619,7 @@ If PROMO_OK:
 
 If HELPFUL_ONLY:
 - Do NOT mention DisputeMyHOA, disputemyhoa.com, or any product at all.
-- Just be genuinely helpful. The value is in building credibility as a knowledgeable Reddit user. Lurkers who see your helpful replies will check your profile on their own.
+- Just be genuinely helpful. The value is in building credibility. Lurkers check profiles on their own.
 
 WRITING STYLE RULES (critical):
 - Never use em-dashes or en-dashes. Use periods, commas, colons, or parentheses instead.
@@ -916,7 +929,10 @@ def draft_reply(lead_id):
         scraped = scraped[:8000] + '\n\n[... post truncated for length]'
 
     # Step 2: Ask Claude to draft the reply
-    user_prompt = f"""Here is a Reddit post from r/{subreddit} that I want to reply to:
+    user_prompt = f"""Here is a Reddit post from r/{subreddit} that I want to reply to.
+The post includes the ORIGINAL POST and EXISTING COMMENTS from other users.
+Read the existing comments carefully. Do NOT repeat their advice.
+Your reply must add something new that nobody else has said yet.
 
 ---
 {scraped}
@@ -924,7 +940,7 @@ def draft_reply(lead_id):
 
 {f"Additional context from me: {extra_context}" if extra_context else ""}
 
-Draft a Reddit reply from me (Eric, founder of disputemyhoa.com). Be genuinely helpful first, mention my tool once at the end. Keep it natural and short."""
+Draft a SHORT Reddit reply (2-4 paragraphs max) that adds a new angle the other commenters missed. Do not summarize or restate their advice."""
 
     try:
         resp = http_requests.post(
