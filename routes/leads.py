@@ -747,6 +747,7 @@ def check_replies():
                     # Find entries that are replies to our user by checking if
                     # they mention our username in the parent context
                     our_comment_found = False
+                    our_comment_text = ''
                     for entry in entries:
                         author_match = re.search(r'<name>/u/([^<]+)</name>', entry)
                         author = author_match.group(1) if author_match else ''
@@ -771,17 +772,35 @@ def check_replies():
 
                         if author.lower() == REDDIT_USERNAME.lower():
                             our_comment_found = True
+                            our_comment_text = content_text[:200]
                         elif our_comment_found and author.lower() != REDDIT_USERNAME.lower():
-                            # Only take the FIRST comment after ours (most likely
-                            # the direct reply). Stop after finding one per thread
-                            # to avoid picking up every unrelated comment.
-                            thread_replies.append({
-                                'reply_author': author,
-                                'reply_body': content_text[:1000],
-                                'reply_id': comment_id,
-                                'reply_created_utc': created_utc,
-                            })
-                            our_comment_found = False  # Reset, look for next reply to us
+                            # Check if this comment references our content or mentions
+                            # our username, which suggests it's a reply to us rather
+                            # than a random comment on the same thread
+                            is_likely_reply = False
+
+                            lower_content = content_text.lower()
+                            # Check if they quote us, mention our username, or reference DMHOA
+                            if REDDIT_USERNAME.lower() in lower_content:
+                                is_likely_reply = True
+                            elif 'disputemyhoa' in lower_content:
+                                is_likely_reply = True
+                            elif our_comment_text and any(phrase in lower_content for phrase in our_comment_text.lower().split('.')[:1] if len(phrase) > 20):
+                                is_likely_reply = True
+
+                            if is_likely_reply:
+                                # Strip HTML from the body
+                                clean_body = re.sub(r'<[^>]+>', '', content_text)
+                                clean_body = clean_body.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+                                clean_body = ' '.join(clean_body.split()).strip()
+
+                                thread_replies.append({
+                                    'reply_author': author,
+                                    'reply_body': clean_body[:1000],
+                                    'reply_id': comment_id,
+                                    'reply_created_utc': created_utc,
+                                })
+                            our_comment_found = False
 
                     if entries:
                         fetched = True
