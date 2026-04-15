@@ -729,14 +729,16 @@ def check_replies():
         # Try JSON first (gives full nested comment tree)
         try:
             r = http_requests.get(json_url, headers={'User-Agent': 'DMHOA-ReplyChecker/1.0'}, timeout=15)
+            logger.info(f"Reply check r/{lead.get('subreddit')} JSON status={r.status_code}")
             if r.status_code == 200:
                 thread_data = r.json()
                 thread_replies = _find_replies_to_user(thread_data, REDDIT_USERNAME)
                 fetched = True
-        except Exception:
-            pass
+                logger.info(f"  JSON found {len(thread_replies)} replies")
+        except Exception as e:
+            logger.info(f"  JSON fetch failed: {e}")
 
-        # Fallback: RSS (flat comment list, check if any mention our username)
+        # Fallback: RSS (flat comment list — look for comments after ours)
         if not fetched:
             try:
                 rss_url = json_url.replace('.json', '/.rss')
@@ -744,10 +746,11 @@ def check_replies():
                 if r.status_code == 200 and '<entry>' in r.text:
                     import re
                     entries = re.findall(r'<entry>([\s\S]*?)</entry>', r.text)
-                    # Find entries that are replies to our user by checking if
-                    # they mention our username in the parent context
+                    # RSS feeds list comments in order. Comments appearing after
+                    # ours that are NOT by us are likely replies (or at least
+                    # part of the same subthread).  Accept the first non-us
+                    # comment after each of our comments as a probable reply.
                     our_comment_found = False
-                    our_comment_text = ''
                     for entry in entries:
                         author_match = re.search(r'<name>/u/([^<]+)</name>', entry)
                         author = author_match.group(1) if author_match else ''
@@ -772,34 +775,20 @@ def check_replies():
 
                         if author.lower() == REDDIT_USERNAME.lower():
                             our_comment_found = True
-                            our_comment_text = content_text[:200]
                         elif our_comment_found and author.lower() != REDDIT_USERNAME.lower():
-                            # Check if this comment references our content or mentions
-                            # our username, which suggests it's a reply to us rather
-                            # than a random comment on the same thread
-                            is_likely_reply = False
+                            # Accept the next comment after ours as a reply.
+                            # RSS is ordered, so the comment right after ours
+                            # in the same thread is the most likely reply.
+                            clean_body = re.sub(r'<[^>]+>', '', content_text)
+                            clean_body = clean_body.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+                            clean_body = ' '.join(clean_body.split()).strip()
 
-                            lower_content = content_text.lower()
-                            # Check if they quote us, mention our username, or reference DMHOA
-                            if REDDIT_USERNAME.lower() in lower_content:
-                                is_likely_reply = True
-                            elif 'disputemyhoa' in lower_content:
-                                is_likely_reply = True
-                            elif our_comment_text and any(phrase in lower_content for phrase in our_comment_text.lower().split('.')[:1] if len(phrase) > 20):
-                                is_likely_reply = True
-
-                            if is_likely_reply:
-                                # Strip HTML from the body
-                                clean_body = re.sub(r'<[^>]+>', '', content_text)
-                                clean_body = clean_body.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
-                                clean_body = ' '.join(clean_body.split()).strip()
-
-                                thread_replies.append({
-                                    'reply_author': author,
-                                    'reply_body': clean_body[:1000],
-                                    'reply_id': comment_id,
-                                    'reply_created_utc': created_utc,
-                                })
+                            thread_replies.append({
+                                'reply_author': author,
+                                'reply_body': clean_body[:1000],
+                                'reply_id': comment_id,
+                                'reply_created_utc': created_utc,
+                            })
                             our_comment_found = False
 
                     if entries:
