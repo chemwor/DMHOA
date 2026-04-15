@@ -723,29 +723,81 @@ def check_replies():
             json_url = f'https://www.reddit.com{reddit_url}' if reddit_url.startswith('/') else reddit_url
         json_url = json_url.rstrip('/') + '.json'
 
+        thread_replies = []
+        fetched = False
+
+        # Try JSON first (gives full nested comment tree)
         try:
             r = http_requests.get(json_url, headers={'User-Agent': 'DMHOA-ReplyChecker/1.0'}, timeout=15)
             if r.status_code == 200:
                 thread_data = r.json()
-                replies = _find_replies_to_user(thread_data, REDDIT_USERNAME)
-                threads_checked += 1
+                thread_replies = _find_replies_to_user(thread_data, REDDIT_USERNAME)
+                fetched = True
+        except Exception:
+            pass
 
-                for reply in replies:
-                    all_replies.append({
-                        'lead_id': lead.get('id'),
-                        'lead_title': lead.get('title', ''),
-                        'subreddit': lead.get('subreddit', ''),
-                        'reddit_url': reddit_url,
-                        **reply,
-                    })
-            elif r.status_code == 403:
-                # Try RSS fallback — but RSS doesn't give us nested comments
-                # so we can't find replies. Just skip.
-                errors.append(f"r/{lead.get('subreddit')}: Reddit returned 403")
-            else:
-                errors.append(f"r/{lead.get('subreddit')}: HTTP {r.status_code}")
-        except Exception as e:
-            errors.append(f"{lead.get('post_id')}: {str(e)[:100]}")
+        # Fallback: RSS (flat comment list, check if any mention our username)
+        if not fetched:
+            try:
+                rss_url = json_url.replace('.json', '/.rss')
+                r = http_requests.get(rss_url, headers={'User-Agent': 'DMHOA-ReplyChecker/1.0'}, timeout=15)
+                if r.status_code == 200 and '<entry>' in r.text:
+                    import re
+                    entries = re.findall(r'<entry>([\s\S]*?)</entry>', r.text)
+                    # Find entries that are replies to our user by checking if
+                    # they mention our username in the parent context
+                    our_comment_found = False
+                    for entry in entries:
+                        author_match = re.search(r'<name>/u/([^<]+)</name>', entry)
+                        author = author_match.group(1) if author_match else ''
+                        content_match = re.search(r'<content[^>]*>([\s\S]*?)</content>', entry)
+                        content_raw = content_match.group(1) if content_match else ''
+                        content_text = re.sub(r'<[^>]+>', ' ', content_raw).strip()
+                        content_text = content_text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+                        content_text = ' '.join(content_text.split())
+
+                        pub_match = re.search(r'<published>([^<]+)</published>', entry)
+                        created_utc = 0
+                        if pub_match:
+                            try:
+                                from datetime import datetime as dt
+                                pub_dt = dt.fromisoformat(pub_match.group(1).replace('Z', '+00:00'))
+                                created_utc = pub_dt.timestamp()
+                            except Exception:
+                                pass
+
+                        id_match = re.search(r'<id>t1_([^<]+)</id>', entry)
+                        comment_id = id_match.group(1) if id_match else ''
+
+                        if author.lower() == REDDIT_USERNAME.lower():
+                            our_comment_found = True
+                        elif our_comment_found and author.lower() != REDDIT_USERNAME.lower():
+                            # This comment appeared after ours in the RSS, might be a reply
+                            thread_replies.append({
+                                'reply_author': author,
+                                'reply_body': content_text[:1000],
+                                'reply_id': comment_id,
+                                'reply_created_utc': created_utc,
+                            })
+
+                    if entries:
+                        fetched = True
+            except Exception:
+                pass
+
+        if not fetched:
+            errors.append(f"r/{lead.get('subreddit')}: could not fetch thread")
+        else:
+            threads_checked += 1
+
+        for reply in thread_replies:
+            all_replies.append({
+                'lead_id': lead.get('id'),
+                'lead_title': lead.get('title', ''),
+                'subreddit': lead.get('subreddit', ''),
+                'reddit_url': reddit_url,
+                **reply,
+            })
 
         # Be polite between requests
         time.sleep(0.5)
