@@ -4080,48 +4080,41 @@ def handle_ad_suggestions():
                     'dataQualityNote': '' if total_revenue > 0 else 'Revenue data not available for this period. Stripe charges may not directly correlate to Google Ads clicks within this date range.'
                 }
 
-                # Fetch Klaviyo email capture metrics for the analysis period
+                # Fetch real email funnel metrics (from email_funnel table, not Klaviyo)
                 klaviyo_context_str = ''
                 try:
-                    if KLAVIYO_API_KEY:
-                        full_count = get_klaviyo_list_count(KLAVIYO_FULL_PREVIEW_LIST_ID)
-                        quick_count = get_klaviyo_list_count(KLAVIYO_QUICK_PREVIEW_LIST_ID)
-                        total_email_captures = full_count + quick_count
+                    funnel_resp = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/email_funnel",
+                        headers=supabase_headers(),
+                        params={'select': '*', 'limit': '500'},
+                        timeout=TIMEOUT,
+                    )
+                    funnel_rows = funnel_resp.json() if funnel_resp.ok else []
 
-                        # Get active flows
-                        flows_response = requests.get(
-                            'https://a.klaviyo.com/api/flows/',
-                            headers=klaviyo_headers(),
-                            timeout=TIMEOUT
-                        )
-                        active_flows = []
-                        if flows_response.ok:
-                            for f in flows_response.json().get('data', []):
-                                attrs = f.get('attributes', {})
-                                if attrs.get('status') == 'live':
-                                    active_flows.append(attrs.get('name', 'Unknown'))
+                    total_funnel = len(funnel_rows)
+                    quick_count = sum(1 for r in funnel_rows if r.get('stage') == 'quick_preview_complete')
+                    full_count = sum(1 for r in funnel_rows if r.get('stage') == 'full_preview_viewed')
+                    purchased_count = sum(1 for r in funnel_rows if r.get('purchased'))
+                    nudges_sent = sum(1 for r in funnel_rows if r.get('nudge_1_sent')) + sum(1 for r in funnel_rows if r.get('nudge_2_sent')) + sum(1 for r in funnel_rows if r.get('nudge_3_sent'))
+                    capture_rate = (total_funnel / total_clicks * 100) if total_clicks > 0 else 0
 
-                        capture_rate = (total_email_captures / total_clicks * 100) if total_clicks > 0 else 0
-                        flow_breakdown = f"  Full Preview Abandonment: {full_count} captures\n  Quick Preview Abandonment: {quick_count} captures"
-
-                        klaviyo_context_str = f"""
-=== KLAVIYO METRICS ===
+                    klaviyo_context_str = f"""
+=== EMAIL FUNNEL METRICS (Resend) ===
 Analysis Period: {start_date} to {end_date}
-Total Email Captures: {total_email_captures}
-Active Abandonment Flows: {', '.join(active_flows) if active_flows else 'None detected'}
-Flow Breakdown:
-{flow_breakdown}
+Total Emails Captured: {total_funnel}
+Funnel Breakdown:
+  Quick Preview Stage: {quick_count}
+  Full Preview Stage: {full_count}
+  Purchased: {purchased_count}
+Nudge Emails Sent: {nudges_sent}
 Email Capture Rate: {capture_rate:.1f}% (captures / ad clicks)
-========================"""
-                    else:
-                        klaviyo_context_str = """
-=== KLAVIYO METRICS ===
-Data unavailable — Klaviyo API key not configured
+Revenue from Funnel: ${purchased_count * 29}
+IMPORTANT: These are ACTUAL numbers from the email_funnel database table. Do NOT inflate, estimate, or round up these numbers. Report them exactly as shown.
 ========================"""
                 except Exception as e:
-                    logger.warning(f'Failed to fetch Klaviyo metrics for ad suggestions: {e}')
+                    logger.warning(f'Failed to fetch email funnel metrics for ad suggestions: {e}')
                     klaviyo_context_str = """
-=== KLAVIYO METRICS ===
+=== EMAIL FUNNEL METRICS ===
 Data unavailable for this period
 ========================"""
 
