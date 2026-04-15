@@ -6247,7 +6247,7 @@ def get_chat_history():
 
 def _generate_daily_summary() -> Dict:
     """Generate today's daily summary using Claude Haiku."""
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
     snapshot = _build_live_data_snapshot()
     checklists = snapshot.get('checklists', {})
 
@@ -6361,7 +6361,7 @@ def get_daily_summary():
         return jsonify({'error': 'Supabase not configured'}), 500
 
     try:
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
 
         # Check if today's summary already exists
         existing = requests.get(
@@ -6422,7 +6422,7 @@ def send_daily_summary():
         return jsonify({'error': 'ADMIN_EMAIL not configured'}), 500
 
     try:
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
 
         # Get or generate today's summary
         summary_text = None
@@ -7546,7 +7546,7 @@ def get_daily_garden():
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
 
     try:
         resp = requests.get(
@@ -7574,7 +7574,7 @@ def toggle_daily_garden(task_key):
 
     body = request.get_json(silent=True) or {}
     completed = bool(body.get('completed', False))
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
     now_iso = datetime.now().isoformat()
 
     payload = {

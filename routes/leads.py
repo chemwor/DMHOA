@@ -448,7 +448,8 @@ def update_lead(lead_id):
 
     update = {'status': new_status}
     if new_status == 'replied':
-        update['replied_at'] = datetime.now(timezone.utc).isoformat()
+        from zoneinfo import ZoneInfo
+        update['replied_at'] = datetime.now(ZoneInfo('America/New_York')).isoformat()
     elif new_status == 'new':
         update['replied_at'] = None
 
@@ -500,7 +501,10 @@ def daily_lead_stats():
     if request.method == 'OPTIONS':
         return jsonify({'message': 'OK'})
 
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    # Use local time (TZ=America/New_York on Heroku) so "today" matches EST
+    from zoneinfo import ZoneInfo
+    eastern = ZoneInfo('America/New_York')
+    today_start = datetime.now(eastern).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
     try:
         resp = http_requests.get(
