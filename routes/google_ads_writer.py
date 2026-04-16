@@ -854,6 +854,218 @@ def fill_missing_ads():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+# --- Long-Tail pivot ---
+# At $29 price point and ~$5.46 avg CPC, current keywords need 19% conversion
+# rate to break even. Pivoting to long-tail with $1.50 max CPC drops the
+# break-even to ~5%, which is realistic.
+
+LONG_TAIL_AD_GROUP_NAME = 'Long-Tail Specifics'
+LONG_TAIL_MAX_CPC_USD = 1.50
+
+LONG_TAIL_KEYWORDS_PHRASE = [
+    'hoa fine appeal letter template',
+    'hoa appeal letter sample',
+    'how to write hoa appeal letter',
+    'hoa violation letter response template',
+    'responding to hoa violation notice',
+    'how to respond to hoa violation',
+    'hoa fence violation appeal',
+    'hoa parking violation dispute',
+    'hoa pet violation appeal',
+    'hoa noise complaint response letter',
+    'hoa rule violation letter',
+    'write hoa response letter',
+    'hoa fine appeal process',
+    'hoa architectural violation dispute',
+    'dispute hoa lawn violation',
+]
+
+LONG_TAIL_RSA = {
+    'headlines': [
+        'HOA Appeal Letter Template',
+        'Free HOA Notice Review',
+        'Draft Your HOA Response',
+        'The Dispute Engine',
+        'HOA Letter In Minutes',
+        'Self-Help HOA Tool',
+        'Response To HOA Violation',
+        'HOA Appeal Made Simple',
+    ],
+    'descriptions': [
+        'Self-help tool that drafts your HOA response letter. Free preview, full letter $29.',
+        'Get a personalized response to your HOA violation. Free notice review. Not a law firm.',
+        'Step-by-step HOA dispute help. Educational tool, not legal advice. From $29.',
+        'The Dispute Engine reviews your notice and drafts a response. Free preview.',
+    ],
+}
+
+# Keywords from the original M1 setup that should be paused (high CPC, broad)
+HIGH_CPC_KEYWORDS_TO_PAUSE = [
+    'hoa dispute resolution',
+    'appeal hoa violation',
+    'how to dispute hoa',
+    'how to appeal hoa',
+    'hoa appeal letter',
+    'appeal hoa fine',
+    'how to dispute hoa fine',
+    'fight hoa fine',
+    'fight hoa violation',
+    'unfair hoa fine',
+    'hoa fine unfair',
+    'refuse to pay hoa fine',
+    'is my hoa fine legal',
+    'can hoa fine me for',
+]
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/pivot-long-tail', methods=['POST', 'OPTIONS'])
+def pivot_long_tail():
+    """Pause expensive generic keywords and create a long-tail ad group with
+    PHRASE match keywords and $1.50 max CPC. Idempotent for the new ad group."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    token = _get_access_token()
+    if not token:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 500
+
+    summary = {
+        'paused_keywords': [],
+        'pause_errors': [],
+        'ad_group_created': None,
+        'keywords_added': 0,
+        'rsa_added': False,
+        'errors': [],
+    }
+
+    # 1. Find the M1 campaign resource
+    try:
+        camp_rows = _query(token, f"""
+            SELECT campaign.id, campaign.resource_name, campaign.status
+            FROM campaign
+            WHERE campaign.name = '{M1_CAMPAIGN_NAME}'
+        """)
+        if not camp_rows:
+            return jsonify({'ok': False, 'error': f'Campaign "{M1_CAMPAIGN_NAME}" not found'}), 404
+        campaign_resource = camp_rows[0].get('campaign', {}).get('resourceName')
+        if not campaign_resource:
+            return jsonify({'ok': False, 'error': 'Campaign resource missing'}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'Campaign lookup failed: {e}'}), 500
+
+    # 2. Find and pause all enabled keywords matching our high-CPC list
+    try:
+        kw_rows = _query(token, f"""
+            SELECT
+                ad_group_criterion.resource_name,
+                ad_group_criterion.keyword.text,
+                ad_group_criterion.status,
+                ad_group.name
+            FROM keyword_view
+            WHERE campaign.name = '{M1_CAMPAIGN_NAME}'
+              AND ad_group_criterion.status = 'ENABLED'
+        """)
+
+        pause_targets = {kw.lower() for kw in HIGH_CPC_KEYWORDS_TO_PAUSE}
+        ops = []
+        for row in kw_rows:
+            crit = row.get('adGroupCriterion', {})
+            kw_text = crit.get('keyword', {}).get('text', '').lower()
+            resource = crit.get('resourceName')
+            if kw_text in pause_targets and resource:
+                ops.append({
+                    'update': {
+                        'resourceName': resource,
+                        'status': 'PAUSED',
+                    },
+                    'updateMask': 'status',
+                })
+                summary['paused_keywords'].append(kw_text)
+
+        if ops:
+            try:
+                _mutate(token, 'adGroupCriteria', ops)
+            except Exception as e:
+                summary['pause_errors'].append(str(e)[:300])
+    except Exception as e:
+        summary['pause_errors'].append(f'pause query failed: {e}')
+
+    # 3. Check if Long-Tail ad group already exists (idempotent)
+    try:
+        existing_ag = _query(token, f"""
+            SELECT ad_group.id, ad_group.resource_name, ad_group.name
+            FROM ad_group
+            WHERE campaign.name = '{M1_CAMPAIGN_NAME}'
+              AND ad_group.name = '{LONG_TAIL_AD_GROUP_NAME}'
+        """)
+        if existing_ag:
+            ag_resource = existing_ag[0].get('adGroup', {}).get('resourceName')
+            summary['ad_group_created'] = False
+            summary['ad_group_resource'] = ag_resource
+            summary['note'] = 'Long-Tail ad group already exists. Skipping creation.'
+            return jsonify({'ok': True, 'summary': summary})
+    except Exception as e:
+        summary['errors'].append(f'ad group existence check failed: {e}')
+
+    # 4. Create the Long-Tail ad group
+    try:
+        ag_op = {
+            'create': {
+                'name': LONG_TAIL_AD_GROUP_NAME,
+                'campaign': campaign_resource,
+                'status': 'ENABLED',
+                'type': 'SEARCH_STANDARD',
+                'cpcBidMicros': str(_to_micros(LONG_TAIL_MAX_CPC_USD)),
+            }
+        }
+        ag_resp = _mutate(token, 'adGroups', [ag_op])
+        ag_resource = ag_resp['results'][0]['resourceName']
+        summary['ad_group_created'] = True
+        summary['ad_group_resource'] = ag_resource
+    except Exception as e:
+        summary['errors'].append(f'ad group create failed: {str(e)[:300]}')
+        return jsonify({'ok': False, 'summary': summary}), 500
+
+    # 5. Add long-tail keywords as PHRASE match
+    try:
+        kw_ops = [
+            {
+                'create': {
+                    'adGroup': ag_resource,
+                    'status': 'ENABLED',
+                    'keyword': {'text': kw, 'matchType': 'PHRASE'},
+                }
+            }
+            for kw in LONG_TAIL_KEYWORDS_PHRASE
+        ]
+        _mutate(token, 'adGroupCriteria', kw_ops)
+        summary['keywords_added'] = len(kw_ops)
+    except Exception as e:
+        summary['errors'].append(f'keyword create failed: {str(e)[:300]}')
+
+    # 6. Add an RSA pointing to the appeal landing page
+    try:
+        rsa_op = {
+            'create': {
+                'adGroup': ag_resource,
+                'status': 'ENABLED',
+                'ad': {
+                    'finalUrls': [f'{SITE_URL}/appeal-hoa-fine'],
+                    'responsiveSearchAd': {
+                        'headlines': [{'text': h[:30]} for h in LONG_TAIL_RSA['headlines']],
+                        'descriptions': [{'text': d[:90]} for d in LONG_TAIL_RSA['descriptions']],
+                    },
+                },
+            }
+        }
+        _mutate(token, 'adGroupAds', [rsa_op])
+        summary['rsa_added'] = True
+    except Exception as e:
+        summary['errors'].append(f'rsa create failed: {str(e)[:300]}')
+
+    return jsonify({'ok': len(summary['errors']) == 0, 'summary': summary})
+
+
 @google_ads_writer_bp.route('/api/dashboard/google-ads/launch-m1', methods=['POST', 'OPTIONS'])
 def launch_m1():
     if request.method == 'OPTIONS':
