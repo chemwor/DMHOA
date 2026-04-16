@@ -1066,6 +1066,87 @@ def pivot_long_tail():
     return jsonify({'ok': len(summary['errors']) == 0, 'summary': summary})
 
 
+# Mid-tail keywords to re-enable with a CPC cap. These had decent CTR in the
+# initial 7 days but their auction CPC was too high. By capping the bid below
+# the auction price, we lose some impression share but cut cost dramatically.
+MID_TAIL_REENABLE = [
+    {'keyword': 'appeal hoa violation', 'max_cpc_usd': 2.50},
+    {'keyword': 'how to appeal hoa', 'max_cpc_usd': 2.50},
+    {'keyword': 'hoa appeal letter', 'max_cpc_usd': 2.50},
+    {'keyword': 'how to dispute hoa', 'max_cpc_usd': 2.00},
+    {'keyword': 'hoa dispute resolution', 'max_cpc_usd': 2.00},
+]
+
+
+@google_ads_writer_bp.route('/api/dashboard/google-ads/reenable-capped', methods=['POST', 'OPTIONS'])
+def reenable_capped():
+    """Re-enable specific keywords in the M1 campaign with a per-keyword
+    CPC bid cap. Used after pivot-long-tail to restore mid-tail volume
+    without paying the full auction price."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    token = _get_access_token()
+    if not token:
+        return jsonify({'error': 'Google Ads credentials not configured'}), 500
+
+    summary = {
+        'reenabled': [],
+        'not_found': [],
+        'errors': [],
+    }
+
+    # Find existing keywords (any status) in the M1 campaign that match our list
+    try:
+        kw_rows = _query(token, f"""
+            SELECT
+                ad_group_criterion.resource_name,
+                ad_group_criterion.keyword.text,
+                ad_group_criterion.status,
+                ad_group.name
+            FROM keyword_view
+            WHERE campaign.name = '{M1_CAMPAIGN_NAME}'
+        """)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'keyword query failed: {e}'}), 500
+
+    # Build lookup: keyword text -> resource name
+    kw_lookup = {}
+    for row in kw_rows:
+        crit = row.get('adGroupCriterion', {})
+        text = (crit.get('keyword', {}) or {}).get('text', '').lower()
+        resource = crit.get('resourceName')
+        if text and resource:
+            kw_lookup[text] = resource
+
+    ops = []
+    for entry in MID_TAIL_REENABLE:
+        kw_text = entry['keyword'].lower()
+        cap_usd = entry['max_cpc_usd']
+        resource = kw_lookup.get(kw_text)
+        if not resource:
+            summary['not_found'].append(kw_text)
+            continue
+
+        ops.append({
+            'update': {
+                'resourceName': resource,
+                'status': 'ENABLED',
+                'cpcBidMicros': str(_to_micros(cap_usd)),
+            },
+            'updateMask': 'status,cpcBidMicros',
+        })
+        summary['reenabled'].append({'keyword': kw_text, 'max_cpc': cap_usd})
+
+    if ops:
+        try:
+            _mutate(token, 'adGroupCriteria', ops)
+        except Exception as e:
+            summary['errors'].append(str(e)[:300])
+
+    return jsonify({'ok': len(summary['errors']) == 0, 'summary': summary})
+
+
 @google_ads_writer_bp.route('/api/dashboard/google-ads/launch-m1', methods=['POST', 'OPTIONS'])
 def launch_m1():
     if request.method == 'OPTIONS':
