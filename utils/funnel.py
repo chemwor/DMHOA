@@ -108,6 +108,7 @@ def _upsert_funnel_row(email: str, stage: str) -> None:
                 **_supabase_headers(),
                 'Prefer': 'resolution=merge-duplicates,return=representation',
             },
+            params={'on_conflict': 'email'},
             json=payload,
             timeout=TIMEOUT,
         )

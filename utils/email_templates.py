@@ -41,35 +41,46 @@ def nudge_1(preview_link: str = '') -> tuple:
 
 
 def nudge_2(preview_link: str = '') -> tuple:
-    subject = 'Your HOA Case Details Are Still Here'
+    subject = 'Your HOA Response Letter Is Ready'
     body = (
         "Hey,\n"
         "\n"
-        "You looked at the preview earlier but didn't grab the full response. Just a heads up, your case is still saved and ready when you are.\n"
+        "You saw the preview of your case earlier. The full response letter is drafted and waiting for you.\n"
         "\n"
-        "The full version is \$29 and includes the actual response letter you can send back, the state statutes that apply, and a step by step on what to do next.\n"
+        "Quick reminder of what you get for \$29:\n"
+        "\n"
+        "  Your actual response letter, ready to edit and send\n"
+        "  The state statutes that apply to your situation\n"
+        "  A step by step checklist so nothing gets missed\n"
+        "  Deadline tracking so you don't run out of time\n"
+        "\n"
+        "Most HOA notices have a 14 to 30 day response window. Once that passes, your options shrink.\n"
         + (f"\n{preview_link}\n" if preview_link else "")
         + "\n"
-        "No pressure. If you decide to handle it on your own that's totally fine. Just wanted to make sure you knew it was still here.\n"
+        "If \$29 doesn't feel worth it after you see the full letter, there's a 14 day money back guarantee. No questions asked.\n"
         "\n"
-        "Eric"
+        "Eric\n"
+        "Dispute My HOA"
     )
     return subject, body
 
 
 def nudge_3(preview_link: str = '') -> tuple:
-    subject = 'Last Reminder: Your HOA Response'
+    subject = 'Your HOA Deadline Is Getting Closer'
     body = (
         "Hey,\n"
         "\n"
-        "Last note from me on this one.\n"
+        "Last note from me.\n"
         "\n"
-        "Your HOA case is still saved if you want to come back to it. After this I'll stop emailing you about it.\n"
+        "Your drafted response letter is still saved. If you want it, it's \$29 and ready to go. If not, no hard feelings.\n"
         + (f"\n{preview_link}\n" if preview_link else "")
         + "\n"
-        "Good luck either way.\n"
+        "The only thing I'd say is don't let the deadline pass without responding at all. Even a short written response is better than silence. HOAs count on people ignoring notices.\n"
         "\n"
-        "Eric"
+        "Good luck with it.\n"
+        "\n"
+        "Eric\n"
+        "Dispute My HOA"
     )
     return subject, body
 
