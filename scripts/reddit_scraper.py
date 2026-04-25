@@ -1,7 +1,7 @@
 """
 Reddit Lead Scraper for DMHOA
 Monitors HOA-related subreddits for potential leads.
-Uses Pullpush API (public Reddit search) — no API key needed, works from cloud IPs.
+Uses Reddit's public JSON endpoints — no API key needed.
 
 Usage:
     python scripts/reddit_scraper.py
@@ -12,7 +12,7 @@ Requires env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 import os
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-PULLPUSH_URL = 'https://api.pullpush.io/reddit/search/submission/'
+REDDIT_JSON_BASE = 'https://www.reddit.com'
+
+MAX_POST_AGE_DAYS = 3
 
 # HOA-focused subs: fetch all recent posts (they're all relevant)
 HOA_SUBS = ['HOA', 'homeowners']
@@ -98,28 +100,26 @@ def upsert_lead(lead):
         logger.error(f"  Failed to upsert {lead['post_id']}: {resp.status_code} {resp.text}")
 
 
-def fetch_pullpush(subreddit, query=None, size=100):
-    """Fetch posts from Pullpush API."""
-    params = {
-        'subreddit': subreddit,
-        'size': size,
-        'sort': 'desc',
-        'sort_type': 'created_utc',
-    }
+def fetch_reddit(subreddit, query=None, size=100):
+    """Fetch newest posts from Reddit's public JSON. Caller filters by age."""
     if query:
-        params['q'] = query
+        url = f"{REDDIT_JSON_BASE}/r/{subreddit}/search.json"
+        params = {'q': query, 'restrict_sr': 'on', 'sort': 'new', 't': 'week', 'limit': size}
+    else:
+        url = f"{REDDIT_JSON_BASE}/r/{subreddit}/new.json"
+        params = {'limit': size}
 
     try:
-        resp = requests.get(PULLPUSH_URL, headers=HEADERS, params=params, timeout=20)
+        resp = requests.get(url, headers=HEADERS, params=params, timeout=20)
         if resp.status_code != 200:
-            logger.error(f"Pullpush returned {resp.status_code} for r/{subreddit}")
+            logger.error(f"Reddit returned {resp.status_code} for r/{subreddit}")
             return []
 
-        data = resp.json()
-        return data.get('data', [])
+        children = resp.json().get('data', {}).get('children', [])
+        return [c.get('data', {}) for c in children]
 
     except Exception as e:
-        logger.error(f"Error fetching r/{subreddit} from Pullpush: {e}")
+        logger.error(f"Error fetching r/{subreddit} from Reddit: {e}")
         return []
 
 
@@ -129,17 +129,20 @@ def scrape():
         return 0
 
     skip_ids = get_existing_post_ids()
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=MAX_POST_AGE_DAYS)).timestamp()
     count = 0
 
     # HOA-focused subs: get all recent posts, filter by keywords
     for sub_name in HOA_SUBS:
         logger.info(f"Scanning r/{sub_name} (all recent posts)...")
-        posts = fetch_pullpush(sub_name, size=100)
+        posts = fetch_reddit(sub_name, size=100)
         logger.info(f"  Fetched {len(posts)} posts")
 
         for post in posts:
             post_id = post.get('id', '')
             if post_id in skip_ids:
+                continue
+            if post.get('created_utc', 0) < cutoff_ts:
                 continue
 
             combined = f"{post.get('title', '')} {post.get('selftext', '')}"
@@ -165,12 +168,14 @@ def scrape():
     # General subs: search for "hoa" keyword
     for sub_name in GENERAL_SUBS:
         logger.info(f"Scanning r/{sub_name} (searching 'hoa')...")
-        posts = fetch_pullpush(sub_name, query='hoa', size=50)
+        posts = fetch_reddit(sub_name, query='hoa', size=50)
         logger.info(f"  Fetched {len(posts)} posts")
 
         for post in posts:
             post_id = post.get('id', '')
             if post_id in skip_ids:
+                continue
+            if post.get('created_utc', 0) < cutoff_ts:
                 continue
 
             combined = f"{post.get('title', '')} {post.get('selftext', '')}"
