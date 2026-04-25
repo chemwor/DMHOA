@@ -20,7 +20,7 @@ RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 RESEND_API_URL = 'https://api.resend.com/emails'
 
 FROM_ADDRESS = 'Eric from Dispute My HOA <eric@mail.disputemyhoa.com>'
-REPLY_TO_ADDRESS = 'eric@disputemyhoa.com'
+REPLY_TO_ADDRESS = 'support@disputemyhoa.com'
 
 TIMEOUT = (5, 15)  # connect, read
 
