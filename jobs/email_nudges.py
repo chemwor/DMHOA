@@ -89,7 +89,7 @@ def _run_nudge_1():
     """Stalled at quick_preview, 3+ hours ago."""
     cutoff = _iso_n_hours_ago(3)
     rows = _query_funnel({
-        'select': 'email,stage_completed_at',
+        'select': 'email,stage_completed_at,case_link',
         'stage': 'eq.quick_preview_complete',
         'nudge_1_sent': 'eq.false',
         'stage_completed_at': f'lt.{cutoff}',
@@ -100,7 +100,8 @@ def _run_nudge_1():
         if not email:
             continue
         try:
-            subject, body = email_templates.nudge_1()
+            link = row.get('case_link') or ''
+            subject, body = email_templates.nudge_1(link)
             ok = send_email(email, subject, body)
             if ok:
                 _mark_nudge_sent(email, 'nudge_1_sent')
@@ -116,7 +117,7 @@ def _run_nudge_2():
     """Viewed full preview, 6+ hours ago, not purchased."""
     cutoff = _iso_n_hours_ago(6)
     rows = _query_funnel({
-        'select': 'email,stage_completed_at',
+        'select': 'email,stage_completed_at,case_link',
         'stage': 'eq.full_preview_viewed',
         'nudge_2_sent': 'eq.false',
         'purchased': 'eq.false',
@@ -128,7 +129,8 @@ def _run_nudge_2():
         if not email:
             continue
         try:
-            subject, body = email_templates.nudge_2()
+            link = row.get('case_link') or ''
+            subject, body = email_templates.nudge_2(link)
             ok = send_email(email, subject, body)
             if ok:
                 _mark_nudge_sent(email, 'nudge_2_sent')
@@ -144,7 +146,7 @@ def _run_nudge_3():
     """Already got nudge_2, 24+ hours later, still not purchased."""
     cutoff = _iso_n_hours_ago(24)
     rows = _query_funnel({
-        'select': 'email,stage_completed_at',
+        'select': 'email,stage_completed_at,case_link',
         'nudge_2_sent': 'eq.true',
         'nudge_3_sent': 'eq.false',
         'purchased': 'eq.false',
@@ -156,7 +158,8 @@ def _run_nudge_3():
         if not email:
             continue
         try:
-            subject, body = email_templates.nudge_3()
+            link = row.get('case_link') or ''
+            subject, body = email_templates.nudge_3(link)
             ok = send_email(email, subject, body)
             if ok:
                 _mark_nudge_sent(email, 'nudge_3_sent')

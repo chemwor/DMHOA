@@ -100,6 +100,9 @@ def _upsert_funnel_row(email: str, stage: str) -> None:
         'stage_completed_at': now_iso,
         'purchased': stage == 'purchased',
     }
+    # Store the case preview link if provided (used in nudge emails)
+    if link:
+        payload['case_link'] = link
 
     try:
         resp = requests.post(

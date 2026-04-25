@@ -20,6 +20,7 @@ RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 RESEND_API_URL = 'https://api.resend.com/emails'
 
 FROM_ADDRESS = 'Eric from Dispute My HOA <eric@mail.disputemyhoa.com>'
+REPLY_TO_ADDRESS = 'eric@disputemyhoa.com'
 
 TIMEOUT = (5, 15)  # connect, read
 
@@ -40,6 +41,7 @@ def send_email(to: str, subject: str, body_text: str) -> bool:
     payload = {
         'from': FROM_ADDRESS,
         'to': [to],
+        'reply_to': REPLY_TO_ADDRESS,
         'subject': subject,
         'text': body_text,
     }
