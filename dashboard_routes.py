@@ -2230,8 +2230,9 @@ HOA_QUERIES = [
     'homeowners association disputes fines',
     'community association management',
     'HOA reform homeowner rights',
-    'HOA homeowners association site:youtube.com',
 ]
+
+NEWS_MAX_AGE_DAYS = 30
 
 
 def categorize_article(title: str, description: str) -> str:
@@ -2318,6 +2319,95 @@ def _fetch_google_news_rss(query):
         return []
 
 
+def scan_hoa_news():
+    """Fetch, dedupe, and save HOA news articles. Returns dict with counts.
+    Callable from the route handler or a scheduler job."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import timedelta, timezone as _tz
+    from email.utils import parsedate_to_datetime
+
+    all_articles = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_fetch_google_news_rss, q): q for q in HOA_QUERIES}
+        for future in as_completed(futures, timeout=20):
+            try:
+                all_articles.extend(future.result())
+            except Exception:
+                pass
+
+    seen = set()
+    unique = []
+    for a in all_articles:
+        norm = a['title'].lower()[:50]
+        if norm not in seen:
+            seen.add(norm)
+            unique.append(a)
+
+    existing_resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+        params={'select': 'link', 'limit': '500'},
+        headers=supabase_headers(),
+        timeout=TIMEOUT
+    )
+    existing_links = set()
+    if existing_resp.ok:
+        existing_links = {a.get('link') for a in existing_resp.json()}
+
+    new_articles = [a for a in unique if a['link'] not in existing_links]
+    saved = 0
+    skipped_old = 0
+    now = datetime.now().isoformat()
+    cutoff = datetime.now(_tz.utc) - timedelta(days=NEWS_MAX_AGE_DAYS)
+
+    for a in new_articles:
+        category = categorize_article(a['title'], a.get('description', ''))
+        priority = get_priority(a['title'], a.get('description', ''))
+
+        pub_date_iso = None
+        pub_dt = None
+        if a.get('pub_date'):
+            try:
+                pub_dt = parsedate_to_datetime(a['pub_date'])
+                pub_date_iso = pub_dt.isoformat()
+            except Exception:
+                pub_dt = None
+
+        if pub_dt and pub_dt < cutoff:
+            skipped_old += 1
+            continue
+
+        insert_data = {
+            'link': a['link'],
+            'title': a['title'],
+            'description': a.get('description', ''),
+            'source': a.get('source', ''),
+            'pub_date': pub_date_iso,
+            'query': a.get('query'),
+            'fetched_from': a.get('fetched_from', 'google_news'),
+            'category': category,
+            'priority': priority,
+            'status': 'new',
+            'first_seen_at': now,
+            'last_seen_at': now,
+        }
+
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
+            headers=supabase_headers(),
+            json=insert_data,
+            timeout=TIMEOUT
+        )
+        if resp.ok or resp.status_code == 201:
+            saved += 1
+
+    return {
+        'scanned': len(unique),
+        'saved': saved,
+        'skipped_old': skipped_old,
+        'last_updated': now,
+    }
+
+
 @dashboard_bp.route('/api/dashboard/hoa-news', methods=['GET', 'POST', 'PATCH', 'OPTIONS'])
 def handle_hoa_news():
     """Get, scan, or update HOA news articles."""
@@ -2330,84 +2420,13 @@ def handle_hoa_news():
     # Handle POST for scanning new articles from RSS
     if request.method == 'POST':
         try:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            all_articles = []
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = {executor.submit(_fetch_google_news_rss, q): q for q in HOA_QUERIES}
-                for future in as_completed(futures, timeout=20):
-                    try:
-                        all_articles.extend(future.result())
-                    except Exception:
-                        pass
-
-            # Deduplicate by normalized title
-            seen = set()
-            unique = []
-            for a in all_articles:
-                norm = a['title'].lower()[:50]
-                if norm not in seen:
-                    seen.add(norm)
-                    unique.append(a)
-
-            # Get existing links to avoid duplicates
-            existing_resp = requests.get(
-                f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
-                params={'select': 'link', 'limit': '500'},
-                headers=supabase_headers(),
-                timeout=TIMEOUT
-            )
-            existing_links = set()
-            if existing_resp.ok:
-                existing_links = {a.get('link') for a in existing_resp.json()}
-
-            new_articles = [a for a in unique if a['link'] not in existing_links]
-            saved = 0
-            now = datetime.now().isoformat()
-
-            for a in new_articles:
-                text = (a['title'] + ' ' + a.get('description', '')).lower()
-                category = categorize_article(a['title'], a.get('description', ''))
-                priority = get_priority(a['title'], a.get('description', ''))
-
-                pub_date_iso = None
-                if a.get('pub_date'):
-                    try:
-                        from email.utils import parsedate_to_datetime
-                        pub_date_iso = parsedate_to_datetime(a['pub_date']).isoformat()
-                    except Exception:
-                        pub_date_iso = None
-
-                insert_data = {
-                    'link': a['link'],
-                    'title': a['title'],
-                    'description': a.get('description', ''),
-                    'source': a.get('source', ''),
-                    'pub_date': pub_date_iso,
-                    'query': a.get('query'),
-                    'fetched_from': a.get('fetched_from', 'google_news'),
-                    'category': category,
-                    'priority': priority,
-                    'status': 'new',
-                    'first_seen_at': now,
-                    'last_seen_at': now,
-                }
-
-                resp = requests.post(
-                    f"{SUPABASE_URL}/rest/v1/hoa_news_articles",
-                    headers=supabase_headers(),
-                    json=insert_data,
-                    timeout=TIMEOUT
-                )
-                if resp.ok or resp.status_code == 201:
-                    saved += 1
-
+            r = scan_hoa_news()
             return jsonify({
                 'articles': [],
-                'count': saved,
-                'lastUpdated': now,
-                'message': f'Scanned {len(unique)} articles, saved {saved} new'
+                'count': r['saved'],
+                'lastUpdated': r['last_updated'],
+                'message': f"Scanned {r['scanned']} articles, saved {r['saved']} new (skipped {r['skipped_old']} older than {NEWS_MAX_AGE_DAYS}d)"
             })
-
         except Exception as e:
             logger.error(f'HOA News scan error: {str(e)}')
             return jsonify({'error': 'Failed to scan news', 'message': str(e)}), 500

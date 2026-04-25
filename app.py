@@ -6274,6 +6274,19 @@ def _scheduled_email_nudges():
         logger.error(f"Scheduled email nudges failed: {e}")
 
 
+def _scheduled_news_scan():
+    """HOA news scanner — pulls Google News RSS for HOA queries every 6 hours."""
+    try:
+        from dashboard_routes import scan_hoa_news
+        result = scan_hoa_news()
+        logger.info(
+            f"Scheduled news scan: scanned={result['scanned']} "
+            f"saved={result['saved']} skipped_old={result['skipped_old']}"
+        )
+    except Exception as e:
+        logger.error(f"Scheduled news scan failed: {e}")
+
+
 def _start_scheduler():
     """Initialize APScheduler with hourly alert scan, daily ad analyzer,
     and 30-minute email funnel nudges."""
@@ -6301,8 +6314,15 @@ def _start_scheduler():
             id='email_funnel_nudges',
             replace_existing=True,
         )
+        scheduler.add_job(
+            _scheduled_news_scan,
+            'interval',
+            hours=6,
+            id='hoa_news_scan',
+            replace_existing=True,
+        )
         scheduler.start()
-        logger.info("APScheduler started — alert scan hourly, ad analyzer daily, email nudges every 30 min")
+        logger.info("APScheduler started — alert scan hourly, ad analyzer daily, email nudges every 30 min, news scan every 6 hours")
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
 
