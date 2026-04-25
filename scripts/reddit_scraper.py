@@ -25,11 +25,26 @@ REDDIT_JSON_BASE = 'https://www.reddit.com'
 
 MAX_POST_AGE_DAYS = 3
 
-# HOA-focused subs: fetch all recent posts (they're all relevant)
-HOA_SUBS = ['HOA', 'homeowners']
+# HOA-focused subs: every post is HOA-related by definition
+HOA_SUBS = ['HOA']
 
-# General subs: search for HOA-related posts via keyword
+# Adjacent subs: HOA-relevant posts mixed with unrelated home-owner content
+ADJACENT_SUBS = ['homeowners']
+
+# General subs: search for "hoa" keyword
 GENERAL_SUBS = ['FirstTimeHomeBuyer', 'personalfinance', 'legaladvice']
+
+# Score thresholds — anything below skips save
+MIN_SCORE_HOA_SUBS = 1
+MIN_SCORE_ADJACENT_SUBS = 2
+MIN_SCORE_GENERAL_SUBS = 2
+
+# Terms used to confirm a post is actually about an HOA (used outside r/HOA)
+HOA_PRESENCE_TERMS = [
+    'hoa', 'h.o.a', 'homeowners association', 'homeowner association',
+    'community association', 'condo association', 'property owners association',
+    'cc&r', 'ccr', 'covenant',
+]
 
 HOA_SUB_KEYWORDS = [
     'fine', 'fined', 'violation', 'dispute', 'letter', 'threatening',
@@ -61,6 +76,11 @@ def supabase_headers():
 def matches_keywords(text):
     text_lower = text.lower()
     return any(kw in text_lower for kw in HOA_SUB_KEYWORDS)
+
+
+def mentions_hoa(text):
+    text_lower = text.lower()
+    return any(term in text_lower for term in HOA_PRESENCE_TERMS)
 
 
 def score_post(text):
@@ -132,65 +152,76 @@ def scrape():
     cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=MAX_POST_AGE_DAYS)).timestamp()
     count = 0
 
-    # HOA-focused subs: get all recent posts, filter by keywords
+    def _build_lead(post, sub_name, score):
+        return {
+            'post_id': post.get('id', ''),
+            'subreddit': sub_name,
+            'title': post.get('title', '')[:500],
+            'url': f"https://reddit.com/r/{sub_name}/comments/{post.get('id', '')}",
+            'score': score,
+            'status': 'new',
+            'created_utc': datetime.fromtimestamp(
+                post.get('created_utc', 0), tz=timezone.utc
+            ).isoformat(),
+        }
+
+    # HOA-focused subs (r/HOA): every post is HOA. Keyword match + min score.
     for sub_name in HOA_SUBS:
-        logger.info(f"Scanning r/{sub_name} (all recent posts)...")
+        logger.info(f"Scanning r/{sub_name} (HOA-focused)...")
         posts = fetch_reddit(sub_name, size=100)
         logger.info(f"  Fetched {len(posts)} posts")
-
         for post in posts:
-            post_id = post.get('id', '')
-            if post_id in skip_ids:
+            if post.get('id', '') in skip_ids:
                 continue
             if post.get('created_utc', 0) < cutoff_ts:
                 continue
-
             combined = f"{post.get('title', '')} {post.get('selftext', '')}"
             if not matches_keywords(combined):
                 continue
-
-            lead = {
-                'post_id': post_id,
-                'subreddit': sub_name,
-                'title': post.get('title', '')[:500],
-                'url': f"https://reddit.com/r/{sub_name}/comments/{post_id}",
-                'score': score_post(combined),
-                'status': 'new',
-                'created_utc': datetime.fromtimestamp(
-                    post.get('created_utc', 0), tz=timezone.utc
-                ).isoformat(),
-            }
-            upsert_lead(lead)
+            score = score_post(combined)
+            if score < MIN_SCORE_HOA_SUBS:
+                continue
+            upsert_lead(_build_lead(post, sub_name, score))
             count += 1
-
         time.sleep(1)
 
-    # General subs: search for "hoa" keyword
+    # Adjacent subs (r/homeowners): require explicit HOA mention + higher score.
+    for sub_name in ADJACENT_SUBS:
+        logger.info(f"Scanning r/{sub_name} (adjacent — HOA mention required)...")
+        posts = fetch_reddit(sub_name, size=100)
+        logger.info(f"  Fetched {len(posts)} posts")
+        for post in posts:
+            if post.get('id', '') in skip_ids:
+                continue
+            if post.get('created_utc', 0) < cutoff_ts:
+                continue
+            combined = f"{post.get('title', '')} {post.get('selftext', '')}"
+            if not mentions_hoa(combined):
+                continue
+            if not matches_keywords(combined):
+                continue
+            score = score_post(combined)
+            if score < MIN_SCORE_ADJACENT_SUBS:
+                continue
+            upsert_lead(_build_lead(post, sub_name, score))
+            count += 1
+        time.sleep(1)
+
+    # General subs: search "hoa" then require min score.
     for sub_name in GENERAL_SUBS:
         logger.info(f"Scanning r/{sub_name} (searching 'hoa')...")
         posts = fetch_reddit(sub_name, query='hoa', size=50)
         logger.info(f"  Fetched {len(posts)} posts")
-
         for post in posts:
-            post_id = post.get('id', '')
-            if post_id in skip_ids:
+            if post.get('id', '') in skip_ids:
                 continue
             if post.get('created_utc', 0) < cutoff_ts:
                 continue
-
             combined = f"{post.get('title', '')} {post.get('selftext', '')}"
-            lead = {
-                'post_id': post_id,
-                'subreddit': sub_name,
-                'title': post.get('title', '')[:500],
-                'url': f"https://reddit.com/r/{sub_name}/comments/{post_id}",
-                'score': score_post(combined),
-                'status': 'new',
-                'created_utc': datetime.fromtimestamp(
-                    post.get('created_utc', 0), tz=timezone.utc
-                ).isoformat(),
-            }
-            upsert_lead(lead)
+            score = score_post(combined)
+            if score < MIN_SCORE_GENERAL_SUBS:
+                continue
+            upsert_lead(_build_lead(post, sub_name, score))
             count += 1
 
         time.sleep(1)
