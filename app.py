@@ -1354,7 +1354,8 @@ def insert_preview(case_id: str, preview_content: Dict, preview_snippet: str = N
 
 def save_case_preview_to_new_table(case_id: str, preview_text: str, doc_brief: Dict,
                                    token_usage: Dict = None, latency_ms: int = None,
-                                   preview_json: Optional[Dict] = None) -> bool:
+                                   preview_json: Optional[Dict] = None,
+                                   risk_flags: Optional[List[Dict]] = None) -> bool:
     """Save generated case preview to the new dmhoa_case_previews table."""
     try:
         # Deactivate existing previews first
@@ -1365,7 +1366,8 @@ def save_case_preview_to_new_table(case_id: str, preview_text: str, doc_brief: D
             'preview_text': preview_text,
             'doc_summary': doc_brief,
             'generated_at': datetime.utcnow().isoformat(),
-            'preview_json': preview_json
+            'preview_json': preview_json,
+            'risk_flags': risk_flags or [],
         }
 
         # Create preview_snippet from preview_json if available, otherwise fallback
@@ -2492,6 +2494,14 @@ def generate_preview_for_pasted_text(case_id: str, token: str, pasted_text: str,
                 "brief_text": pasted_text[:3000] if pasted_text else ""
             }
 
+            # Risk-screen the pasted notice — flags suppress the unlock CTA
+            # in the preview UI and route the user to a legal-referral form.
+            from utils.risk_screening import detect_high_risk
+            risk_flags = detect_high_risk(pasted_text or '')
+            if risk_flags:
+                logger.info(f"Case {token[:12]}... triggered {len(risk_flags)} risk flag(s): "
+                            f"{[f['flag'] for f in risk_flags]}")
+
             # Generate the preview using the pasted text
             preview_text, token_usage, latency_ms, preview_json = generate_case_preview_with_pasted_text(case,
                                                                                                          pasted_text,
@@ -2499,7 +2509,7 @@ def generate_preview_for_pasted_text(case_id: str, token: str, pasted_text: str,
 
             # Save the preview
             success = save_case_preview_to_new_table(case_id, preview_text, doc_brief, token_usage, latency_ms,
-                                                     preview_json)
+                                                     preview_json, risk_flags=risk_flags)
 
             if success:
                 logger.info(f"Successfully generated pasted text preview for case {token[:12]}...")
@@ -2991,7 +3001,12 @@ def get_case_preview(case_id):
             # Metadata
             'model': preview_data.get('model', 'gpt-4o-mini'),
             'prompt_version': preview_data.get('prompt_version', 'v2.0_sales'),
-            'is_active': preview_data.get('is_active', True)
+            'is_active': preview_data.get('is_active', True),
+
+            # Risk flags — non-empty means the unlock CTA should be replaced
+            # with a legal-referral form because the case is beyond self-help
+            # scope (opposing counsel, lien, lawsuit, animal removal, etc.)
+            'risk_flags': preview_content.get('risk_flags', []),
         }
 
         logger.info(f"Successfully retrieved preview for case {case_id}")
@@ -3066,6 +3081,101 @@ def get_case_preview_by_token(token):
         error_msg = f"Error fetching case preview by token: {str(e)}"
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 500
+
+
+LEGAL_REFERRAL_NOTIFY_EMAIL = os.environ.get(
+    'LEGAL_REFERRAL_NOTIFY_EMAIL',
+    'chemworeric@astrodigitallabs.com',
+)
+
+
+@app.route('/api/legal-referral', methods=['POST', 'OPTIONS'])
+def submit_legal_referral():
+    """Capture a legal-referral request from a case-preview page that hit
+    a high-risk flag. Sends a notification email so the request can be
+    matched to an HOA-experienced attorney manually until a partner network
+    exists."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    body = request.get_json(silent=True) or {}
+    case_token = (body.get('case_token') or '').strip()
+    name = (body.get('name') or '').strip()
+    phone = (body.get('phone') or '').strip()
+    contact_email = (body.get('email') or '').strip()
+    best_time = (body.get('best_time') or '').strip()
+    notes = (body.get('notes') or '').strip()
+
+    if not case_token:
+        return jsonify({'error': 'case_token required'}), 400
+    if not (phone or contact_email):
+        return jsonify({'error': 'phone or email required'}), 400
+
+    # Look up the case so we can include the notice text + risk flags in
+    # the notification email.
+    case = read_case_by_token(case_token)
+    if not case:
+        return jsonify({'error': 'case not found'}), 404
+
+    payload = case.get('payload') or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+
+    # Pull risk flags from the active preview
+    preview = read_active_preview(case.get('id')) or {}
+    preview_content = preview.get('preview_content') or {}
+    risk_flags = preview_content.get('risk_flags') or []
+
+    flags_summary = '\n'.join(
+        f"  - {f.get('label')} (flag: {f.get('flag')})" for f in risk_flags
+    ) or '  (none recorded)'
+
+    notice_excerpt = (payload.get('pastedText') or '')[:1500]
+    case_email = case.get('email') or payload.get('email') or '(none)'
+    state = payload.get('state') or '(unknown)'
+    issue = payload.get('issueText') or '(none)'
+
+    body_text = (
+        f"New legal-referral request from a case that triggered risk flags.\n\n"
+        f"-- Contact --\n"
+        f"  Name: {name or '(not provided)'}\n"
+        f"  Phone: {phone or '(not provided)'}\n"
+        f"  Email: {contact_email or case_email}\n"
+        f"  Best time: {best_time or '(not specified)'}\n"
+        f"  Notes: {notes or '(none)'}\n\n"
+        f"-- Case --\n"
+        f"  Token: {case_token}\n"
+        f"  State: {state}\n"
+        f"  Issue: {issue}\n\n"
+        f"-- Risk flags --\n"
+        f"{flags_summary}\n\n"
+        f"-- Notice excerpt --\n"
+        f"{notice_excerpt}\n"
+    )
+
+    try:
+        from utils.email import send_email
+        send_email(
+            LEGAL_REFERRAL_NOTIFY_EMAIL,
+            f"[DMHOA] Legal referral request — {name or case_email}",
+            body_text,
+        )
+    except Exception as e:
+        logger.error(f"Failed to send legal referral notification: {e}")
+
+    # Best-effort funnel log
+    try:
+        funnel_email = contact_email or case_email
+        if funnel_email and funnel_email != '(none)':
+            log_funnel_stage(funnel_email, 'legal_referral_requested')
+    except Exception:
+        pass
+
+    logger.info(f"Legal referral submitted for case {case_token[:12]}...")
+    return jsonify({'ok': True}), 201
 
 
 @app.route('/api/case-analysis', methods=['POST', 'OPTIONS'])
