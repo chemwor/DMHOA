@@ -11,7 +11,7 @@ import time
 import random
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
 from pypdf import PdfReader
 import stripe
@@ -965,6 +965,29 @@ def is_pdf_file(filename: str, mime_type: str = "") -> bool:
 def health_check():
     """Health check endpoint."""
     return jsonify({'status': 'healthy'}), 200
+
+
+@app.route('/r/<short_id>', methods=['GET'])
+def email_click_redirect(short_id):
+    """Tracked-link redirect: log the click and 302 to the real URL.
+
+    Emails go out plain-text (best Gmail deliverability) so we can't use
+    open pixels. Instead, links in nudge emails are rewritten to short
+    URLs that hit this endpoint — one log row per unique short_id, click
+    counts incremented on each hit.
+    """
+    from utils.click_tracking import lookup_and_log_click
+    if not short_id or not short_id.isalnum() or len(short_id) > 16:
+        return redirect('https://disputemyhoa.com/', code=302)
+
+    user_agent = request.headers.get('User-Agent', '')[:500]
+    # request.remote_addr is the proxy. X-Forwarded-For has the real client.
+    ip = (request.headers.get('X-Forwarded-For', '') or request.remote_addr or '').split(',')[0].strip()
+
+    destination = lookup_and_log_click(short_id, user_agent=user_agent, ip=ip)
+    if not destination:
+        return redirect('https://disputemyhoa.com/', code=302)
+    return redirect(destination, code=302)
 
 
 @app.route('/debug/env', methods=['GET'])

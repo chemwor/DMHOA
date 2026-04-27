@@ -28,6 +28,7 @@ from typing import List, Dict
 import requests
 
 from utils.email import send_email
+from utils.click_tracking import make_tracked_url
 from utils import email_templates
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,10 @@ def _run_nudge_1():
         if not email:
             continue
         try:
-            link = row.get('case_link') or ''
+            raw_link = row.get('case_link') or ''
+            link = make_tracked_url(
+                raw_link, link_kind='nudge_1', recipient_email=email,
+            ) if raw_link else ''
             subject, body = email_templates.nudge_1(link)
             ok = send_email(email, subject, body)
             if ok:
@@ -129,7 +133,10 @@ def _run_nudge_2():
         if not email:
             continue
         try:
-            link = row.get('case_link') or ''
+            raw_link = row.get('case_link') or ''
+            link = make_tracked_url(
+                raw_link, link_kind='nudge_2', recipient_email=email,
+            ) if raw_link else ''
             subject, body = email_templates.nudge_2(link)
             ok = send_email(email, subject, body)
             if ok:
@@ -158,7 +165,10 @@ def _run_nudge_3():
         if not email:
             continue
         try:
-            link = row.get('case_link') or ''
+            raw_link = row.get('case_link') or ''
+            link = make_tracked_url(
+                raw_link, link_kind='nudge_3', recipient_email=email,
+            ) if raw_link else ''
             subject, body = email_templates.nudge_3(link)
             ok = send_email(email, subject, body)
             if ok:

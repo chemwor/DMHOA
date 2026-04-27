@@ -645,6 +645,47 @@ def _resend_metrics_for_window(emails: List[Dict], start_iso: str, end_iso: str)
     }
 
 
+def _fetch_click_metrics(period: str = 'yesterday') -> Dict:
+    """Email click stats from dmhoa_email_clicks for a window. Counts
+    distinct recipients clicked + total clicks within the period."""
+    out = {
+        'distinct_clickers': 0,
+        'total_clicks': 0,
+        'links_sent': 0,
+        'click_rate_pct': 0.0,
+        'period': period,
+    }
+    if not SUPABASE_URL:
+        return out
+    date_range = get_date_range(period)
+    try:
+        # Links sent in window (rows created in window)
+        sent_resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_email_clicks",
+            params={
+                'select': 'short_id,recipient_email,first_clicked_at,click_count',
+                'created_at': f'gte.{date_range["start"]}',
+                'and': f'(created_at.lte.{date_range["end"]})',
+            },
+            headers=supabase_headers(),
+            timeout=TIMEOUT,
+        )
+        if sent_resp.ok:
+            rows = sent_resp.json()
+            out['links_sent'] = len(rows)
+            clicked = [r for r in rows if r.get('first_clicked_at')]
+            distinct = {r.get('recipient_email') for r in clicked if r.get('recipient_email')}
+            out['distinct_clickers'] = len(distinct)
+            out['total_clicks'] = sum((r.get('click_count') or 0) for r in clicked)
+            if out['links_sent']:
+                out['click_rate_pct'] = round(
+                    len(clicked) / out['links_sent'] * 100, 1
+                )
+    except Exception as e:
+        logger.warning(f'_fetch_click_metrics: {e}')
+    return out
+
+
 def _fetch_email_funnel_metrics(period: str = 'yesterday') -> Dict:
     """Aggregate funnel stages from Supabase email_funnel for a window."""
     out = {
@@ -688,8 +729,8 @@ def _fetch_email_funnel_metrics(period: str = 'yesterday') -> Dict:
 
 
 def _fetch_email_metrics() -> Dict:
-    """Combined Resend + funnel metrics used by the daily digest snapshot.
-    Replaces _fetch_klaviyo_metrics for dashboard reads."""
+    """Combined Resend + funnel + click metrics used by the daily digest
+    snapshot. Replaces _fetch_klaviyo_metrics for dashboard reads."""
     today_range = get_date_range('today')
     yest_range = get_date_range('yesterday')
     week_range = get_date_range('week')
@@ -706,6 +747,11 @@ def _fetch_email_metrics() -> Dict:
             'today': _fetch_email_funnel_metrics('today'),
             'yesterday': _fetch_email_funnel_metrics('yesterday'),
             'week': _fetch_email_funnel_metrics('week'),
+        },
+        'clicks': {
+            'today': _fetch_click_metrics('today'),
+            'yesterday': _fetch_click_metrics('yesterday'),
+            'week': _fetch_click_metrics('week'),
         },
     }
 
@@ -754,6 +800,11 @@ def get_email_dashboard():
                 'today': _fetch_email_funnel_metrics('today'),
                 'yesterday': _fetch_email_funnel_metrics('yesterday'),
                 'week': _fetch_email_funnel_metrics('week'),
+            },
+            'clicks': {
+                'today': _fetch_click_metrics('today'),
+                'yesterday': _fetch_click_metrics('yesterday'),
+                'week': _fetch_click_metrics('week'),
             },
             'recent_sends': recent[:50],
             'has_full_access': bool(RESEND_API_KEY),
