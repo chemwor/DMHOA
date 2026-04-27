@@ -7655,7 +7655,8 @@ def get_command_center():
         alerts = _fetch_alert_counts()
         checklists = _fetch_checklist_progress()
         ads = _fetch_google_ads_metrics() or {}
-        klaviyo = _fetch_klaviyo_metrics()
+        # Replaced klaviyo with funnel-derived weekly capture count
+        funnel_week = _fetch_email_funnel_metrics('week')
 
         # Quick site health check
         site_up = True
@@ -7730,7 +7731,11 @@ def get_command_center():
                 'last_scan': last_scan,
             },
             'quick_stats': {
-                'klaviyo_list_size': klaviyo.get('total_profiles', 0),
+                # 7-day unique-email capture count from the email_funnel table.
+                # Field name preserved to avoid breaking the existing dashboard
+                # binding; semantics changed from "Klaviyo profile count" to
+                # "weekly captured emails" (a more directly actionable number).
+                'klaviyo_list_size': funnel_week.get('total_unique', 0),
                 'ads_spend_today': ads.get('spend', 0),
                 'ads_cpa_today': ads.get('cpa', 0),
             },
