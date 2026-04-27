@@ -5885,16 +5885,17 @@ def _build_live_data_snapshot() -> Dict:
     sources_failed = []
     data = {}
 
-    # Stripe
+    # Stripe — 'yesterday' is the completed day (digest fires at 6am ET so
+    # 'today' would always be ~empty); MTD stays as-is.
     try:
-        stripe_today = _fetch_stripe_metrics('today')
+        stripe_yest = _fetch_stripe_metrics('yesterday')
         stripe_week = _fetch_stripe_metrics('week')
         stripe_month = _fetch_stripe_metrics('month')
         data['stripe'] = {
-            'revenue_today': stripe_today['revenue'],
+            'revenue_yesterday': stripe_yest['revenue'],
             'revenue_week': stripe_week['revenue'],
             'revenue_month': stripe_month['revenue'],
-            'transactions_today': stripe_today['transactions'],
+            'transactions_yesterday': stripe_yest['transactions'],
             'transactions_month': stripe_month['transactions'],
         }
         sources_loaded.append('stripe')
@@ -5903,13 +5904,13 @@ def _build_live_data_snapshot() -> Dict:
         sources_failed.append('stripe')
         data['stripe'] = {}
 
-    # Supabase cases
+    # Supabase cases — yesterday for activity, month for the trend
     try:
-        cases_today = _fetch_supabase_case_metrics('today')
+        cases_yest = _fetch_supabase_case_metrics('yesterday')
         cases_month = _fetch_supabase_case_metrics('month')
         data['cases'] = {
-            'new_today': cases_today['new_cases'],
-            'paid_today': cases_today['paid_cases'],
+            'new_yesterday': cases_yest['new_cases'],
+            'paid_yesterday': cases_yest['paid_cases'],
             'paid_month': cases_month['paid_cases'],
             'conversion_rate': cases_month['conversion_rate'],
         }
@@ -5919,11 +5920,10 @@ def _build_live_data_snapshot() -> Dict:
         sources_failed.append('supabase')
         data['cases'] = {}
 
-    # Google Ads — today's data, only campaigns with spend
+    # Google Ads — yesterday's completed day
     try:
-        ads = _fetch_google_ads_metrics('today')
+        ads = _fetch_google_ads_metrics('yesterday')
         if ads:
-            # Convert CTR to percentage for clarity (raw is decimal like 0.0565)
             ads['ctr_pct'] = round(ads.get('ctr', 0) * 100, 2)
             data['google_ads'] = ads
             sources_loaded.append('google_ads')
@@ -5987,18 +5987,23 @@ def _build_live_data_snapshot() -> Dict:
 
 def _fetch_ops_metrics() -> Dict:
     """Counts for legal referrals, pending ad-analyzer proposals, and
-    case previews generated today. Used by the daily digest."""
+    previews generated YESTERDAY (completed day). pending_proposals is
+    current state since the digest fires at 6am ET when nothing has
+    happened today yet."""
     out = {
-        'legal_referrals_today': 0,
+        'legal_referrals_yesterday': 0,
         'legal_referrals_7d': 0,
         'pending_proposals': 0,
-        'previews_today': 0,
+        'previews_yesterday': 0,
     }
     if not SUPABASE_URL:
         return out
 
-    today_et = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
-    seven_days_ago = (datetime.now(ZoneInfo('America/New_York')) - timedelta(days=7)).strftime('%Y-%m-%d')
+    now_et = datetime.now(ZoneInfo('America/New_York'))
+    today_et_date = now_et.date()
+    yest_start = (now_et - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    yest_end = (now_et - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=999999)
+    seven_days_ago = (now_et - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
 
     def _count(url, params):
         try:
@@ -6017,13 +6022,17 @@ def _fetch_ops_metrics() -> Dict:
         return 0
 
     try:
-        out['legal_referrals_today'] = _count(
+        out['legal_referrals_yesterday'] = _count(
             f"{SUPABASE_URL}/rest/v1/email_funnel",
-            {'stage': 'eq.legal_referral_requested', 'created_at': f'gte.{today_et}'},
+            {
+                'stage': 'eq.legal_referral_requested',
+                'created_at': f'gte.{yest_start.isoformat()}',
+                'and': f'(created_at.lte.{yest_end.isoformat()})',
+            },
         )
         out['legal_referrals_7d'] = _count(
             f"{SUPABASE_URL}/rest/v1/email_funnel",
-            {'stage': 'eq.legal_referral_requested', 'created_at': f'gte.{seven_days_ago}'},
+            {'stage': 'eq.legal_referral_requested', 'created_at': f'gte.{seven_days_ago.isoformat()}'},
         )
     except Exception as e:
         logger.warning(f'legal referral count failed: {e}')
@@ -6037,9 +6046,12 @@ def _fetch_ops_metrics() -> Dict:
         logger.warning(f'pending proposals count failed: {e}')
 
     try:
-        out['previews_today'] = _count(
+        out['previews_yesterday'] = _count(
             f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews",
-            {'created_at': f'gte.{today_et}'},
+            {
+                'created_at': f'gte.{yest_start.isoformat()}',
+                'and': f'(created_at.lte.{yest_end.isoformat()})',
+            },
         )
     except Exception as e:
         logger.warning(f'previews count failed: {e}')
@@ -6340,35 +6352,36 @@ def _generate_daily_summary() -> Dict:
 
 CONTEXT:
 - The 6-month growth plan started February 25, 2026. We are currently in Month 1 (Foundation & Launch).
-- Target campaign: "DMHOA - DIY Response - Phrase - March"
-- Only campaigns with actual ad spend are included in the ads data below.
+- This digest fires at 6am ET daily. All activity metrics in DATA reflect YESTERDAY (the completed day), not the current day. Do NOT report 0s as "today is slow" — they reflect a day that has not started yet.
+- Active ad campaigns: "DMHOA-Search-M1-Disputes" with ad groups Appeal Intent, Long-Tail Specifics, Fight Intent (Dispute Process Intent is intentionally PAUSED). Only campaigns with actual ad spend are included in the ads data below.
 - The "ctr_pct" field is CTR as a percentage (e.g., 5.65 means 5.65%). Use this for grading, NOT the raw "ctr" decimal.
 - The "total_profiles" in Klaviyo represents email list size.
+- "pending_proposals" in ops is current state — these are ad-analyzer proposals waiting on Eric's review.
 
-Generate a daily business summary for {today}. Be concise, direct, and action-oriented.
+Generate a daily business summary for {today} (reporting on yesterday's activity). Be concise, direct, and action-oriented.
 
 DATA:
 {data_text}
 
-FORMAT YOUR RESPONSE AS A JSON OBJECT:
+FORMAT YOUR RESPONSE AS A JSON OBJECT (all "yesterday" fields reflect the completed day, NOT today):
 {{
-  "executive_summary": "2-3 sentence overview of today's business state",
+  "executive_summary": "2-3 sentence overview framed as 'yesterday Eric got X / spent Y / etc.'",
   "revenue": {{
-    "today": number,
+    "yesterday": number,
     "mtd": number,
     "target": 1000,
     "pace": "on_track" or "behind" or "ahead"
   }},
   "cases": {{
-    "new_today": number,
-    "previews_today": number,
-    "paid_today": number,
+    "new_yesterday": number,
+    "previews_yesterday": number,
+    "paid_yesterday": number,
     "mtd_paid": number,
     "conversion_rate": number
   }},
   "ads": {{
-    "spend_today": number,
-    "clicks": number,
+    "spend_yesterday": number,
+    "clicks_yesterday": number,
     "cpa": number,
     "ctr": number,
     "grade": "A" or "C" or "F"
@@ -6378,12 +6391,12 @@ FORMAT YOUR RESPONSE AS A JSON OBJECT:
     "new_subscribers": number
   }},
   "ops": {{
-    "legal_referrals_today": number,
+    "legal_referrals_yesterday": number,
     "legal_referrals_7d": number,
     "pending_proposals": number
   }},
   "costs": {{
-    "api_today": number
+    "api_yesterday": number
   }},
   "alerts_active": number,
   "checklist_progress": {{
@@ -6423,10 +6436,10 @@ Return ONLY the JSON object. No markdown, no code fences, no commentary."""
 
 DATA: {json.dumps(summary_json, indent=2)}
 
-Use these sections in this order:
+Use these sections in this order. All daily figures are YESTERDAY's (completed day) — phrase them that way. Do NOT call yesterday's numbers "today's".
 ## Daily Summary — {today}
-### Numbers
-(Revenue today/MTD, ad spend + clicks + CPA + CTR, new cases, new previews, paid cases, legal referrals, pending ad proposals — keep tight, one line each)
+### Yesterday's Numbers
+(Revenue yesterday + MTD, ad spend + clicks + CPA + CTR, new cases, new previews, paid cases, legal referrals — keep tight, one line each. Then on a separate line note current state: "pending ad proposals: N" since that's right-now state, not yesterday.)
 ### What's Working (positive notes)
 (bulleted list of positive_notes verbatim, with one-line context if useful)
 ### What's Not Working (negative notes)
