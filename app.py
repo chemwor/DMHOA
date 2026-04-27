@@ -2303,6 +2303,15 @@ def save_case():
                 'status': new_status,
                 'updated_at': datetime.utcnow().isoformat()
             }
+            # Mirror email/gclid from payload into top-level columns so other
+            # code paths that read case.email directly (legacy callers, SQL
+            # joins, dashboard filters) see the captured value.
+            payload_email = merged_payload.get('email')
+            if payload_email:
+                update_data['email'] = payload_email
+            payload_gclid = merged_payload.get('gclid')
+            if payload_gclid:
+                update_data['gclid'] = payload_gclid
             update_headers = supabase_headers()
             update_headers['Prefer'] = 'return=representation'
 
@@ -2328,6 +2337,13 @@ def save_case():
                 'created_at': datetime.utcnow().isoformat(),
                 'updated_at': datetime.utcnow().isoformat()
             }
+            # Mirror email/gclid into top-level columns at create time too.
+            payload_email = (payload or {}).get('email')
+            if payload_email:
+                insert_data['email'] = payload_email
+            payload_gclid = (payload or {}).get('gclid')
+            if payload_gclid:
+                insert_data['gclid'] = payload_gclid
             insert_headers = supabase_headers()
             insert_headers['Prefer'] = 'return=representation'
 
