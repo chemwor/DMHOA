@@ -35,10 +35,15 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
-# Klaviyo Configuration
+# Klaviyo Configuration (deprecated for dashboard reads — kept for legacy
+# profile sync from save_case)
 KLAVIYO_API_KEY = os.environ.get('KLAVIYO_API_KEY')
 KLAVIYO_FULL_PREVIEW_LIST_ID = os.environ.get('KLAVIYO_FULL_PREVIEW_LIST_ID', 'T6LY99')
 KLAVIYO_QUICK_PREVIEW_LIST_ID = os.environ.get('KLAVIYO_QUICK_PREVIEW_LIST_ID', 'QS6zfC')
+
+# Resend Configuration — RESEND_API_KEY now has Full Access (read+send)
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
+RESEND_API_BASE = 'https://api.resend.com'
 
 # Google Ads Configuration
 GOOGLE_ADS_DEVELOPER_TOKEN = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN')
@@ -569,7 +574,198 @@ def get_supabase_analytics():
 
 
 # ============================================================================
-# KLAVIYO ENDPOINT
+# RESEND + EMAIL FUNNEL ENDPOINT
+# ============================================================================
+
+def resend_headers() -> Dict[str, str]:
+    return {
+        'Authorization': f'Bearer {RESEND_API_KEY}',
+        'Content-Type': 'application/json',
+    }
+
+
+def _fetch_resend_emails(limit: int = 100) -> List[Dict]:
+    """Pull the last N emails from Resend. Returns list of dicts with
+    id, to, from, subject, created_at, last_event."""
+    if not RESEND_API_KEY:
+        return []
+    try:
+        r = requests.get(
+            f'{RESEND_API_BASE}/emails',
+            params={'limit': limit},
+            headers=resend_headers(),
+            timeout=TIMEOUT,
+        )
+        if not r.ok:
+            logger.warning(f'Resend list failed: {r.status_code} {r.text[:200]}')
+            return []
+        return r.json().get('data', []) or []
+    except Exception as e:
+        logger.warning(f'Resend list exception: {e}')
+        return []
+
+
+def _fetch_resend_email(email_id: str) -> Optional[Dict]:
+    """Fetch detail for a single email (includes events)."""
+    if not RESEND_API_KEY or not email_id:
+        return None
+    try:
+        r = requests.get(
+            f'{RESEND_API_BASE}/emails/{email_id}',
+            headers=resend_headers(),
+            timeout=TIMEOUT,
+        )
+        return r.json() if r.ok else None
+    except Exception:
+        return None
+
+
+def _resend_metrics_for_window(emails: List[Dict], start_iso: str, end_iso: str) -> Dict:
+    """Aggregate Resend status counts for emails created within the window."""
+    in_window = [
+        e for e in emails
+        if e.get('created_at') and start_iso <= e['created_at'] <= end_iso
+    ]
+    counts = {'sent': 0, 'delivered': 0, 'bounced': 0, 'complained': 0,
+              'opened': 0, 'clicked': 0, 'queued': 0, 'unknown': 0}
+    for e in in_window:
+        ev = (e.get('last_event') or 'unknown').lower()
+        if ev in counts:
+            counts[ev] += 1
+        else:
+            counts['unknown'] += 1
+    total = len(in_window)
+    delivery_rate = (counts['delivered'] / total * 100) if total else 0
+    bounce_rate = (counts['bounced'] / total * 100) if total else 0
+    return {
+        'total': total,
+        'counts': counts,
+        'delivery_rate_pct': round(delivery_rate, 1),
+        'bounce_rate_pct': round(bounce_rate, 1),
+    }
+
+
+def _fetch_email_funnel_metrics(period: str = 'yesterday') -> Dict:
+    """Aggregate funnel stages from Supabase email_funnel for a window."""
+    out = {
+        'total_unique': 0,
+        'by_stage': {},
+        'nudges_sent': 0,
+        'period': period,
+    }
+    if not SUPABASE_URL:
+        return out
+
+    date_range = get_date_range(period)
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/email_funnel",
+            params={
+                'select': 'email,stage,nudge_1_sent,nudge_2_sent,nudge_3_sent,purchased,created_at',
+                'created_at': f'gte.{date_range["start"]}',
+                'and': f'(created_at.lte.{date_range["end"]})',
+            },
+            headers=supabase_headers(),
+            timeout=TIMEOUT,
+        )
+        if not r.ok:
+            return out
+        rows = r.json()
+        excluded = {e.lower() for e in EXCLUDED_EMAILS}
+        rows = [x for x in rows if (x.get('email') or '').lower() not in excluded]
+        unique_emails = {x.get('email') for x in rows if x.get('email')}
+        out['total_unique'] = len(unique_emails)
+        from collections import Counter
+        out['by_stage'] = dict(Counter(x.get('stage', 'unknown') for x in rows))
+        out['nudges_sent'] = sum(
+            1 for x in rows
+            if x.get('nudge_1_sent') or x.get('nudge_2_sent') or x.get('nudge_3_sent')
+        )
+    except Exception as e:
+        logger.warning(f'_fetch_email_funnel_metrics: {e}')
+
+    return out
+
+
+def _fetch_email_metrics() -> Dict:
+    """Combined Resend + funnel metrics used by the daily digest snapshot.
+    Replaces _fetch_klaviyo_metrics for dashboard reads."""
+    today_range = get_date_range('today')
+    yest_range = get_date_range('yesterday')
+    week_range = get_date_range('week')
+
+    emails = _fetch_resend_emails(limit=200)
+
+    return {
+        'resend': {
+            'today': _resend_metrics_for_window(emails, today_range['start'], today_range['end']),
+            'yesterday': _resend_metrics_for_window(emails, yest_range['start'], yest_range['end']),
+            'week': _resend_metrics_for_window(emails, week_range['start'], week_range['end']),
+        },
+        'funnel': {
+            'today': _fetch_email_funnel_metrics('today'),
+            'yesterday': _fetch_email_funnel_metrics('yesterday'),
+            'week': _fetch_email_funnel_metrics('week'),
+        },
+    }
+
+
+@dashboard_bp.route('/api/dashboard/email', methods=['GET', 'OPTIONS'])
+def get_email_dashboard():
+    """Combined Resend + funnel data for the Email dashboard page.
+    Returns sends overview, funnel breakdown, and recent send list."""
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'})
+
+    try:
+        emails = _fetch_resend_emails(limit=100)
+        excluded = {e.lower() for e in EXCLUDED_EMAILS}
+
+        def _to_email(addr_list):
+            if isinstance(addr_list, list):
+                return addr_list[0] if addr_list else ''
+            return addr_list or ''
+
+        recent = []
+        for e in emails:
+            to = _to_email(e.get('to'))
+            if to.lower() in excluded:
+                continue
+            recent.append({
+                'id': e.get('id'),
+                'to': to,
+                'from': e.get('from'),
+                'subject': e.get('subject'),
+                'last_event': e.get('last_event'),
+                'created_at': e.get('created_at'),
+            })
+
+        today_range = get_date_range('today')
+        yest_range = get_date_range('yesterday')
+        week_range = get_date_range('week')
+
+        return jsonify({
+            'resend': {
+                'today': _resend_metrics_for_window(emails, today_range['start'], today_range['end']),
+                'yesterday': _resend_metrics_for_window(emails, yest_range['start'], yest_range['end']),
+                'week': _resend_metrics_for_window(emails, week_range['start'], week_range['end']),
+            },
+            'funnel': {
+                'today': _fetch_email_funnel_metrics('today'),
+                'yesterday': _fetch_email_funnel_metrics('yesterday'),
+                'week': _fetch_email_funnel_metrics('week'),
+            },
+            'recent_sends': recent[:50],
+            'has_full_access': bool(RESEND_API_KEY),
+        })
+    except Exception as e:
+        logger.error(f'get_email_dashboard error: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# KLAVIYO ENDPOINT (legacy — kept for backward compat, no longer used in
+# daily digest or dashboard email page; Resend is the source of truth now)
 # ============================================================================
 
 def klaviyo_headers() -> Dict[str, str]:
@@ -5938,15 +6134,16 @@ def _build_live_data_snapshot() -> Dict:
         sources_failed.append('google_ads')
         data['google_ads'] = {}
 
-    # Klaviyo
+    # Email — Resend (sends) + email_funnel (capture/stages). Replaces
+    # the old Klaviyo block. Klaviyo profile sync still runs in save_case
+    # for legacy flows but is no longer the source of truth for metrics.
     try:
-        klaviyo = _fetch_klaviyo_metrics()
-        data['klaviyo'] = klaviyo
-        sources_loaded.append('klaviyo')
+        data['email'] = _fetch_email_metrics()
+        sources_loaded.append('email')
     except Exception as e:
-        logger.error(f'Snapshot - Klaviyo failed: {str(e)}')
-        sources_failed.append('klaviyo')
-        data['klaviyo'] = {}
+        logger.error(f'Snapshot - Email metrics failed: {str(e)}')
+        sources_failed.append('email')
+        data['email'] = {}
 
     # OpenAI costs
     try:
@@ -6360,6 +6557,7 @@ CONTEXT:
 - The "ctr_pct" field is CTR as a percentage (e.g., 5.65 means 5.65%). Use this for grading, NOT the raw "ctr" decimal.
 - The "total_profiles" in Klaviyo represents email list size.
 - "pending_proposals" in ops is current state — these are ad-analyzer proposals waiting on Eric's review.
+- "email" data has two halves: "resend" = actual sends to inboxes (delivered/bounced/etc.) and "funnel" = our internal funnel stages from email_funnel table. Use these for email metrics. Klaviyo data is no longer reported.
 
 Generate a daily business summary for {today} (reporting on yesterday's activity). Be concise, direct, and action-oriented.
 
@@ -6390,8 +6588,11 @@ FORMAT YOUR RESPONSE AS A JSON OBJECT (all "yesterday" fields reflect the comple
     "grade": "A" or "C" or "F"
   }},
   "email": {{
-    "list_size": number,
-    "new_subscribers": number
+    "captured_yesterday": number (unique emails entering funnel yesterday),
+    "delivered_yesterday": number (Resend delivered events yesterday),
+    "bounce_rate_yesterday_pct": number,
+    "nudges_sent_yesterday": number,
+    "weekly_capture_total": number
   }},
   "ops": {{
     "legal_referrals_yesterday": number,
