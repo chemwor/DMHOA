@@ -185,7 +185,7 @@ def get_timestamp_range(period: str) -> Dict[str, int]:
     return {'gte': gte, 'lte': lte}
 
 
-PLAN_START_DATE = '2026-04-01'
+PLAN_START_DATE = '2026-05-01'
 
 # Style rules appended to every Claude/OpenAI system prompt to make output
 # read human and avoid AI-tells. Keep this in sync with the same constant
@@ -1124,8 +1124,8 @@ def get_google_ads_data():
         import calendar
         ads_now = datetime.now(ZoneInfo('America/Los_Angeles'))
         days_in_month = calendar.monthrange(ads_now.year, ads_now.month)[1]
-        # Map current month to plan budget (March=1, April=2, etc.)
-        plan_month_index = ads_now.month - 2  # March(3) -> 1, April(4) -> 2, etc.
+        # Map current calendar month to plan month index (May=1, June=2, ..., October=6)
+        plan_month_index = ads_now.month - 4
         monthly_budget = 600  # default
         for pm in PLAN_MONTHS:
             if pm['month'] == plan_month_index:
@@ -3571,12 +3571,15 @@ ad_suggestion_jobs = {}
 
 
 def _build_plan_context() -> Dict:
-    """Build 6-month plan context for campaign brief AI prompts."""
+    """Build 6-month plan context for campaign brief AI prompts.
+    Plan runs May 2026 (Month 1) through October 2026 (Month 6)."""
     now = datetime.now()
-    if now.strftime('%Y-%m-%d') < '2026-03-01':
+    if now.strftime('%Y-%m-%d') < PLAN_START_DATE:
+        # Pre-plan ramp-up — clamp to Month 1 for context purposes
         current_month = 1
     else:
-        current_month = max(1, min(6, now.month - 2))
+        # May (5) -> Month 1, October (10) -> Month 6
+        current_month = max(1, min(6, now.month - 4))
 
     current_plan = PLAN_MONTHS[current_month - 1]
     days_since_plan_start = (now - datetime.strptime(PLAN_START_DATE, '%Y-%m-%d')).days
@@ -6351,7 +6354,7 @@ def _generate_daily_summary() -> Dict:
     json_prompt = f"""You are a business operations assistant for DisputeMyHOA (DMHOA), a bootstrapped $29 one-time-purchase educational platform.
 
 CONTEXT:
-- The 6-month growth plan started February 25, 2026. We are currently in Month 1 (Foundation & Launch).
+- The 6-month growth plan starts May 1, 2026. Phases: Month 1 May (Foundation & Launch), Month 2 June (Optimize & Amplify), Month 3 July (Content Engine), Month 4 August (Scale What Works), Month 5 September (Authority & Media), Month 6 October (Evaluate & Decide). Until May 1 we are in Pre-plan Ramp-Up (April 2026).
 - This digest fires at 6am ET daily. All activity metrics in DATA reflect YESTERDAY (the completed day), not the current day. Do NOT report 0s as "today is slow" — they reflect a day that has not started yet.
 - Active ad campaigns: "DMHOA-Search-M1-Disputes" with ad groups Appeal Intent, Long-Tail Specifics, Fight Intent (Dispute Process Intent is intentionally PAUSED). Only campaigns with actual ad spend are included in the ads data below.
 - The "ctr_pct" field is CTR as a percentage (e.g., 5.65 means 5.65%). Use this for grading, NOT the raw "ctr" decimal.
@@ -6592,17 +6595,17 @@ def send_daily_summary():
 # ============================================================================
 
 PLAN_MONTHS = [
-    {'month': 1, 'name': 'April 2026', 'theme': 'Foundation & Launch', 'budget_planned': 400},
-    {'month': 2, 'name': 'May 2026', 'theme': 'Optimize & Amplify', 'budget_planned': 500},
-    {'month': 3, 'name': 'June 2026', 'theme': 'Content Engine', 'budget_planned': 600},
-    {'month': 4, 'name': 'July 2026', 'theme': 'Scale What Works', 'budget_planned': 750},
-    {'month': 5, 'name': 'August 2026', 'theme': 'Authority & Media', 'budget_planned': 850},
-    {'month': 6, 'name': 'September 2026', 'theme': 'Evaluate & Decide', 'budget_planned': 900},
+    {'month': 1, 'name': 'May 2026', 'theme': 'Foundation & Launch', 'budget_planned': 400},
+    {'month': 2, 'name': 'June 2026', 'theme': 'Optimize & Amplify', 'budget_planned': 500},
+    {'month': 3, 'name': 'July 2026', 'theme': 'Content Engine', 'budget_planned': 600},
+    {'month': 4, 'name': 'August 2026', 'theme': 'Scale What Works', 'budget_planned': 750},
+    {'month': 5, 'name': 'September 2026', 'theme': 'Authority & Media', 'budget_planned': 850},
+    {'month': 6, 'name': 'October 2026', 'theme': 'Evaluate & Decide', 'budget_planned': 900},
 ]
 
-# Pre-plan ramp-up data (March 2026) — kept for historical reference
+# Pre-plan ramp-up data (April 2026) — kept for historical reference
 RAMP_UP_PERIOD = {
-    'name': 'March 2026',
+    'name': 'April 2026',
     'theme': 'Pre-plan Ramp-Up',
     'budget_planned': 600,
 }
@@ -6694,11 +6697,11 @@ def get_six_month_plan():
 
     try:
         now = datetime.now()
-        # Official plan starts April 2026: Apr=Month 1, May=Month 2, ..., Sep=Month 6
-        if now.strftime('%Y-%m-%d') < '2026-04-01':
+        # Official plan starts May 2026: May=Month 1, June=Month 2, ..., October=Month 6
+        if now.strftime('%Y-%m-%d') < PLAN_START_DATE:
             current_month = 1  # Pre-plan, still in ramp-up
         else:
-            current_month = max(1, min(6, now.month - 3))  # April=1..September=6
+            current_month = max(1, min(6, now.month - 4))  # May=1..October=6
 
         # Fetch live data — use plan_start date range for the full picture
         stripe_month = _fetch_stripe_metrics('month')
@@ -6814,8 +6817,8 @@ def get_six_month_plan():
 
         # --- Content actuals ---
         # Auto-count blog posts by month from blog_posts table
-        # Plan months: 1=April 2026, 2=May 2026, ..., 6=September 2026
-        # March 2026 = ramp-up period (kept separately)
+        # Plan months: 1=May 2026, 2=June 2026, ..., 6=October 2026
+        # April 2026 = ramp-up period (kept separately)
         blog_by_month = {}
         ramp_up_blog_count = 0
         try:
@@ -6823,7 +6826,7 @@ def get_six_month_plan():
                 f"{SUPABASE_URL}/rest/v1/blog_posts",
                 params={
                     'select': 'published_at',
-                    'published_at': 'gte.2026-03-01',
+                    'published_at': 'gte.2026-04-01',
                     'order': 'published_at.asc',
                     'limit': '500'
                 },
@@ -6836,11 +6839,11 @@ def get_six_month_plan():
                     if pub:
                         try:
                             pub_date = datetime.fromisoformat(pub.replace('Z', '+00:00'))
-                            if pub_date.month == 3 and pub_date.year == 2026:
+                            if pub_date.month == 4 and pub_date.year == 2026:
                                 ramp_up_blog_count += 1
                             else:
-                                # April=month1, May=month2, ..., September=month6
-                                blog_month = pub_date.month - 3
+                                # May=month1, June=month2, ..., October=month6
+                                blog_month = pub_date.month - 4
                                 if 1 <= blog_month <= 6:
                                     blog_by_month[blog_month] = blog_by_month.get(blog_month, 0) + 1
                         except Exception:
@@ -6875,7 +6878,7 @@ def get_six_month_plan():
         total_all = checklists_all.get('total', 0)
         overall_progress = round(total_done / total_all, 2) if total_all > 0 else 0
 
-        # Pre-plan ramp-up summary (March 2026 — historical)
+        # Pre-plan ramp-up summary (April 2026 — historical)
         ramp_up_manual = _read_api_cache('plan_ramp_up_actuals') or {}
         ramp_up = {
             **RAMP_UP_PERIOD,
