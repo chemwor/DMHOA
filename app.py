@@ -6413,6 +6413,21 @@ def _scheduled_news_scan():
         logger.error(f"Scheduled news scan failed: {e}")
 
 
+def _scheduled_daily_digest():
+    """Generate the daily ops summary and email it via the existing
+    /daily-summary/send endpoint logic. Fires at 6am America/New_York."""
+    with app.app_context():
+        try:
+            with app.test_client() as client:
+                resp = client.post('/api/dashboard/daily-summary/send')
+                if resp.status_code == 200:
+                    logger.info("Daily digest email sent")
+                else:
+                    logger.error(f"Daily digest send failed: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        except Exception as e:
+            logger.error(f"Scheduled daily digest failed: {e}")
+
+
 def _start_scheduler():
     """Initialize APScheduler with hourly alert scan, daily ad analyzer,
     and 30-minute email funnel nudges."""
@@ -6447,8 +6462,17 @@ def _start_scheduler():
             id='hoa_news_scan',
             replace_existing=True,
         )
+        # Daily ops digest at 6am America/New_York
+        from apscheduler.triggers.cron import CronTrigger
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        scheduler.add_job(
+            _scheduled_daily_digest,
+            CronTrigger(hour=6, minute=0, timezone=_ZoneInfo('America/New_York')),
+            id='daily_digest',
+            replace_existing=True,
+        )
         scheduler.start()
-        logger.info("APScheduler started — alert scan hourly, ad analyzer daily, email nudges every 30 min, news scan every 6 hours")
+        logger.info("APScheduler started — alert scan hourly, ad analyzer daily, email nudges every 30 min, news scan every 6 hours, daily digest 6am ET")
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
 

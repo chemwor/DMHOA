@@ -5972,9 +5972,79 @@ def _build_live_data_snapshot() -> Dict:
     except Exception:
         data['checklists'] = {'done': 0, 'total': 0, 'pct': 0}
 
+    # Extra ops metrics: legal referrals, ad-analyzer proposals, previews
+    try:
+        data['ops'] = _fetch_ops_metrics()
+        sources_loaded.append('ops')
+    except Exception as e:
+        logger.error(f'Snapshot - ops metrics failed: {e}')
+        data['ops'] = {}
+
     data['_sources_loaded'] = sources_loaded
     data['_sources_failed'] = sources_failed
     return data
+
+
+def _fetch_ops_metrics() -> Dict:
+    """Counts for legal referrals, pending ad-analyzer proposals, and
+    case previews generated today. Used by the daily digest."""
+    out = {
+        'legal_referrals_today': 0,
+        'legal_referrals_7d': 0,
+        'pending_proposals': 0,
+        'previews_today': 0,
+    }
+    if not SUPABASE_URL:
+        return out
+
+    today_et = datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
+    seven_days_ago = (datetime.now(ZoneInfo('America/New_York')) - timedelta(days=7)).strftime('%Y-%m-%d')
+
+    def _count(url, params):
+        try:
+            r = requests.head(
+                url,
+                params=params,
+                headers={**supabase_headers(), 'Prefer': 'count=exact'},
+                timeout=TIMEOUT,
+            )
+            cr = r.headers.get('content-range', '')
+            if '/' in cr:
+                tail = cr.split('/')[-1]
+                return int(tail) if tail.isdigit() else 0
+        except Exception:
+            return 0
+        return 0
+
+    try:
+        out['legal_referrals_today'] = _count(
+            f"{SUPABASE_URL}/rest/v1/email_funnel",
+            {'stage': 'eq.legal_referral_requested', 'created_at': f'gte.{today_et}'},
+        )
+        out['legal_referrals_7d'] = _count(
+            f"{SUPABASE_URL}/rest/v1/email_funnel",
+            {'stage': 'eq.legal_referral_requested', 'created_at': f'gte.{seven_days_ago}'},
+        )
+    except Exception as e:
+        logger.warning(f'legal referral count failed: {e}')
+
+    try:
+        out['pending_proposals'] = _count(
+            f"{SUPABASE_URL}/rest/v1/ad_proposals",
+            {'status': 'eq.pending'},
+        )
+    except Exception as e:
+        logger.warning(f'pending proposals count failed: {e}')
+
+    try:
+        out['previews_today'] = _count(
+            f"{SUPABASE_URL}/rest/v1/dmhoa_case_previews",
+            {'created_at': f'gte.{today_et}'},
+        )
+    except Exception as e:
+        logger.warning(f'previews count failed: {e}')
+
+    return out
 
 
 def call_claude_sonnet(prompt, system_prompt='', max_retries=3):
@@ -6291,6 +6361,7 @@ FORMAT YOUR RESPONSE AS A JSON OBJECT:
   }},
   "cases": {{
     "new_today": number,
+    "previews_today": number,
     "paid_today": number,
     "mtd_paid": number,
     "conversion_rate": number
@@ -6306,6 +6377,11 @@ FORMAT YOUR RESPONSE AS A JSON OBJECT:
     "list_size": number,
     "new_subscribers": number
   }},
+  "ops": {{
+    "legal_referrals_today": number,
+    "legal_referrals_7d": number,
+    "pending_proposals": number
+  }},
   "costs": {{
     "api_today": number
   }},
@@ -6315,13 +6391,15 @@ FORMAT YOUR RESPONSE AS A JSON OBJECT:
     "total": {checklists.get('total', 0)},
     "pct": {checklists.get('pct', 0)}
   }},
-  "top_3_actions": [
-    "Most impactful thing to do today",
-    "Second most impactful",
-    "Third most impactful"
+  "action_list": [
+    "Concrete things Eric should do or check today, ordered by impact. Include any pending ad-analyzer proposals to review, legal-referral requests to follow up on, anomalies in numbers, or specific keywords/ads to inspect."
   ],
-  "risks": ["Any risks or concerns worth noting"],
-  "wins": ["Anything positive to highlight"]
+  "positive_notes": [
+    "What is working — concrete, specific. Examples: ad group X improved CPA, conversion lift, milestone hit, new paying customer."
+  ],
+  "negative_notes": [
+    "What is not working or worth concern — specific, with the exact metric or item. Examples: keyword X has 0 conv on $Y spent, conversion rate dropping, ad group impressions stalled."
+  ]
 }}
 
 GRADING REFERENCE (use ctr_pct for CTR grading):
@@ -6345,18 +6423,18 @@ Return ONLY the JSON object. No markdown, no code fences, no commentary."""
 
 DATA: {json.dumps(summary_json, indent=2)}
 
-Use these sections:
+Use these sections in this order:
 ## Daily Summary — {today}
-### Revenue
-### Cases
-### Ads
-### Email
-### Costs
-### Top 3 Actions Today
-### Risks
-### Wins
+### Numbers
+(Revenue today/MTD, ad spend + clicks + CPA + CTR, new cases, new previews, paid cases, legal referrals, pending ad proposals — keep tight, one line each)
+### What's Working (positive notes)
+(bulleted list of positive_notes verbatim, with one-line context if useful)
+### What's Not Working (negative notes)
+(bulleted list of negative_notes verbatim)
+### Action List
+(bulleted list of action_list verbatim — these are concrete things to do or check today)
 
-Keep it to ~300 words. Direct, no fluff. Written for a solo founder checking their phone in the morning."""
+Keep it under 350 words. Direct, no fluff. Written for a solo founder checking their phone first thing in the morning. No section headers other than the four above."""
 
     summary_text = call_claude_haiku(text_prompt)
 
