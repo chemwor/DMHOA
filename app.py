@@ -1847,20 +1847,28 @@ Case info we have:
 
 What we DON'T have yet: the actual notice text, the specific rule cited, the precise deadline, or the HOA's exact wording. That's fine — DO NOT tell the user to "upload documents" or treat missing data like an error. Instead, write content that is genuinely useful from what we know, and at the END point them to the on-page "Want a sharper letter?" box where they can paste or upload their notice for clause-level specifics.
 
+CRITICAL FIRST STEP: Classify the user's stance from their description above:
+- "dispute" if they push back on the HOA's facts ("the shrub IS there", "I paid on time", "they're wrong", "this isn't fair", "I already")
+- "comply" if they agree they need to fix something ("I forgot", "what do I do", "how do I respond")
+- "unsure" if neutral facts only
+
+ALL downstream content (alleged_violation, critical_detail_locked) must be written for the chosen stance. Do NOT hedge with "if dispute do X, if comply do Y".
+
 Output ONLY valid JSON with this structure:
 {{
   "version": "preview_v3_lean",
+  "stance": "dispute|comply|unsure (one word, lowercase)",
   "headline": "string (8-14 words, conversational, specific to a {notice_type})",
   "why_now": "string (1-2 sentences. Talk like a person. Mention the typical response window for this type of notice if you can. No fluff, no urgency theater.)",
   "your_situation": {{
-    "alleged_violation": "Plain-language summary of what the user described. Use their words. Do NOT say 'Unknown HOA'. If state is set, mention it naturally.",
+    "alleged_violation": "Plain-language summary. If stance is 'dispute', this MUST capture both what the HOA alleges AND the user's counter from their description, format: 'The HOA says [their claim], but you say [user's counter].' Otherwise just describe the situation in their words. Do NOT say 'Unknown HOA'.",
     "hoa_demands": ["1-3 likely demands based on this notice type. Phrase as 'HOAs typically demand...' or 'Notices like this usually ask...' so it's clearly inference, not fabrication."],
     "deadline": "Common response window for this notice type (e.g., '14-30 days from the notice date for most violation notices'). Make clear the exact date is on their notice.",
     "rules_cited": ["1-2 likely rule categories given the issue (e.g., 'Architectural / property-maintenance covenants', 'Late-payment / collections clauses'). Don't fabricate specific clause numbers."]
   }},
   "critical_detail_locked": {{
     "title": "Recommended next step",
-    "body": "BEFORE writing anything, decide the user's stance from their description: '{issue_str}'. DISPUTE = user says the HOA is wrong about the facts (e.g., 'the shrub IS there', 'I paid on time', 'the rule doesn't apply'). COMPLY = user agrees they need to fix something. UNSURE = neutral facts only.\n\nKEY PRINCIPLE: The user CAN and SHOULD respond by email or certified mail — that's a formal written response. The warning is against INFORMAL communication: calling the manager, replying casually, in-person chats. Don't tell the user 'don't email' — they need to send their response letter via email or mail.\n\nIF DISPUTE: 2-4 imperative steps to preserve the dispute and gather evidence. Examples: 'Don't comply or pay the fine before sending your response — those actions admit the violation.' / 'Gather dated photos and receipts that establish your timeline.' / 'Send a formal written response (the response letter is built for this) by email or certified mail. Avoid calling the manager or replying casually.'\n\nIF COMPLY: 2-4 imperative steps for efficient remediation. Examples: 'Complete the required cure before the deadline.' / 'Take dated photos of the resolved issue.' / 'Submit your response in writing (email or certified mail), not by phone.'\n\nIF UNSURE: 2-3 steps that preserve options. Examples: 'Save the original notice with the envelope intact.' / 'Decide between disputing or complying before sending anything.' / 'Don't reply casually or call the manager — your formal written response is what protects you.'\n\nYou MAY mention 'the response letter' naturally where appropriate, since that's the formal written tool the user will send. DO NOT pitch the paid product with phrases like 'you'll get' or 'will be provided' or 'unlock for $29'. Use imperative voice."
+    "body": "Write 2-4 imperative steps for THE STANCE you set above. ABSOLUTELY DO NOT include 'if you dispute do X, if you comply do Y' content. Pick one path and commit.\n\nKEY PRINCIPLE: The user CAN and SHOULD respond by email or certified mail — that's formal. The warning is against INFORMAL communication (calling the manager, replying casually). Don't tell the user 'don't email' — they need to send their response letter via email or mail.\n\nIF STANCE = dispute: preserve the dispute, gather contradicting evidence, do NOT comply. Examples: 'Don't comply or pay the fine before sending your response — those actions admit the violation.' / 'Gather dated photos and receipts that establish your timeline.' / 'Send your formal written response (the response letter is built for this) by email or certified mail. Avoid calling the manager.'\n\nIF STANCE = comply: efficient remediation. Examples: 'Complete the required cure before the deadline.' / 'Take dated photos of the resolved issue.' / 'Submit your response in writing by email or certified mail.'\n\nIF STANCE = unsure: preserve options. Examples: 'Save the original notice with the envelope intact.' / 'Decide between disputing or complying before sending anything.' / 'Don't reply casually or call the manager.'\n\nYou MAY reference 'the response letter' naturally. DO NOT pitch the paid product with phrases like 'you'll get' or 'will be provided' or 'unlock for $29'. Use imperative voice."
   }},
   "risk_if_wrong": [
     "3 specific risks of getting the response wrong for THIS notice type. Concrete consequences (e.g., for a violation notice: 'Admit fault by responding informally and lose leverage to dispute later')."
@@ -2660,20 +2668,28 @@ Case Details:
 PASTED TEXT FROM HOA NOTICE:
 {clipped_text}
 
+CRITICAL FIRST STEP: Before producing any output, classify the user's stance from the Case Description above:
+- "dispute" if the user pushes back on the HOA's facts (examples: "the shrub IS there", "I paid on time", "they cited the wrong thing", "I already did X", "this isn't fair", "they're wrong")
+- "comply" if the user agrees they need to fix something (examples: "I forgot", "I need help responding", "what do I do", "how do I fix this")
+- "unsure" if the description is neutral facts only with no clear stance
+
+Once you pick a stance, ALL downstream content (alleged_violation, critical_detail_locked, risk_if_wrong) must be written FOR THAT STANCE ONLY. Do NOT hedge or include "if dispute do X, if comply do Y" content.
+
 Output ONLY valid JSON with this exact structure:
 {{
   "version": "preview_v2_sales",
+  "stance": "dispute|comply|unsure (one word, lowercase)",
   "headline": "string (8-14 words, specific to this case. If a deadline is present, headline must include it as 'X-Day Deadline' or the exact date)",
   "why_now": "string (1-2 sentences, tie urgency to the required action and any deadline found in the pasted text)",
   "your_situation": {{
-    "alleged_violation": "string (extracted from pasted text)",
+    "alleged_violation": "string. If stance is 'dispute', this MUST capture both what the HOA alleges AND the user's counter-claim from their description. Format: 'The HOA says [their claim], but you say [user's counter from Case Description].' If stance is 'comply' or 'unsure', just describe what the HOA alleges in plain language.",
     "hoa_demands": ["string", "string", "..."],
     "deadline": "string (use exact date if present in pasted text; else 'Not stated')",
     "rules_cited": ["string (each entry must be either 'Paragraph <...>' / 'Section <...>' / 'Article <...>' if present in pasted text, otherwise 'Not stated')", "..."]
   }},
   "critical_detail_locked": {{
     "title": "Recommended next step",
-    "body": "BEFORE writing anything, decide the user's stance based on 'Case Description'. DISPUTE = user says the HOA is wrong about the facts (e.g., 'the shrub IS there', 'I already paid', 'the rule doesn't apply'). COMPLY = user agrees they need to fix something. UNSURE = neutral facts only.\n\nKEY PRINCIPLE: The user CAN and SHOULD respond via email or certified mail — that's a formal written response. The warning is against INFORMAL communication: calling the manager, replying casually, having an in-person conversation. Don't tell the user 'don't email' — they need to send their response letter by email or mail.\n\nIF DISPUTE: 2-4 imperative steps focused on preserving the dispute and gathering evidence. Examples: 'Don't replace the shrub or pay the fine before sending your response — those actions admit the violation.' / 'Find dated photos from before [inspection date from notice] that show the shrub was there.' / 'Locate your purchase receipt and any planting records to establish the timeline.' / 'Send a formal written response (the response letter is built for exactly this) by email or certified mail. Avoid calling the manager or replying casually.'\n\nIF COMPLY: 2-4 imperative steps for efficient remediation. Examples: 'Complete [the cure described in the notice] before [deadline].' / 'Take dated photos of the resolved issue.' / 'Submit the response letter and photos to [contact from notice] by email or certified mail.'\n\nIF UNSURE: 2-3 steps that preserve options. Examples: 'Save the original notice with the envelope intact.' / 'Decide between disputing the facts or complying before sending anything.' / 'Don't reply casually or call the manager — your formal written response (email or mail) is what protects you.'\n\nYou MAY mention 'the response letter' naturally where appropriate, since it's the formal written tool the user will send. DO NOT pitch the paid product directly with phrases like 'you'll get' or 'will be provided' or 'unlock for $29'. Use imperative voice. Pull specifics (dates, names, contact info) from the pasted notice when possible."
+    "body": "Write 2-4 imperative steps for THE STANCE you set above. ABSOLUTELY DO NOT include 'if you dispute do X, if you comply do Y' content. Pick one path based on stance and commit. Pull specifics (dates, names, addresses) from the pasted notice.\n\nKEY PRINCIPLE: The user CAN and SHOULD respond by email or certified mail — that's a formal written response. The warning is against INFORMAL communication: calling the manager, replying casually, in-person chats. Don't tell the user 'don't email' — they need to send their response letter via email or mail.\n\nIF STANCE = dispute: preserve the dispute, gather contradicting evidence, do NOT comply. Examples: 'Don't replace the shrub or pay the fine before sending your response — both actions admit the violation.' / 'Find dated photos from before April 10 that show the shrub was there.' / 'Locate your purchase receipt and any planting records to establish the timeline.' / 'Send your formal written response — the response letter is built for this — to arc@cypressridge-hoa.com by email or by certified mail. Don't call Maria Sanchez or reply casually.'\n\nIF STANCE = comply: efficient remediation. Examples: 'Replace the missing shrub with an approved species before April 29.' / 'Take dated photos of the replacement.' / 'Submit your response letter and photos to arc@cypressridge-hoa.com by email or certified mail before April 29.'\n\nIF STANCE = unsure: preserve options. Examples: 'Save the original notice with the envelope intact.' / 'Decide between disputing the facts or complying before sending anything.' / 'Don't reply casually or call the manager — your formal written response (email or mail) is what protects you.'\n\nYou MAY reference 'the response letter' naturally, since it's the formal tool the user will send. DO NOT pitch the paid product with phrases like 'you'll get' or 'will be provided' or 'unlock for $29'. Use imperative voice."
   }},
   "risk_if_wrong": [
     "string (specific consequence based on pasted text)",
