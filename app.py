@@ -3021,10 +3021,18 @@ def get_case_preview(case_id):
             }), 202  # 202 Accepted indicates processing
 
         if not preview_data:
+            # The AI preview is being generated in the background by
+            # auto_generate_case_preview (kicked off in save_case). Return
+            # 202 so the page polls instead of erroring out. The page's
+            # existing 202-handler shows a "preparing your case" screen
+            # and retries every few seconds until the preview is ready.
             return jsonify({
-                'error': 'No active preview found for this case',
-                'case_id': case_id
-            }), 404
+                'status': 'waiting',
+                'message': 'Your preview is being prepared. This usually takes 10-30 seconds.',
+                'case_id': case_id,
+                'doc_status': 'generating',
+                'estimated_time_remaining': '30 seconds'
+            }), 202
 
         # Extract the structured data for frontend
         preview_content = preview_data.get('preview_content', {})
