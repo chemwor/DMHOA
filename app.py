@@ -1824,63 +1824,64 @@ def generate_preview_without_documents(case_data: Dict) -> Tuple[str, Dict, int,
             except:
                 payload = {}
 
-        hoa_name = payload.get('hoaName', payload.get('hoa_name', 'Unknown HOA'))
-        violation_type = payload.get('violationType', payload.get('noticeType', 'Unknown violation'))
-        case_description = payload.get('caseDescription', payload.get('case_description', 'No description provided'))
-        property_address = payload.get('propertyAddress', payload.get('property_address', ''))
-        owner_name = payload.get('ownerName', payload.get('owner_name', ''))
+        # Pull fields the wizard actually sends. Fall back gracefully —
+        # the user reached this page WITHOUT pasting their notice text or
+        # uploading docs. We have to give them real value from the lean
+        # input and direct them to the in-page paste/upload card if they
+        # want sharper specifics.
+        notice_type = payload.get('noticeType', payload.get('violationType', 'HOA notice'))
+        issue_text = (payload.get('issueText') or payload.get('caseDescription') or '').strip()
+        state_code = (payload.get('state') or '').strip()
+        property_type = payload.get('propertyType', '')
 
-        # NEW: Updated prompt for no documents case - improved hard_stop and critical_detail_locked
-        user_prompt = f"""Create a conversion-optimized preview for this HOA dispute case. No documents have been uploaded yet, but you must still create a persuasive preview. Output ONLY valid JSON.
+        state_str = state_code if state_code else 'unspecified'
+        issue_str = issue_text if issue_text else '(no detail provided)'
 
-Case Details:
-- HOA: {hoa_name}
-- Violation Type: {violation_type}
-- Property Address: {property_address}
-- Owner: {owner_name}
-- Case Description: {case_description}
-- Document Status: No documents uploaded yet
+        user_prompt = f"""You are writing a free preview page for a homeowner who just told us about an HOA dispute. They have NOT pasted the notice text or uploaded a document yet. Your job is to give a useful preview from the limited info we have, and frame the unlock product ($29 response letter) as the next step. Output ONLY valid JSON.
 
-Output ONLY valid JSON with this exact structure:
+Case info we have:
+- Notice type: {notice_type}
+- User's description: {issue_str}
+- State: {state_str}
+- Property type: {property_type if property_type else 'unspecified'}
+
+What we DON'T have yet: the actual notice text, the specific rule cited, the precise deadline, or the HOA's exact wording. That's fine — DO NOT tell the user to "upload documents" or treat missing data like an error. Instead, write content that is genuinely useful from what we know, and at the END point them to the on-page "Want a sharper letter?" box where they can paste or upload their notice for clause-level specifics.
+
+Output ONLY valid JSON with this structure:
 {{
-  "version": "preview_v2_sales",
-  "headline": "string (8-14 words, specific to this {violation_type} case)",
-  "why_now": "string (1-2 sentences, create urgency about acting before it's too late)",
+  "version": "preview_v3_lean",
+  "headline": "string (8-14 words, conversational, specific to a {notice_type})",
+  "why_now": "string (1-2 sentences. Talk like a person. Mention the typical response window for this type of notice if you can. No fluff, no urgency theater.)",
   "your_situation": {{
-    "alleged_violation": "{violation_type} by {hoa_name}",
-    "hoa_demands": ["Upload documents to see specific demands"],
-    "deadline": "Unknown - upload documents to identify deadlines",
-    "rules_cited": ["Upload documents to see specific rules cited"]
+    "alleged_violation": "Plain-language summary of what the user described. Use their words. Do NOT say 'Unknown HOA'. If state is set, mention it naturally.",
+    "hoa_demands": ["1-3 likely demands based on this notice type. Phrase as 'HOAs typically demand...' or 'Notices like this usually ask...' so it's clearly inference, not fabrication."],
+    "deadline": "Common response window for this notice type (e.g., '14-30 days from the notice date for most violation notices'). Make clear the exact date is on their notice.",
+    "rules_cited": ["1-2 likely rule categories given the issue (e.g., 'Architectural / property-maintenance covenants', 'Late-payment / collections clauses'). Don't fabricate specific clause numbers."]
   }},
   "critical_detail_locked": {{
-    "title": "Critical Response Wording (Locked)",
-    "body": "Exact rule language, deadline extraction, proof checklist, and extension request template will be extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
+    "title": "What the response letter will include",
+    "body": "1-2 sentences. Describe what the unlocked $29 letter will deliver: the specific wording for the response, citations to applicable {state_str} HOA law, a proof checklist, and the extension-request language if needed. Sounds like value waiting, not a paywall complaint."
   }},
   "risk_if_wrong": [
-    "Missing critical response deadlines that could escalate penalties",
-    "Accepting invalid HOA demands without proper challenge",
-    "Paying unnecessary fines or agreeing to unreasonable compliance"
+    "3 specific risks of getting the response wrong for THIS notice type. Concrete consequences (e.g., for a violation notice: 'Admit fault by responding informally and lose leverage to dispute later')."
   ],
   "what_you_get_when_you_unlock": [
-    "Professional response letter template for {violation_type} cases",
-    "Certified mail template with proper legal language",
-    "Evidence checklist for {violation_type} violations",
-    "Extension request strategies if deadlines are tight",
-    "Complete analysis once you upload your HOA documents"
+    "5 bullet items describing what the $29 unlock delivers. Concrete and tangible (Request Clarification letter / Request Extension letter / Confirm Compliance letter / Evidence checklist / Certified-mail template). Mention {state_str} statutes if state is set."
   ],
-  "hard_stop": "Upload your HOA notice and we'll analyze exact rule language, deadline extraction, proof checklist, and extension request template. You'll get these specific locked items needed for your response.",
+  "hard_stop": "1-2 sentences pointing to the in-page 'Want a sharper letter?' card: 'Pasting or uploading your notice on this page makes the unlock letter quote your exact rule and dates. You can also do this after unlocking.' Do NOT say 'upload documents' as a separate step.",
   "cta": {{
-    "primary": "Unlock full response package",
-    "secondary": "Upload documents for complete analysis"
+    "primary": "Unlock for $29",
+    "secondary": "Paste your notice for sharper details"
   }}
 }}
 
-RULES:
-- Use "you" voice throughout
-- Be specific about {violation_type} violations
-- Create urgency around not delaying action
-- Make it clear uploading documents unlocks much more value
-- For critical_detail_locked, emphasize that exact response phrasing comes after document analysis"""
+VOICE RULES:
+- "you" / "your" throughout
+- Talk like a person who knows HOAs, not a marketing chatbot
+- No em-dashes
+- No "100% free" / "EVERYTHING" caps / hedge stacks like "specific personalized exact"
+- Avoid the word "documents" — use "notice" instead
+- If state is unspecified, don't make up a state; just use general phrasing"""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
