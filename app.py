@@ -2499,6 +2499,24 @@ def save_case():
         extraction_thread.start()
 
         case_id = result[0].get('id') if result and len(result) > 0 else None
+
+        # Kick off AI preview generation in the background. Skip if we
+        # already kicked one off via the pasted-text path inside
+        # trigger_document_extraction_async — auto_generate_case_preview
+        # short-circuits when an active preview lock is held.
+        # This lets the wizard redirect users straight to /case-preview;
+        # /case-preview will poll until the preview is ready.
+        if case_id:
+            def kick_preview():
+                time.sleep(2)
+                try:
+                    auto_generate_case_preview(token, case_id, force_regenerate=False)
+                except Exception as e:
+                    logger.warning(f"Background preview generation failed for {token[:12]}...: {e}")
+            preview_thread = threading.Thread(target=kick_preview)
+            preview_thread.daemon = True
+            preview_thread.start()
+
         response = jsonify({'success': True, 'case_id': case_id})
         return add_cors_headers(response), 200
 
