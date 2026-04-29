@@ -6,16 +6,14 @@ typed it in Gmail.
 
 
 def quick_preview_confirmation(preview_link: str = '') -> tuple:
-    subject = 'Your HOA Preview Is Ready'
+    subject = 'Your HOA case preview'
     body = (
         "Hey,\n"
         "\n"
-        "Saw your HOA notice come through. I pulled up a quick preview based on what you submitted.\n"
-        "\n"
-        "If you want the full breakdown (the actual response letter, the statutes, the deadline, all of it), the next step is the full preview.\n"
+        "Got your case. The preview is loading on the page right now, but here's a link in case you need to come back later:\n"
         + (f"\n{preview_link}\n" if preview_link else "")
         + "\n"
-        "Reply to this email if you have any questions about your case. I read these myself.\n"
+        "If anything looks off or you want to talk through your situation, just reply to this email. I read every reply myself.\n"
         "\n"
         "Eric\n"
         "Dispute My HOA"
