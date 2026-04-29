@@ -89,7 +89,7 @@ def _fetch_funnel_row(email: str) -> Optional[dict]:
     return None
 
 
-def _upsert_funnel_row(email: str, stage: str) -> None:
+def _upsert_funnel_row(email: str, stage: str, link: str = '') -> None:
     """Insert or update the funnel row for this email at this stage.
 
     The advancement check has already been performed by the caller.
@@ -184,8 +184,9 @@ def log_funnel_stage(email: str, stage: str, link: str = '') -> bool:
             # Already at this stage or further. No-op.
             return False
 
-    # Advancement: upsert the row
-    _upsert_funnel_row(email, stage)
+    # Advancement: upsert the row (pass link so case_link is persisted
+    # for use in later nudge emails).
+    _upsert_funnel_row(email, stage, link)
 
     # Fire the immediate email and sync Klaviyo in background threads so we
     # don't block the calling request handler.
