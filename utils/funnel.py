@@ -39,14 +39,18 @@ STAGE_ORDER = {
 
 VALID_STAGES = set(STAGE_ORDER.keys())
 
-# Internal/test emails that should never enter the funnel.
-# These are the same domains that have admin dashboard access.
+# Domains we send FROM — these would create self-loops if they entered
+# the funnel (e.g., Resend bounce addresses, our own support@). Personal
+# tester emails (chemworeric@, *@astrodigitallabs.com) are NOT excluded
+# here — they should flow through the funnel like real users so end-to-end
+# email tests work. Dashboard metrics filtering happens separately in
+# dashboard_routes.py via EXCLUDED_EMAILS.
 EXCLUDED_EMAILS = set()
-EXCLUDED_DOMAINS = {'disputemyhoa.com', 'astrodigitallabs.com'}
+EXCLUDED_DOMAINS = {'disputemyhoa.com', 'mail.disputemyhoa.com'}
 
 def _is_excluded_email(email: str) -> bool:
-    """Returns True if this email belongs to an internal user and should not
-    be tracked in the customer funnel."""
+    """Returns True if this email is one of OUR send-from addresses and
+    must not enter the customer funnel (would create reply loops)."""
     if not email:
         return True
     lower = email.lower().strip()
@@ -54,9 +58,6 @@ def _is_excluded_email(email: str) -> bool:
         return True
     domain = lower.split('@')[-1] if '@' in lower else ''
     if domain in EXCLUDED_DOMAINS:
-        return True
-    # Also exclude the founder's personal email
-    if lower == 'chemworeric@gmail.com':
         return True
     return False
 
