@@ -3082,6 +3082,32 @@ def get_case_preview(case_id):
             'risk_flags': preview_content.get('risk_flags', []),
         }
 
+        # Expose any previously-saved notice text so the frontend can show
+        # "saved earlier" state instead of an empty paste box on reload.
+        try:
+            _payload = case.get('payload') or {}
+            if isinstance(_payload, str):
+                try:
+                    _payload = json.loads(_payload)
+                except Exception:
+                    _payload = {}
+            saved_paste = _payload.get('pastedText')
+            if saved_paste:
+                frontend_response['saved_pasted_text'] = saved_paste
+            # If the user uploaded a doc, surface the count so the UI can
+            # show "you uploaded N notice(s)" status.
+            try:
+                _docs = fetch_any_documents_status_by_token(case.get('token'))
+                if _docs:
+                    frontend_response['saved_uploads'] = [
+                        {'filename': d.get('filename'), 'status': d.get('status')}
+                        for d in _docs
+                    ]
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         logger.info(f"Successfully retrieved preview for case {case_id}")
 
         # --- Email funnel: log full_preview_viewed (non-critical, fires once only) ---
