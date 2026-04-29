@@ -1633,8 +1633,8 @@ Output ONLY valid JSON with this exact structure:
     "rules_cited": ["string (each entry must be either 'Paragraph <...>' / 'Section <...>' / 'Article <...>' if present, otherwise 'Not stated'. Do NOT include vague narrative like 'previous notices' unless no citations exist; if included, compress to 'Prior notices (YYYY)')", "..."]
   }},
   "critical_detail_locked": {{
-    "title": "Critical Response Wording (Locked)",
-    "body": "The exact clause/paragraph language to cite, proof checklist (what the HOA will accept: report + video format), and extension request wording (preserves rights without admitting fault) are locked. Our analysis shows specific language about [evidence acceptance/rule interpretation/compliance deadlines] that could weaken your position if worded incorrectly. This critical phrasing is included in the unlock package."
+    "title": "Recommended next step",
+    "body": "2-4 short, actionable things the user should DO right now based on what their notice says (use specifics from the document analysis). Concrete and imperative. Examples: 'Save the original notice with the envelope intact — the postmark proves when you received it.' / 'Take dated photos showing the alleged issue is resolved.' / 'Don't reply informally to the property manager before sending a written response.' / 'Mark [specific date from notice] on your calendar as the response deadline.' DO NOT describe the paid product. Use imperative voice. This is the user's to-do list."
   }},
   "risk_if_wrong": [
     "string (specific consequence)",
@@ -1661,7 +1661,7 @@ RULES:
 - Be concrete and specific to this case
 - Include at least 5 concrete deliverables in what_you_get_when_you_unlock
 - Make hard_stop create genuine unfinished business with concrete locked items
-- For critical_detail_locked body, reference exact clause language, proof checklist, extension request wording
+- For critical_detail_locked body, give actionable steps the user should take RIGHT NOW (imperative voice). Don't describe the paid product. This is their to-do list.
 - Avoid 'admit liability' language unless phrased as 'without admitting fault' or 'without admitting liability'"""
         else:
             # NEW: Updated prompt for documents pending - improved hard_stop and critical_detail_locked
@@ -1688,8 +1688,8 @@ Output ONLY valid JSON with this exact structure:
     "rules_cited": ["Pending document analysis"]
   }},
   "critical_detail_locked": {{
-    "title": "Critical Response Wording (Locked)",
-    "body": "Exact rule language, deadline extraction, proof checklist, and extension request template are being extracted from your documents. The precise response phrasing that avoids admitting liability and preserves your rights will be available after processing. This includes the exact language needed for compliance responses and extension requests."
+    "title": "Recommended next step",
+    "body": "2-4 short, actionable things the user should DO right now while the documents are being analyzed. Use imperative voice. Examples: 'Save the original notice with the envelope intact.' / 'Note the date you received it.' / 'Don't email or call the HOA informally before deciding your response strategy.' DO NOT describe the paid product. This is the user's to-do list."
   }},
   "risk_if_wrong": [
     "Missing critical response deadlines",
@@ -1715,7 +1715,7 @@ RULES:
 - Be specific about what the unlock will provide once docs are ready
 - Make it clear docs are pending but tool is still valuable
 - Create urgency around not missing opportunities
-- For critical_detail_locked, emphasize that exact response phrasing comes after document analysis"""
+- For critical_detail_locked body, give actionable steps the user should take RIGHT NOW while documents process. Imperative voice. Don't describe the paid product."""
 
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
@@ -1859,8 +1859,8 @@ Output ONLY valid JSON with this structure:
     "rules_cited": ["1-2 likely rule categories given the issue (e.g., 'Architectural / property-maintenance covenants', 'Late-payment / collections clauses'). Don't fabricate specific clause numbers."]
   }},
   "critical_detail_locked": {{
-    "title": "What the response letter will include",
-    "body": "1-2 sentences. Describe what the unlocked $29 letter will deliver: the specific wording for the response, citations to applicable {state_str} HOA law, a proof checklist, and the extension-request language if needed. Sounds like value waiting, not a paywall complaint."
+    "title": "Recommended next step",
+    "body": "2-4 short, actionable things the user should DO right now based on their {notice_type} and what they described. Concrete and specific. Examples: 'Document when you fixed the issue with dated photos and receipts.' / 'Save the original notice with the envelope intact — the postmark is proof of when you received it.' / 'Don't email or call the HOA informally before deciding your response strategy.' / 'Decide between requesting clarification or requesting an extension before any deadline communication.' DO NOT describe the paid $29 product here. DO NOT say 'will be provided' or 'we'll show you'. Use imperative voice ('Document...', 'Save...', 'Don't...'). This is the user's to-do list, not a sales pitch."
   }},
   "risk_if_wrong": [
     "3 specific risks of getting the response wrong for THIS notice type. Concrete consequences (e.g., for a violation notice: 'Admit fault by responding informally and lose leverage to dispute later')."
@@ -2665,8 +2665,8 @@ Output ONLY valid JSON with this exact structure:
     "rules_cited": ["string (each entry must be either 'Paragraph <...>' / 'Section <...>' / 'Article <...>' if present in pasted text, otherwise 'Not stated')", "..."]
   }},
   "critical_detail_locked": {{
-    "title": "Critical Response Wording (Locked)",
-    "body": "The exact clause/paragraph language to cite, proof checklist (what the HOA will accept), and extension request wording (preserves rights without admitting fault) are locked. Our analysis shows specific language that could weaken your position if worded incorrectly. This critical phrasing is included in the unlock package."
+    "title": "Recommended next step",
+    "body": "2-4 short, actionable things the user should DO right now based on what their pasted notice says. Pull specifics from the pasted text: cite the exact deadline date, the alleged violation, and the cure required. Use imperative voice. Examples: 'Save the original notice with the envelope intact. The postmark proves when you received it.' / 'By [exact deadline from notice], gather dated photos showing the alleged issue is resolved.' / 'Don't reply informally to [property manager name from notice] before sending a written response.' DO NOT describe the paid product. This is the user's to-do list."
   }},
   "risk_if_wrong": [
     "string (specific consequence based on pasted text)",
@@ -2693,7 +2693,7 @@ RULES:
 - Be concrete and specific to this case
 - Include at least 5 concrete deliverables in what_you_get_when_you_unlock
 - Make hard_stop create genuine unfinished business with concrete locked items
-- For critical_detail_locked body, reference exact clause language, proof checklist, extension request wording
+- For critical_detail_locked body, give actionable steps the user should take RIGHT NOW (imperative voice). Don't describe the paid product. This is their to-do list.
 - Avoid 'admit liability' language unless phrased as 'without admitting fault' or 'without admitting liability'"""
 
         headers = {
