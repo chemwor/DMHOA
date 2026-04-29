@@ -2402,7 +2402,12 @@ def save_case():
         # --- Email funnel: log quick_preview_complete (non-critical) ---
         try:
             funnel_email = payload.get('email')
-            funnel_link = payload.get('fullCaseFormLink', '')
+            # Always link the user back to the AI preview page. The wizard
+            # historically sent fullCaseFormLink pointing at /start-case-full
+            # (the legacy expanded-form page) — that's not where new users
+            # go after the redesign, so we build the right URL from the
+            # token here regardless of what the client sent.
+            funnel_link = f"https://disputemyhoa.com/case-preview.html?case={token}"
             if funnel_email:
                 log_funnel_stage(funnel_email, 'quick_preview_complete', funnel_link)
                 # Server-side PostHog event for funnel analytics
@@ -2427,7 +2432,9 @@ def save_case():
             if email_for_klaviyo:
                 target_list_id = determine_klaviyo_abandonment_list(payload)
                 case_token_for_klaviyo = token
-                form_link = payload.get('fullCaseFormLink')
+                # Use the new case-preview URL for Klaviyo properties too,
+                # not the legacy /start-case-full link the wizard sends.
+                form_link = f"https://disputemyhoa.com/case-preview.html?case={token}"
                 logger.info(f"Klaviyo target list: {target_list_id}, form_link: {form_link[:50] if form_link else 'None'}...")
 
                 if target_list_id:
