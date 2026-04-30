@@ -6536,7 +6536,7 @@ def _start_scheduler():
         scheduler.add_job(
             _scheduled_alert_scan,
             'interval',
-            hours=1,
+            hours=6,
             id='hourly_alert_scan',
             replace_existing=True,
         )
@@ -6571,7 +6571,7 @@ def _start_scheduler():
             replace_existing=True,
         )
         scheduler.start()
-        logger.info("APScheduler started — alert scan hourly, ad analyzer daily, email nudges every 30 min, news scan every 6 hours, daily digest 6am ET")
+        logger.info("APScheduler started — alert scan every 6h, ad analyzer daily, email nudges every 30 min, news scan every 6 hours, daily digest 6am ET")
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
 

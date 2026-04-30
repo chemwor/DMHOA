@@ -5537,9 +5537,11 @@ def _execute_alert_scan():
     pending_email_alerts = []
 
     def create_alert_if_new(alert_type, severity, title, message, data=None):
-        """Only create an alert if no duplicate unacknowledged alert exists within the last 2 hours."""
+        """Only create an alert if no duplicate unacknowledged alert exists within the last scan window."""
         try:
-            two_hours_ago = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+            # Dedupe window matches scheduler cadence so an unresolved
+            # finding doesn't re-email each scan.
+            window_start = (datetime.utcnow() - timedelta(hours=6)).isoformat()
 
             existing_response = requests.get(
                 f"{SUPABASE_URL}/rest/v1/dmhoa_alerts",
@@ -5547,7 +5549,7 @@ def _execute_alert_scan():
                     'alert_type': f'eq.{alert_type}',
                     'title': f'eq.{title}',
                     'acknowledged': 'eq.false',
-                    'created_at': f'gte.{two_hours_ago}',
+                    'created_at': f'gte.{window_start}',
                     'select': 'id',
                     'limit': '1',
                 },
