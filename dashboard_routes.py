@@ -5171,33 +5171,55 @@ Document:
 # ============================================================================
 
 def send_alert_email(title, message):
-    """Send a critical alert email to the admin."""
+    """Send a single-alert email. Kept for callers outside the scan loop."""
+    send_alerts_digest_email([{'title': title, 'message': message}])
+
+
+def send_alerts_digest_email(alerts):
+    """Send ONE roll-up email covering every new alert from a scan.
+
+    `alerts` is a list of dicts each with at least 'title' and 'message'.
+    Replaces the previous per-alert email firehose so the user gets a
+    single message per scan instead of one per finding.
+    """
     try:
+        if not alerts:
+            return
         if not ADMIN_EMAIL:
             logger.warning('ADMIN_EMAIL not set, skipping alert email')
             return
-
         if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
             logger.warning('SMTP not configured, skipping alert email')
             return
 
+        n = len(alerts)
+        if n == 1:
+            subject = f"DMHOA alert: {alerts[0].get('title','(no title)')[:80]}"
+        else:
+            subject = f"DMHOA alerts ({n} new)"
+
+        lines = [
+            'DMHOA Dashboard Alerts',
+            '======================',
+            f'Time: {datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}',
+            f'Total new alerts: {n}',
+            '',
+        ]
+        for i, a in enumerate(alerts, 1):
+            t = a.get('title', '(no title)')
+            m = a.get('message', '')
+            sev = (a.get('severity') or 'critical').upper()
+            lines.append(f'--- {i}. [{sev}] {t} ---')
+            lines.append(m)
+            lines.append('')
+        lines.append('---')
+        lines.append('View all alerts in your dashboard.')
+        body = '\n'.join(lines)
+
         msg = MIMEMultipart()
         msg['From'] = SMTP_FROM
         msg['To'] = ADMIN_EMAIL
-        msg['Subject'] = f'DMHOA Alert: {title}'
-
-        body = f"""DMHOA Dashboard Alert
-=====================
-Severity: CRITICAL
-Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
-
-{title}
-
-{message}
-
----
-View all alerts in your dashboard."""
-
+        msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain'))
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
@@ -5207,9 +5229,9 @@ View all alerts in your dashboard."""
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [ADMIN_EMAIL], msg.as_string())
 
-        logger.info(f'Alert email sent to {ADMIN_EMAIL}: {title}')
+        logger.info(f'Alerts digest email sent to {ADMIN_EMAIL}: {n} alerts')
     except Exception as e:
-        logger.error(f'Failed to send alert email: {str(e)}')
+        logger.error(f'Failed to send alerts digest email: {str(e)}')
 
 
 def _fetch_google_ads_metrics(period: str = 'today') -> Optional[Dict]:
@@ -5510,6 +5532,9 @@ def _execute_alert_scan():
         return {'error': 'Supabase not configured', 'alerts_created': 0}
 
     alerts_created = []
+    # Critical alerts that should be emailed; flushed as ONE digest at the
+    # end of the scan instead of one email per alert.
+    pending_email_alerts = []
 
     def create_alert_if_new(alert_type, severity, title, message, data=None):
         """Only create an alert if no duplicate unacknowledged alert exists within the last 2 hours."""
@@ -5553,8 +5578,14 @@ def _execute_alert_scan():
                 created = result[0] if isinstance(result, list) and result else result
                 alerts_created.append(created)
 
+                # Queue critical alerts for the end-of-scan digest email
+                # instead of firing one email per alert.
                 if severity == 'critical':
-                    send_alert_email(title, message)
+                    pending_email_alerts.append({
+                        'title': title,
+                        'message': message,
+                        'severity': severity,
+                    })
 
                 return created
             else:
@@ -5911,6 +5942,14 @@ def _execute_alert_scan():
                 logger.warning(f'Supabase security check returned {sb_resp.status_code}: {sb_resp.text[:200]}')
     except Exception as e:
         logger.error(f'Alert scan - Supabase security check failed: {str(e)}')
+
+    # Flush queued critical alerts as a single digest email so the user
+    # gets one message per scan even if multiple checks failed at once.
+    if pending_email_alerts:
+        try:
+            send_alerts_digest_email(pending_email_alerts)
+        except Exception as e:
+            logger.error(f'Failed to flush alerts digest: {e}')
 
     return {
         'scan_completed': True,
