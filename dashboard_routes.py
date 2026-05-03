@@ -3265,6 +3265,21 @@ Write an 800-1200 word blog post. Respond with this JSON:
                     'published_at': datetime.now().isoformat(),
                 }
 
+                # Fetch a relevant Unsplash photo for the post hero.
+                # Best-effort — if it fails the post still publishes without
+                # an image and the existing renderer handles that case.
+                try:
+                    from utils.blog_images import fetch_blog_image
+                    img_query = blog_data.get('image_search_query') or idea.get('title')
+                    image_result = fetch_blog_image(img_query)
+                    if image_result:
+                        url, alt, credit = image_result
+                        insert_data['image_url'] = url
+                        insert_data['image_alt'] = alt
+                        insert_data['image_credit'] = credit
+                except Exception as e:
+                    logger.warning(f'Blog image fetch failed (non-critical): {e}')
+
                 blog_response = requests.post(
                     f"{SUPABASE_URL}/rest/v1/blog_posts",
                     headers={**supabase_headers(), 'Prefer': 'return=representation'},
@@ -3287,6 +3302,88 @@ Write an 800-1200 word blog post. Respond with this JSON:
                 )
 
                 return jsonify({'blog': blog, 'message': 'Blog generated and published!'}), 201
+
+            elif action == 'generate-from-keyword':
+                # Generate a SEO-targeted blog post directly from a search
+                # keyword (e.g., "hoa appeal letter sample"). Used to create
+                # organic content for high-volume search terms we currently
+                # pay for via Google Ads.
+                keyword = (data.get('keyword') or '').strip()
+                if not keyword:
+                    return jsonify({'error': 'Missing keyword'}), 400
+                if not ANTHROPIC_API_KEY:
+                    return jsonify({'error': 'Anthropic API key not configured'}), 500
+
+                system_prompt = (
+                    'You are an expert SEO content writer for DisputeMyHOA, a self-help platform that '
+                    'drafts professional response letters to HOA violation notices. Write helpful, '
+                    'authoritative, conversational content for homeowners. Talk like a person who '
+                    'knows HOAs. No em-dashes. No marketing fluff. Respond with valid JSON only.'
+                )
+                prompt = (
+                    f'Write a comprehensive blog post optimized to rank for the search keyword: "{keyword}"\n\n'
+                    f'Goals:\n'
+                    f'- Title naturally includes the keyword (or close variant) and reads as helpful, not salesy\n'
+                    f'- 1200-1800 words, markdown formatted with H2/H3 headings\n'
+                    f'- Practical, specific advice. Cover what the searcher actually wants to know.\n'
+                    f'- Include 2-3 internal links to /start-case (free preview) and /appeal-hoa-fine where contextually relevant. Format as markdown links.\n'
+                    f'- End with a brief soft CTA to start a free preview\n'
+                    f'- No legal advice claims; we are a self-help educational tool, not a law firm\n'
+                    f'- Voice: conversational, second-person, no marketing tropes, no em-dashes, no "100% free"\n\n'
+                    f'Respond with this JSON:\n'
+                    f'{{"title": "...", "content": "Full markdown post", "excerpt": "150-200 char summary", '
+                    f'"seo_title": "SEO title (max 60 chars)", "seo_description": "Meta description (150-160 chars)", '
+                    f'"seo_keywords": ["keyword1", "keyword2", "..."], '
+                    f'"image_search_query": "2-4 word query for stock photo, e.g. \'house front yard\' or \'mailbox letter\'"}}'
+                )
+
+                response_text = call_claude_api(prompt, system_prompt, 4096)
+                cleaned = response_text.replace('```json', '').replace('```', '').strip()
+                blog_data = json.loads(cleaned)
+
+                slug = generate_slug(blog_data['title'])
+                read_time = estimate_read_time(blog_data.get('content', ''))
+
+                insert_data = {
+                    'title': blog_data['title'],
+                    'slug': slug,
+                    'excerpt': blog_data.get('excerpt'),
+                    'content': blog_data.get('content'),
+                    'category': 'seo',
+                    'tags': blog_data.get('seo_keywords', []) + [keyword],
+                    'status': 'published',
+                    'seo_title': blog_data.get('seo_title'),
+                    'seo_description': blog_data.get('seo_description'),
+                    'seo_keywords': blog_data.get('seo_keywords', []),
+                    'source_article_ids': [],
+                    'read_time_minutes': read_time,
+                    'published_at': datetime.now().isoformat(),
+                }
+
+                # Image
+                try:
+                    from utils.blog_images import fetch_blog_image
+                    img_query = blog_data.get('image_search_query') or keyword
+                    image_result = fetch_blog_image(img_query)
+                    if image_result:
+                        url, alt, credit = image_result
+                        insert_data['image_url'] = url
+                        insert_data['image_alt'] = alt
+                        insert_data['image_credit'] = credit
+                except Exception as e:
+                    logger.warning(f'Blog image fetch failed (non-critical): {e}')
+
+                blog_response = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/blog_posts",
+                    headers={**supabase_headers(), 'Prefer': 'return=representation'},
+                    json=insert_data,
+                    timeout=TIMEOUT
+                )
+                if not blog_response.ok:
+                    raise Exception(f'Failed to save blog: {blog_response.text}')
+
+                blog = blog_response.json()[0]
+                return jsonify({'blog': blog, 'message': f'Blog generated for keyword "{keyword}"'}), 201
 
             return jsonify({'error': 'Invalid action'}), 400
 
